@@ -15,6 +15,7 @@ class DeepseekV2RingModel(BaseRingModel):
         model_config: Any,
         assigned_layers: Optional[List[int]] = None,
         is_api_layer: bool = False,
+        shard_config: Optional[Any] = None,
     ):
         super().__init__()
 
@@ -37,38 +38,6 @@ class DeepseekV2RingModel(BaseRingModel):
         for i, layer in enumerate(sorted(assigned_layers or [])):
             self.layers.append(DeepseekV2DecoderLayer(config, layer))
             self.abs_to_local[layer] = i
-
-    @staticmethod
-    def class_predicate(p, m):
-        return hasattr(m, "to_quantized")
-
-    def apply_quantization(self):
-        """Apply quantization after weights are loaded"""
-        # Skip if this is the API layer
-        if self.is_api_layer:
-            return
-
-        # Check if model is already quantized by checking if any Linear layers are QuantizedLinear
-        from mlx.nn.layers.quantized import QuantizedLinear
-
-        for layer in self.layers:
-            for module in layer.modules():
-                if isinstance(module, QuantizedLinear):
-                    # Model is already quantized, skip re-quantization
-                    return
-
-        # Only quantize if not already quantized and quantization config exists
-        if "quantization" in self.model_config:
-            quant_config = self.model_config["quantization"].copy()
-            # Adjust group_size to be compatible with model dimensions
-            # Use 64 as it divides most common dimensions
-            if "group_size" in quant_config and quant_config["group_size"] > 64:
-                quant_config["group_size"] = 64
-            nn.quantize(
-                self,
-                **quant_config,
-                class_predicate=DeepseekV2RingModel.class_predicate,
-            )
 
     def embed(self, x: mx.array) -> mx.array:
         return self.embed_tokens(x) if self.is_api_layer else x
@@ -162,5 +131,3 @@ class DeepseekV2RingModel(BaseRingModel):
         if shard_weights:
             super().load_weights(list(shard_weights.items()), strict=strict)
 
-        # Don't apply quantization for pre-quantized models
-        # Pre-quantized models already have QuantizedLinear layers from weight loading

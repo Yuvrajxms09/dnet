@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple
+import logging
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -21,6 +22,7 @@ class Qwen3RingModel(BaseRingModel):
         model_config: Any,
         assigned_layers: Optional[List[int]] = None,
         is_api_layer: bool = False,
+        shard_config: Optional[Any] = None,
     ):
         super().__init__()
 
@@ -31,13 +33,13 @@ class Qwen3RingModel(BaseRingModel):
         self.is_api_layer = is_api_layer
         self.config = config = ModelArgs.from_dict(model_config)
 
-        logger.info(
-            "Initializing Qwen3RingModel: is_api_layer=%s, assigned_layers=%s",
+        logger.debug(
+            "Qwen3 init: is_api_layer=%s, assigned_layers=%s",
             is_api_layer,
             assigned_layers,
         )
-        logger.info(
-            "Config: hidden_size=%d, num_heads=%d, num_kv_heads=%d",
+        logger.debug(
+            "Qwen3 config: hidden=%d heads=%d kv_heads=%d",
             config.hidden_size,
             config.num_attention_heads,
             config.num_key_value_heads,
@@ -55,8 +57,8 @@ class Qwen3RingModel(BaseRingModel):
                 self.embed_tokens = QuantizedEmbedding(
                     config.vocab_size, config.hidden_size, group_size=group, bits=bits
                 )
-                logger.info(
-                    "embed_tokens -> QuantizedEmbedding: vocab=%d hidden=%d group_size=%d bits=%d",
+                logger.debug(
+                    "embed_tokens QuantizedEmbedding: vocab=%d hidden=%d group_size=%d bits=%d",
                     config.vocab_size,
                     config.hidden_size,
                     group,
@@ -82,7 +84,7 @@ class Qwen3RingModel(BaseRingModel):
         self.is_quantized = "quantization" in model_config
         if self.is_quantized:
             self.quantization_config = model_config["quantization"]
-            logger.info("Model is quantized with config: %s", self.quantization_config)
+            logger.debug("Model is quantized with config: %s", self.quantization_config)
 
         # Create TransformerBlocks for assigned layers
         for i, layer in enumerate(sorted(assigned_layers or [])):
@@ -131,27 +133,18 @@ class Qwen3RingModel(BaseRingModel):
         # When enabled, we replace all per-layer params with tiny placeholders
         # at construction time; real arrays are bound only when weights are
         # loaded for the active window. On eviction, we shrink them again.
-        import os as _os
-
-        try:
-            self._lazy_params = _os.getenv("RING_LAZY_PARAMS", "0").strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        except Exception:
-            self._lazy_params = False
+        # Use ShardConfig instead of environment variables
+        self._lazy_params = bool(getattr(shard_config, "lazy_params", False))
         # Do not shrink params for quantized models; conversion relies on real shapes
         if self.is_quantized and self._lazy_params:
-            logger.info(
-                "Ignoring RING_LAZY_PARAMS for quantized model to preserve parameter shapes"
+            logger.debug(
+                "Ignoring lazy_params for quantized model to preserve parameter shapes"
             )
             self._lazy_params = False
         if (not self.is_api_layer) and self._lazy_params:
             try:
                 self._shrink_all_params()
-                logger.info(
+                logger.debug(
                     "Enabled lazy params: per-layer arrays are placeholders until bound by weights"
                 )
             except Exception as _e:
@@ -160,40 +153,7 @@ class Qwen3RingModel(BaseRingModel):
         # Compiled window cache: absolute-layer tuple -> compiled forward fn
         # not used yet
         self._compiled_windows: dict[tuple[int, ...], Any] = {}
-        # Runtime KVCache
-        self._runtime_cache: Optional[List[Any]] = None
-
-    def set_runtime_cache(self, cache: Optional[List[Any]]) -> None:
-        """Set the runtime KV cache reference for compiled decode windows."""
-        self._runtime_cache = cache
-
-    @staticmethod
-    def class_predicate(p, m):
-        return hasattr(m, "to_quantized")
-
-    def apply_quantization(self):
-        """Apply quantization after weights are loaded"""
-        # Skip if this is the API layer
-        if self.is_api_layer:
-            return
-
-        # Check if model is already quantized by checking if any Linear layers are QuantizedLinear
-        from mlx.nn.layers.quantized import QuantizedLinear
-
-        for layer in self.layers:
-            for module in layer.modules():
-                if isinstance(module, QuantizedLinear):
-                    # Model is already quantized, skip re-quantization
-                    return
-
-        # Only quantize if not already quantized and quantization config exists
-        if "quantization" in self.model_config:
-            quant_config = self.model_config["quantization"].copy()
-            nn.quantize(
-                self,
-                **quant_config,
-                class_predicate=Qwen3RingModel.class_predicate,
-            )
+        # Removed: set_runtime_cache, apply_quantization, class_predicate (unused)
 
     def _shrink_linear_like(self, mod):
         try:
@@ -353,7 +313,7 @@ class Qwen3RingModel(BaseRingModel):
 
     def load_weights(self, weights, strict=False):
         """Load weights into the model"""
-        logger.info("load_weights called with %s weights", len(weights))
+        logger.debug("load_weights called with %s weights", len(weights))
         logger.debug("First few weight keys: %s", [k for k, _ in weights[:5]])
         logger.debug("abs_to_local mapping: %s", self.abs_to_local)
 
@@ -387,21 +347,21 @@ class Qwen3RingModel(BaseRingModel):
             elif key.startswith("embed_tokens"):
                 shard_weights[key] = value
 
-                logger.info("API layer: loading %s, shape=%s", key, value.shape)
+                logger.debug("API layer: loading %s, shape=%s", key, value.shape)
             elif key.startswith("norm"):
                 shard_weights[key] = value
-                logger.info("API layer: loading %s, shape=%s", key, value.shape)
+                logger.debug("API layer: loading %s, shape=%s", key, value.shape)
 
             elif key.startswith("lm_head") and not self.config.tie_word_embeddings:
                 shard_weights[key] = value
-                logger.info("API layer: loading %s, shape=%s", key, value.shape)
+                logger.debug("API layer: loading %s, shape=%s", key, value.shape)
 
-        logger.info("Loading %d weights into model", len(shard_weights))
+        logger.debug("Loading %d weights into model", len(shard_weights))
 
         if shard_weights:
             # Log the first weight being loaded to check dimensions
             first_key = list(shard_weights.keys())[0]
-            logger.info(
+            logger.debug(
                 "First weight to load: %s with shape %s",
                 first_key,
                 shard_weights[first_key].shape,
@@ -409,18 +369,18 @@ class Qwen3RingModel(BaseRingModel):
 
             if "layers." in first_key:
                 layer_idx = first_key.split(".")[1]
-                logger.info("Loading into local layer %s", layer_idx)
-                logger.info("Number of layers in model: %d", len(self.layers))
+                logger.debug("Loading into local layer %s", layer_idx)
+                logger.debug("Number of layers in model: %d", len(self.layers))
                 if int(layer_idx) < len(self.layers):
                     layer = self.layers[int(layer_idx)]
                     # Log the current layer structure
                     if hasattr(layer, "self_attn"):
                         if hasattr(layer.self_attn, "q_proj"):
-                            logger.info(
+                            logger.debug(
                                 "Current q_proj type: %s", type(layer.self_attn.q_proj)
                             )
                             if hasattr(layer.self_attn.q_proj, "weight"):
-                                logger.info(
+                                logger.debug(
                                     "Current q_proj weight shape: %s",
                                     layer.self_attn.q_proj.weight.shape,
                                 )
@@ -428,10 +388,14 @@ class Qwen3RingModel(BaseRingModel):
         # Load the filtered weights using parent class method
         try:
             super().load_weights(list(shard_weights.items()), strict=strict)
-            logger.info("Successfully loaded weights")
+            logger.debug("Successfully loaded weights")
 
-            # Skip numeric stats for quantized modules; values are not meaningful
-            if (not self.is_quantized) and shard_weights and "layers." in first_key:
+            if (
+                logger.isEnabledFor(logging.DEBUG)
+                and (not self.is_quantized)
+                and shard_weights
+                and "layers." in first_key
+            ):
                 layer_idx = first_key.split(".")[1]
                 if int(layer_idx) < len(self.layers):
                     layer = self.layers[int(layer_idx)]
@@ -440,23 +404,14 @@ class Qwen3RingModel(BaseRingModel):
                     ):
                         if hasattr(layer.self_attn.q_proj, "weight"):
                             weight = layer.self_attn.q_proj.weight
-                            logger.info(
-                                "After loading - q_proj weight stats: shape=%s, mean=%.6f, std=%.6f",
+                            m = mx.mean(weight).item()
+                            s = mx.std(weight).item()
+                            logger.debug(
+                                "After load q_proj stats: shape=%s mean=%.6f std=%.6f",
                                 weight.shape,
-                                mx.mean(weight).item(),
-                                mx.std(weight).item(),
+                                m,
+                                s,
                             )
-                            if (
-                                mx.abs(mx.mean(weight)).item() < 1e-6
-                                and mx.std(weight).item() < 1e-6
-                            ):
-                                logger.warning(
-                                    "WARNING: q_proj weights appear to be all zeros!"
-                                )
-                            elif mx.std(weight).item() > 1.0:
-                                logger.warning(
-                                    "WARNING: q_proj weights have very high std dev, might be uninitialized!"
-                                )
         except Exception as e:
             logger.error("Failed to load weights: %s", e)
             logger.error("Weight keys: %s", list(shard_weights.keys()))

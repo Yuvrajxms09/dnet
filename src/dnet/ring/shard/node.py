@@ -26,7 +26,12 @@ from ..model.base import BaseRingModel
 from ...compression import decompress_tensor_from_protobuf_data
 from ...protos import dnet_ring_pb2
 from ...protos.shard_api_comm_pb2_grpc import ShardApiServiceStub
-from ...utils.model import make_cache, load_api_layer_weights
+from ...utils.model import (
+    make_cache,
+    load_embeddings,
+    load_final_norm,
+    load_lm_head,
+)
 from ...utils.logger import logger
 from ...utils.layer_manager import set_prefetch_mode
 from .config import ShardConfig
@@ -72,8 +77,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
         self.window_size = 0  # Set dynamically during load_model
         self._prefetch_threads = prefetch_threads
         self._device_prefetch_workers = device_prefetch_workers
-
-        self.role: Optional[str] = None
 
         # Model state (loaded dynamically)
         self.model_metadata: Optional[ModelMetadata] = None
@@ -245,13 +248,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             except Exception:
                 pass
 
-            self.role = (
-                "start"
-                if 0 in self.assigned_layers
-                else "end"
-                if (self.model_metadata.num_layers - 1) in self.assigned_layers
-                else "inter"
-            )
             # Initialize memory pools
             self.input_pool = LayerAwareMemoryPool(total_memory_mb=512)
             self.output_pool = LayerAwareMemoryPool(total_memory_mb=512)
@@ -296,6 +292,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 self.model_metadata.model_type,
                 self.model_metadata.model_config,
                 assigned_layers=self.assigned_layers,
+                shard_config=self.config,
             )
             self.model.eval()
             self.cache = make_cache(
@@ -306,12 +303,38 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             )
 
             try:
-                if self.role in {"start", "end"}:
-                    load_api_layer_weights(self.model_metadata, self.model)
-                    logger.info("Loaded API-layer weights on shard role=%s", self.role)
+                has_start = 0 in self.assigned_layers
+                has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers
+                tied = bool(
+                    getattr(getattr(self.model, "config", object()), "tie_word_embeddings", False)
+                )
+
+                loaded_cnt = 0
+                if has_start:
+                    loaded_cnt += load_embeddings(self.model_metadata, self.model)
+                if has_end:
+                    loaded_cnt += load_final_norm(self.model_metadata, self.model)
+                    if tied:
+                        # End shard needs embeddings for tied projection
+                        if not has_start:
+                            loaded_cnt += load_embeddings(self.model_metadata, self.model)
+                        try:
+                            setattr(self.model, "force_tied_head", True)
+                        except Exception:
+                            pass
+                    else:
+                        loaded_cnt += load_lm_head(self.model_metadata, self.model)
+                if loaded_cnt:
+                    logger.info(
+                        "Loaded %d API-layer tensors (start=%d end=%d tied=%d)",
+                        loaded_cnt,
+                        int(has_start),
+                        int(has_end),
+                        int(tied),
+                    )
             except Exception as e:
                 logger.warning(
-                    "Failed to load API-layer weights on role=%s: %s", self.role, e
+                    "Failed to load API-layer weights: %s",  e
                 )
 
             # Reset prefetch tracking
@@ -322,16 +345,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             self.next_node = req.next_node
             self.total_layers = req.total_layers
             self.api_callback_address = req.api_callback_address
-            try:
-                logger.info(
-                    "[DIAG][LOAD] node=%s next_node=%s total_layers=%s api_cb=%s",
-                    self.node_id,
-                    getattr(self.next_node, "instance", None) or "None",
-                    self.total_layers,
-                    self.api_callback_address or "None",
-                )
-            except Exception:
-                pass
 
             if self.next_node:
                 await self._connect_next_node()

@@ -239,40 +239,61 @@ def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array
         return mx.array(np_data).reshape(wt.shape)
 
 
-def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
-    """Load API-layer weights (embed, norm, and head).
+def load_embeddings(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
+    """Load only embedding weights into the model.
 
-    - Always load embed_tokens and norm.
-    - For lm_head:
-        - If quantized params present (e.g., lm_head.scales), load all lm_head.* keys
-          and model will convert lm_head to QuantizedLinear before assignment.
-        - Else, if dense weight present and matches expected shape (in,out) or transposed,
-          load it; otherwise, skip and allow tied embedding projection as a fallback.
+    Returns the number of tensors loaded.
     """
     weights: Dict[str, mx.array] = {}
     mapped_files: Dict[str, MappedFile] = {}
-
     try:
-        # Always load embeddings and norm
         for k, wt in model_metadata.embed_tokens.items():
             weights[get_model_embed_tokens_name(k)] = load_weight(wt, mapped_files)
+        if weights:
+            model.load_weights(list(weights.items()), strict=False)
+        return len(weights)
+    finally:
+        for mapped_file in mapped_files.values():
+            mapped_file.mmap.close()
+            mapped_file.file.close()
+
+
+def load_final_norm(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
+    """Load only the final normalization weights into the model."""
+    weights: Dict[str, mx.array] = {}
+    mapped_files: Dict[str, MappedFile] = {}
+    try:
         for k, wt in model_metadata.norm.items():
             weights[get_model_norm_name(k)] = load_weight(wt, mapped_files)
+        if weights:
+            model.load_weights(list(weights.items()), strict=False)
+        return len(weights)
+    finally:
+        for mapped_file in mapped_files.values():
+            mapped_file.mmap.close()
+            mapped_file.file.close()
 
+
+def load_lm_head(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
+    """Load only the LM head weights into the model.
+
+    Handles both quantized and dense head.
+    Returns the number of tensors loaded.
+    """
+    weights: Dict[str, mx.array] = {}
+    mapped_files: Dict[str, MappedFile] = {}
+    try:
         hidden_size = getattr(getattr(model, "config", {}), "hidden_size", None)
         vocab_size = getattr(getattr(model, "config", {}), "vocab_size", None)
 
         lm_keys = set(model_metadata.lm_head.keys())
         has_quant_head = any(k.startswith("scales") for k in lm_keys)
 
-        loaded_head = False
         if has_quant_head:
             for k, wt in model_metadata.lm_head.items():
                 weights[get_lm_head_name(k)] = load_weight(wt, mapped_files)
-            logger.info("Loaded quantized lm_head params for API")
-            loaded_head = True
+            logger.info("Loaded quantized lm_head params")
         else:
-            # Dense path: only load if shape matches or transpose
             w_info = model_metadata.lm_head.get("weight")
             if (
                 w_info is not None
@@ -283,38 +304,52 @@ def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
                 shp = tuple(w_arr.shape)
                 if shp == (hidden_size, vocab_size):
                     weights[get_lm_head_name("weight")] = w_arr
-                    logger.info("Loaded dense lm_head.weight for API")
-                    loaded_head = True
+                    logger.info("Loaded dense lm_head.weight")
                 elif shp == (vocab_size, hidden_size):
                     weights[get_lm_head_name("weight")] = w_arr.T
-                    logger.info("Loaded transposed dense lm_head.weight for API")
-                    loaded_head = True
+                    logger.info("Loaded transposed dense lm_head.weight")
                 else:
                     logger.warning(
-                        "Skipping lm_head.weight with incompatible shape %s; will use tied projection if configured.",
+                        "Skipping lm_head.weight with incompatible shape %s; using tied projection if configured.",
                         shp,
                     )
             else:
                 if w_info is None:
-                    logger.info(
-                        "No lm_head.weight found; will use tied projection if applicable"
-                    )
+                    logger.info("No lm_head.weight found; tied projection may be used")
 
-        # If we couldn't load any head and model supports fallback, force tied projection
-        if not loaded_head and hasattr(model, "force_tied_head"):
-            try:
-                setattr(model, "force_tied_head", True)
-                logger.info("Falling back to tied embedding projection for API head")
-            except Exception:
-                pass
-
-        # Load with strict=False to allow partial sets (e.g., no head) without failure
-        model.load_weights(list(weights.items()), strict=False)
-        model.eval()
+        if weights:
+            model.load_weights(list(weights.items()), strict=False)
+        return len(weights)
     finally:
         for mapped_file in mapped_files.values():
             mapped_file.mmap.close()
             mapped_file.file.close()
+
+
+def load_api_layer_weights(model_metadata: ModelMetadata, model: BaseRingModel):
+    """Deprecated wrapper: Loads embeddings, norm, and LM head (legacy behavior).
+
+    Prefer calling load_embeddings/load_final_norm/load_lm_head selectively
+    based on the shard's role and tie_word_embeddings config.
+    """
+    # Legacy combined load
+    cnt = 0
+    cnt += load_embeddings(model_metadata, model)
+    cnt += load_final_norm(model_metadata, model)
+    # For head, respect tied setting if model exposes it
+    tied = bool(getattr(getattr(model, "config", object()), "tie_word_embeddings", False))
+    if not tied:
+        cnt += load_lm_head(model_metadata, model)
+    else:
+        try:
+            setattr(model, "force_tied_head", True)
+        except Exception:
+            pass
+    try:
+        model.eval()
+    except Exception:
+        pass
+    logger.info("Loaded %d API-layer tensors via legacy loader", cnt)
 
 
 def get_safetensor_details(path) -> Dict[str, TensorInfo]:
