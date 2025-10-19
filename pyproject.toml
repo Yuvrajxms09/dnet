@@ -7,7 +7,6 @@ license = { file = "LICENSE" }
 authors = [
   { name = "andthattoo", email = "omer@dria.co" },
   { name = "erhant", email = "erhan@dria.co" },
-  { name = "Mehmet Uzunosmanoğlu", email = "mehmet@dria.co" },
   { name = "Shashank Jaiswal", email = "shashank@dria.co" },
 ]
 keywords = [
@@ -15,11 +14,27 @@ keywords = [
   "Large Language Models",
   "Apple Silicon",
   "MLX",
+  "Pipeline Parallelism",
 ]
 requires-python = ">=3.12"
 dependencies = [
+  "mlx",
+  "mlx-lm==0.28.2",
+  "numpy>=1.24.0",
+  "grpcio>=1.50.0",
+  "grpcio-tools>=1.50.0",
+  "transformers>=4.30.0",
+  "protobuf>=4.21.0",
+  "huggingface-hub==0.24.0",
+  "fastapi>=0.100.0",
+  "hypercorn>=0.14.0",
+  "pydantic>=2.0.0",
+  "h2>=4.1.0",
+  "mypy-protobuf>=3.0.0",
+  "httpx[http2]>=0.24.0",
+  "cryptography>=40.0.0",
   "dperf @ file://${PROJECT_ROOT}/lib/dperf",
-  "dsolver @ file://${PROJECT_ROOT}/lib/dsolver",
+  "distilp @ file://${PROJECT_ROOT}/lib/distilp",
   "dnet-p2p @ file://${PROJECT_ROOT}/lib/dnet-p2p/bindings/py",
 ]
 
@@ -41,3 +56,4 @@ log_cli = true
 
 [tool.ruff]
 exclude = [".git", ".venv", "__pycache__", "build", "dist", "lib"]
+line-length = 88 # black
