@@ -1,4 +1,6 @@
 from typing import Callable, Optional, Any
+from fastapi import FastAPI
+import grpc.aio as aio_grpc
 import asyncio
 import threading
 from mlx.core import Dtype
@@ -9,6 +11,7 @@ from dnet_p2p import DnetDeviceProperties, DnetP2P
 from dnet.ring.data_types import ActivationMessage
 from dnet.ring.memory_pool import LayerAwareMemoryPool
 from dnet.ring.model.base import BaseRingModel
+from dnet.ring.shard.config import ShardConfig
 from dnet.utils.model import ModelMetadata
 from dnet.ring.weight_cache import WeightCache
 from dnet.ring.observability import Profiler
@@ -25,6 +28,8 @@ class RingShardNodeAttributes:
     _prefetch_pending: set[int]
     _prefetch_pause: threading.Event
     _prefetch_active = 0
+
+    _streaming_enabled: bool
 
     _resident_windows: int
     _recent_windows: list[list[int]]
@@ -45,8 +50,13 @@ class RingShardNodeAttributes:
     # node
     grpc_port: int
     http_port: int
+    app: FastAPI
     discovery: DnetP2P
     next_node: Optional[DnetDeviceProperties]
+    config: ShardConfig
+
+    _sync_per_layer: bool
+    _sync_every_n: int
 
     # profiler
     _profile: bool
@@ -54,6 +64,7 @@ class RingShardNodeAttributes:
 
     input_pool: LayerAwareMemoryPool
     output_pool: Optional[LayerAwareMemoryPool]
+    activation_recv_queue: Queue[ActivationMessage]
 
     # model
     model: Optional[BaseRingModel]
@@ -63,14 +74,18 @@ class RingShardNodeAttributes:
     _wire_dtype_str: str
     _wire_mx_dtype: Dtype
     _assigned_set: set[int]
+    assigned_layers: list[int]
     window_size: int
 
     _assigned_sorted: list[int]
     _bound_versions: dict[int, int]
 
-    # callables (shared methods)
+    next_node_channel: Optional[aio_grpc.Channel]
+    next_node_stub: Optional[Any]
+
+    # shared methods
     _prefetch_to_ram: Callable[[int], None]
+    _clear_prefetch_state: Callable[[], None]
     _enqueue_weight_prefetch: Callable[[int], None]
     _next_local_layers: Callable[[int, int], list[int]]
-    _clear_prefetch_state: Callable[[], None]
     _get_or_make_kv: Callable[[str], list]

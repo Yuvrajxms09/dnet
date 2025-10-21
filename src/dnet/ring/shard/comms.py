@@ -3,12 +3,19 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Mapping, Optional, Any
 from urllib.parse import urlparse
 
 import grpc
 from grpc import aio as aio_grpc
 import numpy as np
+
+from dnet_p2p import (
+    DnetDeviceProperties,
+    discover_thunderbolt_connection,
+)
+from dnet_p2p.thunderbolt import ThunderboltConnection
+from dnet.utils.latency import DeviceLatencyResult, LatencyMeasurement, LatencyResults
 
 from ...utils.grpc_config import GRPC_AIO_OPTIONS
 from ...utils.logger import logger
@@ -20,22 +27,25 @@ from ..data_types import ActivationMessage
 from .attrib import RingShardNodeAttributes
 
 
-class SendMixin(RingShardNodeAttributes):
-    @dataclass
-    class _StreamCtx:
-        nonce: str
-        queue: asyncio.Queue
-        call: Optional[Any] = None
-        ack_task: Optional[asyncio.Task] = None
-        open: bool = False
-        disabled: bool = False
-        disabled_until: float = 0.0
-        last_seq: int = 0
-        last_activity_t: float = 0.0
+@dataclass
+class _StreamCtx:
+    nonce: str
+    queue: asyncio.Queue
+    call: Optional[Any] = None
+    ack_task: Optional[asyncio.Task] = None
+    open: bool = False
+    disabled: bool = False
+    disabled_until: float = 0.0
+    last_seq: int = 0
+    last_activity_t: float = 0.0
+
+
+class CommsMixin(RingShardNodeAttributes):
+    """Communication-related methods for ring shard node."""
 
     async def _ensure_stream(self, nonce: str):
         try:
-            if not getattr(self, "_streaming_enabled", False):
+            if not self._streaming_enabled:
                 return None
             if self.next_node_stub is None:
                 return None
@@ -55,7 +65,7 @@ class SendMixin(RingShardNodeAttributes):
                     pass
                 return ctx
 
-            ctx = SendMixin._StreamCtx(nonce=nonce, queue=asyncio.Queue(maxsize=64))
+            ctx = _StreamCtx(nonce=nonce, queue=asyncio.Queue(maxsize=64))
             if not hasattr(self, "_streams"):
                 self._streams = {}
             self._streams[nonce] = ctx
@@ -128,7 +138,7 @@ class SendMixin(RingShardNodeAttributes):
         idle_s = float(getattr(self, "_stream_idle_s", 2.0))
         while getattr(self, "running", False):
             try:
-                if not getattr(self, "_streaming_enabled", False):
+                if not self._streaming_enabled:
                     await asyncio.sleep(1.0)
                     continue
                 now = asyncio.get_running_loop().time()
@@ -286,8 +296,7 @@ class SendMixin(RingShardNodeAttributes):
                 wire_np_dtype = np.float16  # reasonable default fallback
             if isinstance(shaped, np.ndarray):
                 if shaped.dtype != wire_np_dtype:
-                    # FIXME: copy is not found?
-                    shaped = shaped.astype(wire_np_dtype, copy=False)
+                    shaped = shaped.astype(wire_np_dtype, copy=False)  # type: ignore # FIXME: copy is not found?
             else:
                 # MLX array -> cast to desired wire dtype
                 if str(shaped.dtype) != self._wire_dtype_str:
@@ -482,3 +491,182 @@ class SendMixin(RingShardNodeAttributes):
                     pass
         except Exception as e:
             logger.exception("Error sending activation: %s", e)
+
+    async def _connect_next_node(self) -> bool:
+        """Connect to next node in ring.
+
+        Returns:
+            True if connected or no next node, False on failure
+        """
+        if not self.next_node:
+            logger.info(f"Shard node {self.node_id} is the final shard (no next node)")
+            return True
+
+        if self.next_node_channel:
+            logger.debug(f"Shard node {self.node_id} already connected to next node.")
+            return True
+
+        try:
+            # use thunderbolt here if available
+            this_properties = self.discovery.get_own_properties()
+            thunderbolt_conn = discover_thunderbolt_connection(
+                this_properties,
+                self.next_node,
+            )
+            next_ip = (
+                thunderbolt_conn.ip_addr
+                if thunderbolt_conn
+                else self.next_node.local_ip
+            )
+            address = f"{next_ip}:{self.next_node.shard_port}"
+            logger.info(
+                f"Shard node {this_properties.instance} connecting to next node {self.next_node.instance} at {address}"
+            )
+
+            self.next_node_channel = aio_grpc.insecure_channel(address)
+            from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
+
+            self.next_node_stub = DnetRingServiceStub(self.next_node_channel)
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Shard node {self.node_id} failed to connect to next node {address}: {e}"
+            )
+            self.next_node_channel = None
+            self.next_node_stub = None
+            return False
+
+    async def _reconnect_next_node(self) -> bool:
+        try:
+            if self.next_node_channel:
+                await self.next_node_channel.close()
+        except Exception:
+            pass
+        self.next_node_channel = None
+        self.next_node_stub = None
+        return await self._connect_next_node()
+
+    async def _measure_latency_to_devices(
+        self,
+        devices: Mapping[str, DnetDeviceProperties],
+        thunderbolts: Mapping[str, ThunderboltConnection],
+        payload_sizes: list[int],
+    ) -> LatencyResults:
+        """Measure latency to all devices except self.
+
+        Args:
+            devices: Device information mapping
+            thunderbolts: Thunderbolt connection information
+            payload_sizes: List of payload sizes to test
+
+        Returns:
+            Latency measurement results
+        """
+        latency_results_dict: dict[str, DeviceLatencyResult] = {}
+
+        for service_name, device_info in devices.items():
+            # Skip measuring latency to ourselves
+            # FIXME: just equals check should suffice here?
+            if service_name.startswith(self.discovery.instance_name()):
+                logger.debug("Skipping latency measurement to self: %s", service_name)
+                continue
+
+            # Skip measuring latency to API (manager) devices
+            if device_info.is_manager:
+                logger.debug(
+                    "Skipping latency measurement to manager/API: %s", service_name
+                )
+                continue
+
+            try:
+                shard_port = device_info.shard_port
+
+                # Check for Thunderbolt connection
+                if service_name in thunderbolts:
+                    tb_data = thunderbolts[service_name]
+                    service_ip = tb_data.ip_addr
+                    logger.info(
+                        "Using Thunderbolt for %s at %s, connected to instance %s",
+                        service_name,
+                        service_ip,
+                        tb_data.instance,
+                    )
+                else:
+                    # No Thunderbolt, use WiFi
+                    service_ip = device_info.local_ip
+
+                if not shard_port or not service_ip:
+                    logger.warning(
+                        "No shard_port or local_ip for device %s", service_name
+                    )
+                    continue
+
+                # Connect to target shard's gRPC server
+                target_address = f"{service_ip}:{shard_port}"
+                channel = aio_grpc.insecure_channel(target_address)
+                from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
+
+                stub = DnetRingServiceStub(channel)
+
+                # Measure latency for each payload size
+                latency_measurements: list[LatencyMeasurement] = []
+                for payload_size in payload_sizes:
+                    # Create dummy payload
+                    dummy_data = b"x" * payload_size
+
+                    start_time = time.perf_counter()
+                    timestamp_ms = int(time.time() * 1000)
+
+                    request = dnet_ring_pb2.LatencyMeasureRequest(
+                        requester_id=str(self.node_id),
+                        payload_size=payload_size,
+                        dummy_data=dummy_data,
+                        timestamp=timestamp_ms,
+                    )
+
+                    response = await stub.MeasureLatency(request)  # type: ignore
+                    end_time = time.perf_counter()
+
+                    if response.success:
+                        latency_ms = (end_time - start_time) * 1000
+                        latency_measurements.append(
+                            LatencyMeasurement(
+                                payload_size=payload_size,
+                                latency_ms=round(latency_ms, 2),
+                                success=True,
+                                error=None,
+                            )
+                        )
+                    else:
+                        latency_measurements.append(
+                            LatencyMeasurement(
+                                payload_size=payload_size,
+                                success=False,
+                                error=response.message,
+                                latency_ms=0,
+                            )
+                        )
+
+                # Store results
+                result = DeviceLatencyResult(
+                    target_node_id=response.node_id if response.success else None,
+                    measurements=latency_measurements,
+                    success=True,
+                    error=None,
+                )
+                latency_results_dict[service_name] = result
+
+                # Close channel
+                await channel.close()
+
+            except Exception as e:
+                logger.error("Error measuring latency to %s: %s", service_name, e)
+                result = DeviceLatencyResult(
+                    target_node_id=None,
+                    success=False,
+                    error=str(e),
+                    measurements=[],
+                )
+                latency_results_dict[service_name] = result
+
+        return LatencyResults(results=latency_results_dict)

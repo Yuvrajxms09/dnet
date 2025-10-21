@@ -14,7 +14,6 @@ import mlx.core as mx
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from grpc import aio as aio_grpc
-from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 from mlx_lm.tokenizer_utils import load_tokenizer
 
@@ -188,7 +187,7 @@ class RingApiNode:
             return
 
         server = aio_grpc.server()
-        servicer = ShardApiServicer(self)
+        servicer = ShardApiServicer(self)  # type: ignore # FIXME: !!!
         add_ShardApiServiceServicer_to_server(servicer, server)
         listen_addr = f"[::]:{self.grpc_port}"
         server.add_insecure_port(listen_addr)
@@ -202,6 +201,8 @@ class RingApiNode:
         Args:
             shutdown_trigger: Shutdown trigger function
         """
+        from hypercorn import Config
+
         await self._setup_routes()
 
         config = Config.from_mapping(
@@ -213,8 +214,8 @@ class RingApiNode:
         )
 
         self.http_server = asyncio.create_task(
-            aio_hypercorn.serve(  # type: ignore
-                self.app,
+            aio_hypercorn.serve(
+                self.app,  # type: ignore
                 config,
                 shutdown_trigger=shutdown_trigger,
             )
@@ -319,8 +320,12 @@ class RingApiNode:
                 ) from e
 
         @self.app.post("/v1/chat/completions")
-        async def chat_completions(req: ChatRequestModel) -> ChatResponseModel:
-            """Handle chat completion requests."""
+        async def chat_completions(
+            req: ChatRequestModel,
+        ) -> ChatResponseModel | StreamingResponse:
+            """Handle chat completion requests.
+
+            If streaming is requested, returns a StreamingResponse."""
             if self.model is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -331,16 +336,17 @@ class RingApiNode:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Not connected to first shard",
                 )
-            if bool(getattr(req, "stream", False)):
+            if req.stream:
                 return StreamingResponse(
                     self._stream_chat(req), media_type="text/event-stream"
                 )
-            return await self._handle_chat_completion(req)
+            else:
+                return await self._handle_chat_completion(req)
 
         @self.app.post("/v1/completions")
         async def completions(req: CompletionRequestModel):  # type: ignore
-            """Handle completion requests (not implemented)."""
-            if bool(getattr(req, "stream", False)):
+            """Handle completion requests."""
+            if req.stream:
                 return StreamingResponse(
                     self._stream_completion(req), media_type="text/event-stream"
                 )
@@ -449,7 +455,7 @@ class RingApiNode:
             normalized.append(
                 LayerAssignment(
                     service=assignment.service,
-                    layers=layers_2d,
+                    layers=layers_2d,  # type: ignore FIXME: !!!
                     next_service=assignment.next_service,
                     window_size=assignment.window_size,
                 )
@@ -495,7 +501,7 @@ class RingApiNode:
                     service=a.service,
                     layers=a.layers,
                     next_service=a.next_service or ring_map.get(a.service),
-                    prefetch_window=a.prefetch_window,
+                    window_size=a.window_size,
                 )
                 for a in normalized
             ]
@@ -537,7 +543,7 @@ class RingApiNode:
                     model_to_load,
                 )
         else:
-            if not getattr(req, "model", None):
+            if not req.model:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
@@ -546,6 +552,7 @@ class RingApiNode:
                         "or include 'model' to bootstrap with discovery."
                     ),
                 )
+
             # Bootstrap: run discovery-based prepare
             await self._handle_prepare_topology(PrepareTopologyRequest(model=req.model))
             model_to_load = self.topology.model  # type: ignore
@@ -555,10 +562,10 @@ class RingApiNode:
 
         # Resolve shard endpoints
         api_properties = self.discovery.get_own_properties()
-        if self.topology and getattr(self.topology, "devices", []):
+        if self.topology and self.topology.devices:
             # Build mapping from topology (service/instance -> properties)
             shards: Dict[str, DnetDeviceProperties] = {
-                getattr(dev, "instance"): dev for dev in self.topology.devices
+                dev.instance: dev for dev in self.topology.devices
             }
         else:
             # Fallback to discovery when no topology is configured
@@ -692,7 +699,7 @@ class RingApiNode:
                     model=model_to_load,
                     success=False,
                     shard_statuses=shard_statuses,
-                    message=("Error loading API-side model: %s", e),
+                    message=f"Error loading API-side model: {e}",
                 )
         else:
             failed_shards = [
@@ -731,7 +738,7 @@ class RingApiNode:
                     # Call unload_model via HTTP
                     url = f"http://{shard.local_ip}:{shard.server_port}/unload_model"
                     response = await http_client.post(url, timeout=30.0)
-                    result = response.json()
+                    result = response.json()  # FIXME: add shard response type
 
                     shard_statuses.append(
                         ShardUnloadStatus(
@@ -812,13 +819,14 @@ class RingApiNode:
         Falls back to the first device in topology when ownership cannot be
         determined. Returns True on success, False otherwise.
         """
-        if not self.topology or not getattr(self.topology, "devices", []):
+        if not self.topology or not self.topology.devices:
+            logger.error("No topology configured; cannot connect to first shard")
             return False
 
         # Pick the device whose assignment contains layer 0; fallback to index 0
         start_service: str | None = None
         try:
-            for assignment in getattr(self.topology, "assignments", []) or []:
+            for assignment in self.topology.assignments:
                 # Flatten round layers
                 flat = [
                     layer
@@ -831,11 +839,12 @@ class RingApiNode:
         except Exception:
             start_service = None
 
+        # find the start device w.r.t service name
         start_device = None
         if start_service is not None:
             try:
                 for dev in self.topology.devices:
-                    if getattr(dev, "instance", None) == start_service:
+                    if dev.instance == start_service:
                         start_device = dev
                         break
             except Exception:
@@ -903,7 +912,7 @@ class RingApiNode:
             batch_sizes=batch_sizes,
             sequence_length=sequence_length,
         )
-        logger.info("Model profiling completed.")
+        logger.info(f"Model profiling completed for {repo_id}.")
         return load_model_profile_from_dict(asdict(model_profile_split))
 
     async def _collect_shard_profiles(
@@ -1301,7 +1310,7 @@ class RingApiNode:
         Returns:
             Chat response
         """
-        profile_enabled = bool(getattr(req, "profile", False))
+        profile_enabled = bool(req.profile)
         t_start = time.perf_counter()
         t_first_token = None
         nonce = f"chatcmpl-{uuid.uuid4()}"
@@ -1541,7 +1550,7 @@ class RingApiNode:
                         repetition_penalty=req.repetition_penalty,
                         repetition_context_size=req.repetition_context_size,
                         logit_bias=req.logit_bias,
-                    ),
+                    ),  # type: ignore
                 ),
                 arange(req.max_tokens or 0),
             ):
@@ -1603,7 +1612,7 @@ class RingApiNode:
                         repetition_context_size=req.repetition_context_size,
                         logit_bias=req.logit_bias,
                     ),
-                ),
+                ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
                 detok.add_token(token)

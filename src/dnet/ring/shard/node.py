@@ -8,16 +8,29 @@ from queue import Empty, Queue, Full
 from typing import Any, Dict, List, Optional, cast
 from bisect import bisect_left as _bisect_left
 
+from socket import gethostname
+from secrets import token_hex
+
 import mlx.core as mx
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from grpc import aio as aio_grpc
 
 from dnet_p2p import DnetP2P, DnetDeviceProperties
 
+from dnet.utils.latency import calculate_median_latency_seconds
+from dnet.utils.serialization import tensor_to_bytes
+
+from .servicer import ShardServicer
+from dnet.protos.dnet_ring_pb2_grpc import add_DnetRingServiceServicer_to_server
+
 from .models import (
+    HealthResponse,
     ShardLoadModelRequest,
     ShardLoadModelResponse,
+    ShardProfileRequest,
+    ShardProfileResponse,
     ShardUnloadModelResponse,
 )
 
@@ -44,12 +57,13 @@ from ..memory_pool import LayerAwareMemoryPool
 from ..model import get_ring_model
 from .compute import ComputeMixin
 from .prefetch import PrefetchMixin
-from .send import SendMixin
-from .startup import StartupMixin
+from .comms import CommsMixin
+
+# from .startup import StartupMixin
 from ..weight_cache import WeightCache
 
 
-class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
+class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):  # , StartupMixin):
     """Single shard node in the distributed inference ring with dynamic model loading."""
 
     def __init__(
@@ -354,7 +368,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
             if self.next_node:
                 await self._connect_next_node()
             else:
-                logger.info("Node %s: No next node configured", self.node_id)
+                logger.warning("Node %s: No next node configured", self.node_id)
 
             # Warmup if requested (run in executor to avoid blocking event loop)
             if req.warmup:
@@ -1086,3 +1100,342 @@ class RingShardNode(ComputeMixin, PrefetchMixin, SendMixin, StartupMixin):
                 self.weight_cache.cancel_all_prefetch()
         except Exception:
             pass
+
+    async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()):
+        self.running = True
+        # Capture the main event loop for cross-thread scheduling
+        try:
+            self._loop = asyncio.get_running_loop()
+        except Exception:
+            self._loop = None
+        await self._start_grpc_server()
+        await self._start_http_server(shutdown_trigger)
+        await asyncio.sleep(0.2)
+
+        self.background_tasks = [
+            asyncio.create_task(self._ingress_worker()),
+            asyncio.create_task(self._prefetch_worker()),
+            asyncio.create_task(self._send_worker()),
+        ]
+        # Start idle sweeper to close silent streams
+        try:
+            if getattr(self, "_streaming_enabled", False) and hasattr(
+                self, "_stream_sweeper"
+            ):
+                self.background_tasks.append(
+                    asyncio.create_task(self._stream_sweeper())
+                )
+        except Exception:
+            pass
+
+        self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
+        self.compute_thread.start()
+
+        self._start_discovery()
+        logger.info(
+            "Shard node %s started on gRPC port %s HTTP port %s",
+            self.node_id,
+            self.grpc_port,
+            self.http_port,
+        )
+
+    def _start_discovery(self) -> None:
+        """Start mDNS discovery service."""
+
+        hostname = gethostname()
+        # TODO: optionally take shard name from CLI
+        instance = f"shard-{token_hex(4)}-{hostname}"
+        self.discovery.create_instance(
+            instance,
+            hostname,
+            "0.0.0.0",  # Binds to all addresses
+            self.http_port,  # HTTP port
+            self.grpc_port,  # gRPC port
+            is_manager=False,  # Shard is never a manager
+        )
+        self.discovery.start()
+        logger.info(
+            "Discovery service started for shard node %s with name %s",
+            self.node_id,
+            self.discovery.fullname(),
+        )
+
+    async def _start_grpc_server(self) -> None:
+        """Start gRPC server."""
+        self.server = aio_grpc.server()
+
+        # Add the ring servicer; shard acts as client for ShardApiService (to API)
+        servicer = ShardServicer(self)  # type: ignore # FIXME: !!!
+        add_DnetRingServiceServicer_to_server(servicer, self.server)
+
+        listen_addr = f"[::]:{self.grpc_port}"
+        self.server.add_insecure_port(listen_addr)
+        await self.server.start()
+        logger.info(
+            "Shard node %s gRPC server started on %s", self.node_id, listen_addr
+        )
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                self.executor, self._warmup_serialization
+            )
+            logger.info("Warmup serialization completed")
+        except Exception as e:
+            logger.warning("Warmup serialization failed: %s", e)
+
+    def _warmup_serialization(self):
+        try:
+            dummy = mx.random.normal((1024, 1024), dtype=mx.float32)
+            dummy16 = dummy.astype(self._wire_mx_dtype)
+            _ = tensor_to_bytes(dummy16)
+        except Exception:
+            pass
+
+    def _warmup_shard(self):
+        logger.info(
+            "[WARMUP] Starting shard warmup with window size %s", self.window_size
+        )
+        if not self.model or not self.model_metadata or not self.weight_cache:
+            logger.warning("[WARMUP] No model loaded; skipping warmup")
+            return
+
+        batch_size, seq_len = 1, 1
+        hidden_size = self.model_metadata.model_config.get("hidden_size", 2560)
+        x = mx.zeros((batch_size, seq_len, hidden_size), dtype=mx.bfloat16)
+        start_time = time.perf_counter()
+
+        max_windows = max(1, self.config.warmup_windows)
+        windows: list[list[int]] = []
+        for window_start in range(0, len(self._assigned_sorted), self.window_size):
+            window_end = min(
+                window_start + self.window_size, len(self._assigned_sorted)
+            )
+            windows.append(self._assigned_sorted[window_start:window_end])
+        for wi, window_layers in enumerate(windows[:max_windows]):
+            weights_to_bind = {}
+            for layer_id in window_layers:
+                weights = self.weight_cache.get_weight(layer_id)
+                if weights:
+                    for k, v in weights.items():
+                        weights_to_bind[k] = v
+            if weights_to_bind:
+                self.model.load_weights(list(weights_to_bind.items()), strict=False)
+            try:
+                for layer_id in window_layers:
+                    x = self.model.apply_single_layer(layer_id, x, cache=None)
+                    _s = mx.sum(x)
+                    mx.eval(_s)
+            except Exception:
+                pass
+            try:
+                for lid in window_layers:
+                    self.weight_cache.decrease_reference(lid)
+            except Exception:
+                pass
+            if not self._warmup_keep_flag:
+                try:
+                    if hasattr(self.model, "unload_layers"):
+                        self.model.unload_layers(window_layers)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    self.weight_cache.evict_layers(window_layers)
+                except Exception:
+                    pass
+        total_time = (time.perf_counter() - start_time) * 1000
+        self._warmup_completed = True
+        logger.info(
+            "[WARMUP] Shard warmup completed in %.2fms; windows=%s kept=%s",
+            total_time,
+            min(len(windows), max_windows),
+            int(self._warmup_keep_flag),
+        )
+
+    async def _start_http_server(self, shutdown_trigger: Any) -> None:
+        """Start HTTP server.
+
+        Args:
+            shutdown_trigger: Shutdown trigger function
+        """
+        from hypercorn import Config
+        import hypercorn.asyncio as aio_hypercorn
+
+        await self._setup_routes()
+
+        # Start HTTP server in background
+        config = Config.from_mapping(
+            bind=f"0.0.0.0:{self.http_port}",
+            log_level="info",
+            log_config=None,
+            use_reloader=False,
+            h2c=False,
+        )
+
+        # Start the server as a background task
+        self.http_server = asyncio.create_task(
+            aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
+        )
+        logger.info(
+            "Shard node %s HTTP server started on port %s", self.node_id, self.http_port
+        )
+
+    async def _setup_routes(self) -> None:
+        """Setup HTTP routes."""
+
+        @self.app.get("/health")
+        async def health() -> HealthResponse:
+            try:
+                instance = self.discovery.instance_name()
+            except Exception:
+                instance = None
+            return HealthResponse(
+                status="ok",
+                node_id=self.node_id,
+                running=self.running,
+                model_loaded=self.model is not None,
+                model_path=self.model_path,
+                assigned_layers=self.assigned_layers,
+                queue_size=self.activation_recv_queue.qsize(),
+                grpc_port=self.grpc_port,
+                http_port=self.http_port,
+                instance=instance,
+            )
+
+        @self.app.post("/profile")
+        async def profile(req: ShardProfileRequest) -> ShardProfileResponse:
+            logger.info("Received /profile request")
+            try:
+                # Measure latencies
+                latency_results = await self._measure_latency_to_devices(
+                    req.devices, req.thunderbolts, req.payload_sizes
+                )
+
+                # Profile device using dperf
+                device_profile = await self._profile_device(
+                    req.repo_id, req.max_batch_exp
+                )
+
+                # Overwrite `t_comm` with median latency (subprocess returns a dict)
+                median_latency = calculate_median_latency_seconds(latency_results)
+                if median_latency is not None:
+                    device_profile["t_comm"] = float(median_latency)
+                    logger.info(
+                        f"Set t_comm to median latency: {device_profile['t_comm']:.6f}s"
+                    )
+                else:
+                    logger.warning(
+                        "No valid latency measurements, keeping default t_comm"
+                    )
+
+                # Return the dict payload directly
+                return ShardProfileResponse(
+                    profile=device_profile,
+                    latency=latency_results,
+                )
+            except Exception as e:
+                logger.error(f"Error in /profile endpoint: {e}")
+                raise
+
+        @self.app.post("/load_model")
+        async def load_model_endpoint(
+            req: ShardLoadModelRequest,
+        ) -> ShardLoadModelResponse:
+            """Load model with specified layers."""
+            try:
+                logger.info(
+                    f"HTTP /load_model: model={req.model_path}, layers={req.layers}, "
+                    f"next_node={req.next_node or 'none'}, window_size={req.window_size}, "
+                    f"total_layers={req.total_layers}, api_callback={req.api_callback_address or 'none'}"
+                )
+                result = await self.load_model(req)
+                return result
+
+            except Exception as e:
+                logger.error(f"Error in /load_model endpoint: {e}")
+                return ShardLoadModelResponse(
+                    success=False,
+                    message=f"Error: {str(e)}",
+                    layers_loaded=[],
+                    load_time_ms=0.0,
+                )
+
+        @self.app.post("/unload_model")
+        async def unload_model_endpoint() -> ShardUnloadModelResponse:
+            """Unload current model."""
+            try:
+                logger.info("HTTP /unload_model")
+                result = await self.unload_model()
+                return result
+
+            except Exception as e:
+                logger.error(f"Error in /unload_model endpoint: {e}")
+                return ShardUnloadModelResponse(
+                    success=False,
+                    message=f"Error: {str(e)}",
+                )
+
+        @self.app.post("/warm")
+        # FIXME: add pydantic type here
+        async def warm(request: Request) -> JSONResponse:
+            try:
+                body = await request.json()
+                start = int(body.get("start", -1))
+                window = int(body.get("window", self.window_size))
+                if start < 0:
+                    return JSONResponse(
+                        status_code=400, content={"error": "missing/invalid start"}
+                    )
+                start_idx = 0
+                for i, lyr in enumerate(self._assigned_sorted):
+                    if lyr >= start:
+                        start_idx = i
+                        break
+                else:
+                    return JSONResponse(content={"prefetched": []})
+                window_layers = self._assigned_sorted[
+                    start_idx : start_idx + max(1, window)
+                ]
+                for wl in window_layers:
+                    self._prefetch_to_ram(wl)
+                    self._enqueue_weight_prefetch(wl)
+                return JSONResponse(content={"prefetched": window_layers})
+            except Exception as e:
+                logger.error("/warm failed: %s", e)
+                return JSONResponse(status_code=500, content={"error": str(e)})
+
+    async def _profile_device(self, repo_id: str, max_batch_exp: int) -> dict:
+        """Profile device using dperf in a subprocess and return a dict.
+
+        Args:
+            repo_id: Hugging Face repository ID
+            max_batch_exp: Maximum batch size exponent (2^max_batch_exp)
+
+        Returns:
+            Device profile information as a plain dict
+        """
+        from ...utils.profile_subproc import profile_device_via_subprocess
+
+        profile_dict = profile_device_via_subprocess(
+            repo_id, max_batch_exp=max_batch_exp, debug=0
+        )
+        logger.info("Device profiling completed for node %s", self.node_id)
+        return profile_dict
+
+    # FIXME: this is not used, use it within healthcheck
+    async def _health_check(self):
+        try:
+            health_request = dnet_ring_pb2.HealthRequest(requester_id=str(self.node_id))
+            response = await self.next_node_stub.HealthCheck(health_request)  # type: ignore # FIXME: this assumes an existing connection
+            logger.info(
+                "Shard node %s successfully pinged: %s, healthy: %s",
+                self.node_id,
+                response.node_id,
+                response.healthy,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "Shard node %s failed to ping next node %s",
+                self.node_id,
+                e,
+            )
+            return False

@@ -174,23 +174,17 @@ class ComputeMixin(RingShardNodeAttributes):
                     pass
                 layer_times_ms: list[tuple[int, float]] = []
                 for i, lyr in enumerate(window_layers):
-                    t_l0 = (
-                        time.perf_counter() if getattr(self, "_profile", False) else 0.0
-                    )
+                    t_l0 = time.perf_counter() if self._profile else 0.0
                     with self._mlx_lock:
                         x = self.model.apply_single_layer(lyr, x, cache=kv)
 
                     # Optional per-n-layer sync for profiling, gated by settings
-                    if getattr(self, "_profile", False) and getattr(
-                        self, "_sync_per_layer", False
-                    ):
+                    if self._profile and self._sync_per_layer:
                         do_sync = True
-                        try:
-                            n = int(getattr(self, "_sync_every_n", 0) or 0)
-                        except Exception:
-                            n = 0
+                        n = self._sync_every_n
                         if n > 0 and (i % n) != 0:
                             do_sync = False
+
                         if do_sync:
                             try:
                                 with self._mlx_lock:
