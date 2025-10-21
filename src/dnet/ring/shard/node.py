@@ -58,12 +58,10 @@ from ..model import get_ring_model
 from .compute import ComputeMixin
 from .prefetch import PrefetchMixin
 from .comms import CommsMixin
-
-# from .startup import StartupMixin
 from ..weight_cache import WeightCache
 
 
-class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):  # , StartupMixin):
+class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
     """Single shard node in the distributed inference ring with dynamic model loading."""
 
     def __init__(
@@ -1419,6 +1417,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):  # , StartupMixin)
         return profile_dict
 
     # FIXME: this is not used, use it within healthcheck
+    # this checks the health of the entire ring, but requires a bit more setup
+    # e.g. it should not get into infinite loop
     async def _health_check(self):
         try:
             health_request = dnet_ring_pb2.HealthRequest(requester_id=str(self.node_id))

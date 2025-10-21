@@ -443,6 +443,7 @@ class RingApiNode:
             raise ValueError("Device names must be unique in manual topology")
 
         # Normalize assignments and validate services
+        # FIXME: may not need normalized array here, just use assignments
         services = set(device_names)
         normalized: List[LayerAssignment] = []
         for assignment in req.assignments:
@@ -450,17 +451,10 @@ class RingApiNode:
                 raise ValueError(
                     f"Assignment references unknown service: {assignment.service}"
                 )
-            layers_2d = assignment.layers
-            try:
-                # Accept flat list; wrap to single round
-                if layers_2d and all(isinstance(x, int) for x in layers_2d):  # type: ignore
-                    layers_2d = [layers_2d]  # type: ignore
-            except Exception:
-                pass
             normalized.append(
                 LayerAssignment(
                     service=assignment.service,
-                    layers=layers_2d,  # type: ignore FIXME: !!!
+                    layers=assignment.layers,
                     next_service=assignment.next_service,
                     window_size=assignment.window_size,
                 )
@@ -490,6 +484,7 @@ class RingApiNode:
             )
 
         # If next_service missing and >1 device, compute simple ring by min layer
+        # FIXME: may not need this edge case at all, probably redundant
         if any(a.next_service is None for a in normalized) and len(normalized) > 1:
             order = sorted(
                 normalized,

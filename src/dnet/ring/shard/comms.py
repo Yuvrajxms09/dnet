@@ -257,7 +257,7 @@ class CommsMixin(RingShardNodeAttributes):
 
             used_pool = False
 
-            # FIXME: shaped var is a bit weird?
+            # FIXME: shaped var is a bit weird (is it np_array or mlx_array), @andthattoo shall check
             shaped = activation_msg.tensor
             if shaped is None:
                 output_buffer = self.output_pool.get_buffer(activation_msg.pool_id)
@@ -294,9 +294,11 @@ class CommsMixin(RingShardNodeAttributes):
                 wire_np_dtype = dtype_map[self._wire_dtype_str]
             except Exception:
                 wire_np_dtype = np.float16  # reasonable default fallback
+
             if isinstance(shaped, np.ndarray):
+                logger.warning("Activation tensor is a numpy array!!!")
                 if shaped.dtype != wire_np_dtype:
-                    shaped = shaped.astype(wire_np_dtype, copy=False)  # type: ignore # FIXME: copy is not found?
+                    shaped = shaped.astype(wire_np_dtype, copy=False)
             else:
                 # MLX array -> cast to desired wire dtype
                 if str(shaped.dtype) != self._wire_dtype_str:
@@ -376,7 +378,7 @@ class CommsMixin(RingShardNodeAttributes):
                                         max_attempts,
                                         code.name,
                                     )
-                                    await self._reconnect_next_node()  # FIXME: !!!
+                                    await self._reconnect_next_node()
                                     await asyncio.sleep(min(0.25 * attempt, 1.0))
                                     continue
                                 raise
