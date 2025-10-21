@@ -1,5 +1,4 @@
 from typing import Any, Dict, List, Optional, Tuple
-import logging
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -33,17 +32,7 @@ class Qwen3RingModel(BaseRingModel):
         self.is_api_layer = is_api_layer
         self.config = config = ModelArgs.from_dict(model_config)
 
-        logger.debug(
-            "Qwen3 init: is_api_layer=%s, assigned_layers=%s",
-            is_api_layer,
-            assigned_layers,
-        )
-        logger.debug(
-            "Qwen3 config: hidden=%d heads=%d kv_heads=%d",
-            config.hidden_size,
-            config.num_attention_heads,
-            config.num_key_value_heads,
-        )
+        pass
 
         # Create embed, norm, head
         if "quantization" in model_config:
@@ -57,13 +46,7 @@ class Qwen3RingModel(BaseRingModel):
                 self.embed_tokens = QuantizedEmbedding(
                     config.vocab_size, config.hidden_size, group_size=group, bits=bits
                 )
-                logger.debug(
-                    "embed_tokens QuantizedEmbedding: vocab=%d hidden=%d group_size=%d bits=%d",
-                    config.vocab_size,
-                    config.hidden_size,
-                    group,
-                    bits,
-                )
+                pass
             except Exception as _e:
                 logger.warning(
                     "QuantizedEmbedding unavailable (%s); using dense Embedding", _e
@@ -84,7 +67,7 @@ class Qwen3RingModel(BaseRingModel):
         self.is_quantized = "quantization" in model_config
         if self.is_quantized:
             self.quantization_config = model_config["quantization"]
-            logger.debug("Model is quantized with config: %s", self.quantization_config)
+            pass
 
         # Create TransformerBlocks for assigned layers
         for i, layer in enumerate(sorted(assigned_layers or [])):
@@ -114,21 +97,18 @@ class Qwen3RingModel(BaseRingModel):
                     self, bits=bits, group_size=group, class_predicate=_quant_pred
                 )
                 self._converted_to_quantized = True
-                logger.debug(
-                    "Applied init-time quantization: bits=%d group_size=%d", bits, group
-                )
             except Exception as _e:
                 logger.warning("Init-time quantization failed: %s", _e)
         elif not is_api_layer:
-            logger.debug("Skipping init-time quantization; will keep Linear layers")
-
-        logger.debug("Created %d TransformerBlock layers", len(self.layers))
-        logger.debug("abs_to_local mapping: %s", self.abs_to_local)
+            pass
+        
 
         self._converted_to_quantized = False
         # Allow API to force using tied embeddings as final head if standalone
         # lm_head weights are unavailable or incompatible
         self.force_tied_head: bool = False
+        self._cached_mask_state = None
+        self._cached_mask = None
 
         # When enabled, we replace all per-layer params with tiny placeholders
         # at construction time; real arrays are bound only when weights are
@@ -137,16 +117,12 @@ class Qwen3RingModel(BaseRingModel):
         self._lazy_params = bool(getattr(shard_config, "lazy_params", False))
         # Do not shrink params for quantized models; conversion relies on real shapes
         if self.is_quantized and self._lazy_params:
-            logger.debug(
-                "Ignoring lazy_params for quantized model to preserve parameter shapes"
-            )
+            pass
             self._lazy_params = False
         if (not self.is_api_layer) and self._lazy_params:
             try:
                 self._shrink_all_params()
-                logger.debug(
-                    "Enabled lazy params: per-layer arrays are placeholders until bound by weights"
-                )
+                pass
             except Exception as _e:
                 logger.warning(f"Lazy-param shrink failed: {_e}")
 
@@ -230,7 +206,7 @@ class Qwen3RingModel(BaseRingModel):
 
     def lm_project(self, x: mx.array) -> mx.array:
         if hasattr(self, "lm_head") or hasattr(self, "embed_tokens"):
-            use_tied = bool(getattr(self, "force_tied_head", False)) or bool(
+            use_tied = bool(self.force_tied_head) or bool(
                 getattr(self.config, "tie_word_embeddings", False)
             )
             if use_tied or not hasattr(self, "lm_head"):
@@ -261,61 +237,28 @@ class Qwen3RingModel(BaseRingModel):
             T = 1
         mask = None
         if T > 1:
-            cached = getattr(self, "_cached_mask_state", None)
-            if cached is None or cached != T:
+            if self._cached_mask_state is None or self._cached_mask_state != T:
                 mask = create_attention_mask(x, cache)
                 self._cached_mask = mask
                 self._cached_mask_state = T
             else:
-                mask = getattr(self, "_cached_mask", None)
+                mask = self._cached_mask
                 if mask is None:
                     mask = create_attention_mask(x, cache)
                     self._cached_mask = mask
                     self._cached_mask_state = T
         local_idx = self.abs_to_local[layer_idx]
 
-        logger.debug(
-            "apply_single_layer: layer_idx=%d, local_idx=%d, input shape=%s",
-            layer_idx,
-            local_idx,
-            x.shape,
-        )
-
-        # Log the layer's weight shapes
-        layer = self.layers[local_idx]
-        if hasattr(layer, "self_attn"):
-            if hasattr(layer.self_attn, "q_proj"):
-                if hasattr(layer.self_attn.q_proj, "weight"):
-                    logger.debug(
-                        "Layer %d q_proj weight shape: %s",
-                        layer_idx,
-                        layer.self_attn.q_proj.weight.shape,
-                    )
-                else:
-                    logger.debug("Layer %d q_proj has no weight attribute", layer_idx)
-            if hasattr(layer.self_attn, "k_proj"):
-                if hasattr(layer.self_attn.k_proj, "weight"):
-                    logger.debug(
-                        "Layer %d k_proj weight shape: %s",
-                        layer_idx,
-                        layer.self_attn.k_proj.weight.shape,
-                    )
-                else:
-                    logger.debug("Layer %d k_proj has no weight attribute", layer_idx)
-
         c = None
         if cache is not None and local_idx < len(cache):
             c = cache[local_idx]
 
         result = self.layers[local_idx](x, mask, c)
-        logger.debug("Layer %d output shape: %s", layer_idx, result.shape)
         return result
 
     def load_weights(self, weights, strict=False):
         """Load weights into the model"""
-        logger.debug("load_weights called with %s weights", len(weights))
-        logger.debug("First few weight keys: %s", [k for k, _ in weights[:5]])
-        logger.debug("abs_to_local mapping: %s", self.abs_to_local)
+        
 
         # Filter weights to only include what this shard needs
         shard_weights = {}
@@ -339,79 +282,23 @@ class Qwen3RingModel(BaseRingModel):
                 if parts[0] == "model":
                     parts = parts[1:]
                 new_key = ".".join(parts)
-                logger.debug(
-                    "Mapping weight %s (shape %s) -> %s", key, value.shape, new_key
-                )
+                
                 shard_weights[new_key] = value
 
             elif key.startswith("embed_tokens"):
                 shard_weights[key] = value
 
-                logger.debug("API layer: loading %s, shape=%s", key, value.shape)
+                
             elif key.startswith("norm"):
                 shard_weights[key] = value
-                logger.debug("API layer: loading %s, shape=%s", key, value.shape)
+                
 
             elif key.startswith("lm_head") and not self.config.tie_word_embeddings:
                 shard_weights[key] = value
-                logger.debug("API layer: loading %s, shape=%s", key, value.shape)
-
-        logger.debug("Loading %d weights into model", len(shard_weights))
-
-        if shard_weights:
-            # Log the first weight being loaded to check dimensions
-            first_key = list(shard_weights.keys())[0]
-            logger.debug(
-                "First weight to load: %s with shape %s",
-                first_key,
-                shard_weights[first_key].shape,
-            )
-
-            if "layers." in first_key:
-                layer_idx = first_key.split(".")[1]
-                logger.debug("Loading into local layer %s", layer_idx)
-                logger.debug("Number of layers in model: %d", len(self.layers))
-                if int(layer_idx) < len(self.layers):
-                    layer = self.layers[int(layer_idx)]
-                    # Log the current layer structure
-                    if hasattr(layer, "self_attn"):
-                        if hasattr(layer.self_attn, "q_proj"):
-                            logger.debug(
-                                "Current q_proj type: %s", type(layer.self_attn.q_proj)
-                            )
-                            if hasattr(layer.self_attn.q_proj, "weight"):
-                                logger.debug(
-                                    "Current q_proj weight shape: %s",
-                                    layer.self_attn.q_proj.weight.shape,
-                                )
-
-        # Load the filtered weights using parent class method
+            
         try:
             super().load_weights(list(shard_weights.items()), strict=strict)
-            logger.debug("Successfully loaded weights")
-
-            if (
-                logger.isEnabledFor(logging.DEBUG)
-                and (not self.is_quantized)
-                and shard_weights
-                and "layers." in first_key
-            ):
-                layer_idx = first_key.split(".")[1]
-                if int(layer_idx) < len(self.layers):
-                    layer = self.layers[int(layer_idx)]
-                    if hasattr(layer, "self_attn") and hasattr(
-                        layer.self_attn, "q_proj"
-                    ):
-                        if hasattr(layer.self_attn.q_proj, "weight"):
-                            weight = layer.self_attn.q_proj.weight
-                            m = mx.mean(weight).item()
-                            s = mx.std(weight).item()
-                            logger.debug(
-                                "After load q_proj stats: shape=%s mean=%.6f std=%.6f",
-                                weight.shape,
-                                m,
-                                s,
-                            )
+            
         except Exception as e:
             logger.error("Failed to load weights: %s", e)
             logger.error("Weight keys: %s", list(shard_weights.keys()))

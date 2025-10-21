@@ -28,9 +28,6 @@ class WeightCache:
         prefetch_threads: int = 2,
         *,
         resident_windows: int = 2,
-        file_cache_mode: str = "auto",
-        file_dict_cap: Optional[int] = None,
-        eager_load: bool = False,
     ):
         self.assigned_layers = assigned_layers
         # Resident budget: enforce up to N windows resident
@@ -48,9 +45,6 @@ class WeightCache:
             model_metadata,
             assigned_layers,
             thread_pool_size=int(prefetch_threads or 2),
-            file_cache_mode=file_cache_mode,
-            file_cache_cap=file_dict_cap,
-            eager_load=eager_load,
         )
         self.lock = threading.Lock()
         # Track in-flight materializations so compute can wait on prefetch
@@ -72,12 +66,6 @@ class WeightCache:
                     self.reference_counts[layer_id] = (
                         self.reference_counts.get(layer_id, 0) + 1
                     )
-                logger.debug(
-                    "Cache hit for layer %s, ref=%d inc=%d",
-                    layer_id,
-                    self.reference_counts.get(layer_id, 0),
-                    int(inc_ref),
-                )
                 return data
 
             # If a load is in-flight, wait on it outside the lock
@@ -151,12 +139,7 @@ class WeightCache:
                 logger.error("Wait for layer %s load failed: %s", layer_id, e)
                 return None
             wait_ms = (time.perf_counter() - t0w) * 1000.0
-            try:
-                logger.info(
-                    "[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms
-                )
-            except Exception:
-                pass
+            logger.info("[PROFILE][WAIT-WEIGHT] layer=%s ms=%.2f", layer_id, wait_ms)
             # Return from cache (now populated) and update ref/LRU
             with self.lock:
                 data, _ = self.cache.get(layer_id, (None, 0.0))  # type: ignore[assignment]
@@ -176,11 +159,7 @@ class WeightCache:
         with self.lock:
             if layer_id in self.reference_counts:
                 self.reference_counts[layer_id] -= 1
-                logger.debug(
-                    "Decreased ref count for %s: %d",
-                    layer_id,
-                    self.reference_counts[layer_id],
-                )
+                pass
 
     def prefetch_to_ram(self, layer_id: int):
         """Asynchronously hint the OS to prefetch layer pages into RAM.
@@ -196,8 +175,7 @@ class WeightCache:
             f = self.layer_manager.async_prefetch(layer_id)
             self.prefetch_futures[layer_id] = f
             return f
-        except Exception as e:
-            logger.debug("Prefetch to RAM failed for layer %s: %s", layer_id, e)
+        except Exception:
             return None
 
     def cancel_all_prefetch(self):

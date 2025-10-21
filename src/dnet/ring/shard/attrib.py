@@ -37,9 +37,7 @@ class RingShardNodeAttributes:
     running: bool
     weight_cache: WeightCache
     weight_prefetch_queue: Queue[int]
-    _materialize_prefetch_default: bool
     executor: ThreadPoolExecutor
-    _touch_during_compute: bool
     _compute_busy: threading.Event
 
     activation_computed_queue: asyncio.Queue[ActivationMessage]

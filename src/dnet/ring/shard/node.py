@@ -131,23 +131,17 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self._await_next_ready = False
         set_prefetch_mode(self.config.prefetch_mode)
         self._warmup_keep_flag = False
-        self._materialize_prefetch_default = bool(self.config.materialize_prefetch)
-        self._touch_during_compute = False
 
         # Streaming
         self._stream_backoff_s = float(self.config.stream_backoff_s)
         self._stream_idle_s = float(self.config.stream_idle_s)
         self._send_retries = int(self.config.send_retries)
         self._explicit_eor = bool(self.config.explicit_eor)
+        self._streaming_enabled = bool(self.config.streaming)
+        self._compress = bool(self.config.compress)
+        self._compress_min_bytes = int(self.config.compress_min_bytes)
 
-        # Prefetch IO and touches
-        self._file_io_direct = bool(self.config.file_io_direct)
-        self._prefetch_touch_mode = (
-            (self.config.prefetch_touch or "none").strip().lower()
-        )
-        self._prefetch_async = bool(self.config.prefetch_async)
-        self._prefetch_fraction = float(self.config.prefetch_fraction)
-        self._prefetch_budget_ms = float(self.config.prefetch_budget_ms)
+        # Prefetch simplified: only madvise path is used
 
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
@@ -166,7 +160,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             max_workers=int(self._device_prefetch_workers or 4)
         )
         self._active_nonce: Optional[str] = None
+        self._prefetch_init_nonce: Optional[str] = None
         self._bound_versions: Dict[int, int] = {}
+        self._x_stats = bool(self.config.x_stats)
+        self._streams = {}
 
         _wd = (self.config.wire_dtype or "fp16").strip().lower()
         if _wd in {"bf16", "bfloat16"}:
@@ -295,9 +292,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 window_size=self.window_size,
                 prefetch_threads=self._prefetch_threads,
                 resident_windows=self._resident_windows,
-                file_cache_mode=self.config.file_cache_mode,
-                file_dict_cap=self.config.file_dict_cap,
-                eager_load=False,
             )
 
             # Load the model
@@ -543,7 +537,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             if target_layer in self._assigned_set:
                 # First-hop prefetch on cold start for this nonce
-                if getattr(self, "_prefetch_init_nonce", None) != request.nonce:
+                if self._prefetch_init_nonce != request.nonce:
                     next_locals = self._next_local_layers(
                         target_layer, self.window_size - 1
                     )
@@ -777,7 +771,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
                 if target_layer in self._assigned_set:
                     # First-hop prefetch on cold start for this nonce
-                    if getattr(self, "_prefetch_init_nonce", None) != req.nonce:
+                    if self._prefetch_init_nonce != req.nonce:
                         next_locals = self._next_local_layers(
                             target_layer, self.window_size - 1
                         )
@@ -845,7 +839,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             raise RuntimeError("Model not initialized")
         try:
             now = time.perf_counter()
-            ttl = float(getattr(self, "_kv_ttl_s", 30.0))
+            ttl = float(self._kv_ttl_s)
             for n, ts in list(self._kv_last_seen.items()):
                 if (now - ts) > ttl:
                     self._kv_last_seen.pop(n, None)
@@ -1115,7 +1109,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         ]
         # Start idle sweeper to close silent streams
         try:
-            if getattr(self, "_streaming_enabled", False) and hasattr(
+            if self._streaming_enabled and hasattr(
                 self, "_stream_sweeper"
             ):
                 self.background_tasks.append(

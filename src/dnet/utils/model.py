@@ -1,13 +1,11 @@
 """Model metadata and weight loading utilities for dnet."""
 
-import os
 import ctypes
 import glob
 import json
 import mmap
 import re
 import struct
-import fcntl
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
@@ -186,45 +184,11 @@ class MappedFile:
 
 def load_weight(wt: TensorInfo, mapped_files: Dict[str, MappedFile]) -> mx.array:
     offset, size = wt.offset, wt.size_bytes
-
-    # Optional direct-I/O mode (macOS friendly): avoid populating page cache.
-    try:
-        direct = os.getenv("RING_FILE_IO", "").strip().lower() == "direct"
-    except Exception:
-        direct = False
-
-    if direct:
-        try:
-            fd = os.open(wt.filename, os.O_RDONLY)
-        except Exception:
-            fd = -1
-        layer_bytes = None
-        if fd >= 0:
-            try:
-                try:
-                    fcntl.fcntl(
-                        fd, fcntl.F_NOCACHE, 1
-                    )  # macOS advisory: don't add to cache
-                except Exception:
-                    pass
-                try:
-                    layer_bytes = os.pread(fd, int(size), int(offset))
-                except OSError:
-                    layer_bytes = None
-            finally:
-                os.close(fd)
-        if layer_bytes is not None and len(layer_bytes) == size:
-            layer_data = memoryview(layer_bytes)
-        else:
-            # Fallback to mmap path if direct read fails
-            direct = False
-    if not direct:
-        if wt.filename not in mapped_files:
-            mapped_files[wt.filename] = MappedFile(wt.filename)
-        mapped_file = mapped_files[wt.filename]
-        # Use a memoryview into the mmap to avoid an intermediate bytes copy
-        mv = memoryview(mapped_file.mmap)
-        layer_data = mv[offset : offset + size]
+    if wt.filename not in mapped_files:
+        mapped_files[wt.filename] = MappedFile(wt.filename)
+    mapped_file = mapped_files[wt.filename]
+    mv = memoryview(mapped_file.mmap)
+    layer_data = mv[offset : offset + size]
 
     # Special handling for BF16
     if wt.dtype == "BF16":

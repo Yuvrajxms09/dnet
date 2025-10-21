@@ -80,10 +80,7 @@ class ComputeMixin(RingShardNodeAttributes):
 
                 # Ensure weights for the window are resident and bind only if arrays changed
                 # if model fits and we've already bound these layers, skip the scan entirely.
-                fast_fit = (
-                    getattr(self, "_mode", "") == "fit"
-                    and len(self._assigned_sorted) <= self.window_size
-                )
+                fast_fit = (self._mode == "fit" and len(self._assigned_sorted) <= self.window_size)
                 skip_scan = fast_fit and all(
                     (wl in self._bound_versions) for wl in window_layers
                 )
@@ -236,7 +233,7 @@ class ComputeMixin(RingShardNodeAttributes):
                     )
                     # Optional activation stats at window boundary for debugging
                     try:
-                        if getattr(self, "_x_stats", False):
+                        if self._x_stats:
                             m = mx.mean(x)
                             s = mx.std(x)
                             mn = mx.min(x)
@@ -271,9 +268,7 @@ class ComputeMixin(RingShardNodeAttributes):
                 try:
                     self._recent_windows.append(list(window_layers))
                     if not self._defer_unload:
-                        while len(self._recent_windows) > max(
-                            1, int(getattr(self, "_resident_windows", 2))
-                        ):
+                        while len(self._recent_windows) > max(1, int(self._resident_windows)):
                             old = self._recent_windows.pop(0)
                             # Proactively evict; shrink params for old window
                             try:
@@ -406,10 +401,9 @@ class ComputeMixin(RingShardNodeAttributes):
                     output_msg.tx_enq_perf_t = 0.0
                 # Enqueue to asyncio TX queue from compute thread
                 try:
-                    loop = getattr(self, "_loop", None)
-                    if loop is not None:
+                    if self._loop is not None:
                         fut = asyncio.run_coroutine_threadsafe(
-                            self.activation_computed_queue.put(output_msg), loop
+                            self.activation_computed_queue.put(output_msg), self._loop
                         )
                         fut.result(timeout=10)
                     else:
@@ -443,11 +437,9 @@ class ComputeMixin(RingShardNodeAttributes):
                     )
 
                 # Optional unload/evict after stage
-                if getattr(self, "_defer_unload", False):
+                if self._defer_unload:
                     try:
-                        while len(self._recent_windows) > max(
-                            1, int(getattr(self, "_resident_windows", 2))
-                        ):
+                        while len(self._recent_windows) > max(1, int(self._resident_windows)):
                             old = self._recent_windows.pop(0)
                             try:
                                 evicted_cnt = self.weight_cache.evict_layers(old)
@@ -472,7 +464,7 @@ class ComputeMixin(RingShardNodeAttributes):
                     except Exception:
                         pass
 
-                if getattr(self, "_resident_windows", 2) <= 1:
+                if self._resident_windows <= 1:
                     try:
                         evicted = self.weight_cache.evict_layers(window_layers)
                         if hasattr(self.model, "unload_layers"):

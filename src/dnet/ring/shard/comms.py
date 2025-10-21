@@ -53,7 +53,7 @@ class CommsMixin(RingShardNodeAttributes):
             if not hasattr(self.next_node_stub, "StreamActivations"):
                 self._streaming_enabled = False
                 return None
-            ctx = getattr(self, "_streams", {}).get(nonce)
+            ctx = self._streams.get(nonce)
             if ctx and ctx.open:
                 # If the stream was temporarily disabled (e.g., backpressure),
                 # automatically re-enable after the backoff interval elapses.
@@ -66,8 +66,7 @@ class CommsMixin(RingShardNodeAttributes):
                 return ctx
 
             ctx = _StreamCtx(nonce=nonce, queue=asyncio.Queue(maxsize=64))
-            if not hasattr(self, "_streams"):
-                self._streams = {}
+            # _streams exists; initialized in node __init__
             self._streams[nonce] = ctx
 
             async def _req_iter():
@@ -95,7 +94,7 @@ class CommsMixin(RingShardNodeAttributes):
                         # Temporary backoff on backpressure; do not permanently disable
                         msg = str(getattr(ack, "message", "")).lower()
                         if "backpressure" in msg:
-                            backoff_s = float(getattr(self, "_stream_backoff_s", 0.5))
+                            backoff_s = float(self._stream_backoff_s)
                             loop = asyncio.get_running_loop()
                             ctx.disabled = True
                             ctx.disabled_until = loop.time() + backoff_s
@@ -111,7 +110,7 @@ class CommsMixin(RingShardNodeAttributes):
             return None
 
     async def _end_stream(self, nonce: str, *, eor: bool = False):
-        ctx = getattr(self, "_streams", {}).pop(nonce, None)
+        ctx = self._streams.pop(nonce, None)
         if not ctx:
             return
 
@@ -135,14 +134,14 @@ class CommsMixin(RingShardNodeAttributes):
             ctx.ack_task.cancel()
 
     async def _stream_sweeper(self):
-        idle_s = float(getattr(self, "_stream_idle_s", 2.0))
-        while getattr(self, "running", False):
+        idle_s = float(self._stream_idle_s)
+        while self.running:
             try:
                 if not self._streaming_enabled:
                     await asyncio.sleep(1.0)
                     continue
                 now = asyncio.get_running_loop().time()
-                for nonce, ctx in list(getattr(self, "_streams", {}).items()):
+                for nonce, ctx in list(self._streams.items()):
                     if (now - ctx.last_activity_t) > idle_s:
                         await self._end_stream(nonce, eor=False)
                 await asyncio.sleep(1.0)
@@ -173,7 +172,7 @@ class CommsMixin(RingShardNodeAttributes):
         ):
             try:
                 activation_msg = await self.activation_computed_queue.get()
-                if getattr(activation_msg, "tx_enq_perf_t", 0.0) and self._profile:
+                if activation_msg.tx_enq_perf_t and self._profile:
                     q_wait_ms = (
                         time.perf_counter() - activation_msg.tx_enq_perf_t
                     ) * 1000.0
@@ -199,7 +198,7 @@ class CommsMixin(RingShardNodeAttributes):
             return
         try:
             # Handle final token path (end-shard sampling)
-            if getattr(activation_msg, "is_final", False):
+            if activation_msg.is_final:
                 cb = activation_msg.callback_url or ""
                 parsed = urlparse(cb) if cb else None
                 t_rpc = time.perf_counter()
@@ -284,8 +283,7 @@ class CommsMixin(RingShardNodeAttributes):
 
             _len_bytes = int(getattr(shaped, "nbytes", 0))
             _do_compress = bool(
-                getattr(self, "_compress", False)
-                and _len_bytes >= getattr(self, "_compress_min_bytes", 65536)
+                self._compress and _len_bytes >= self._compress_min_bytes
             )
             if _do_compress:
                 # Skip compression for decode.
@@ -355,7 +353,7 @@ class CommsMixin(RingShardNodeAttributes):
 
                     if not stream_used:
                         t0 = time.perf_counter()
-                        max_attempts = max(1, int(getattr(self, "_send_retries", 3)))
+                        max_attempts = max(1, int(self._send_retries))
                         last_exc: Optional[Exception] = None
                         for attempt in range(1, max_attempts + 1):
                             try:
@@ -472,11 +470,8 @@ class CommsMixin(RingShardNodeAttributes):
                 # Optional: explicitly end the per-nonce stream on request completion
                 # Enable by setting RING_EXPLICIT_EOR=1 when you emit a true end-of-request signal.
                 try:
-                    if getattr(self, "_explicit_eor", False):
-                        if (
-                            getattr(self, "_streams", None)
-                            and activation_msg.nonce in self._streams
-                        ):
+                    if self._explicit_eor:
+                        if hasattr(self, "_streams") and activation_msg.nonce in self._streams:
                             await self._end_stream(activation_msg.nonce, eor=True)
                 except Exception:
                     pass
