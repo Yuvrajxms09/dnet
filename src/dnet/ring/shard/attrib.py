@@ -42,7 +42,6 @@ class RingShardNodeAttributes:
     _touch_during_compute: bool
     _compute_busy: threading.Event
 
-    next_node_stub: Optional[Any]
     activation_computed_queue: asyncio.Queue[ActivationMessage]
     _defer_unload: bool
     _warmup_keep_flag: bool
@@ -53,6 +52,8 @@ class RingShardNodeAttributes:
     app: FastAPI
     discovery: DnetP2P
     next_node: Optional[DnetDeviceProperties]
+    next_node_stub: Optional[Any]
+
     config: ShardConfig
 
     _sync_per_layer: bool

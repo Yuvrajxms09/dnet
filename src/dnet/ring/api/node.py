@@ -322,7 +322,7 @@ class RingApiNode:
         @self.app.post("/v1/chat/completions")
         async def chat_completions(
             req: ChatRequestModel,
-        ) -> ChatResponseModel | StreamingResponse:
+        ) -> ChatResponseModel:
             """Handle chat completion requests.
 
             If streaming is requested, returns a StreamingResponse."""
@@ -337,6 +337,7 @@ class RingApiNode:
                     detail="Not connected to first shard",
                 )
             if req.stream:
+                # FIXME: return type mismatch here
                 return StreamingResponse(
                     self._stream_chat(req), media_type="text/event-stream"
                 )
@@ -534,15 +535,16 @@ class RingApiNode:
         """
         # Decide model and assignments
         if self.topology:
-            model_to_load = self.topology.model
-            assignments_to_use = self.topology.assignments
-            if getattr(req, "model", None) and req.model != model_to_load:
+            topology = self.topology
+
+            if req.model and req.model != self.topology.model:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",
                     req.model,
-                    model_to_load,
+                    self.topology.model,
                 )
         else:
+            # ensure model is given
             if not req.model:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -554,24 +556,17 @@ class RingApiNode:
                 )
 
             # Bootstrap: run discovery-based prepare
-            await self._handle_prepare_topology(PrepareTopologyRequest(model=req.model))
-            model_to_load = self.topology.model  # type: ignore
-            assignments_to_use = self.topology.assignments  # type: ignore
+            topology = await self._handle_prepare_topology(
+                PrepareTopologyRequest(model=req.model)
+            )
 
+        model_to_load = topology.model
+        assignments_to_use = topology.assignments
+        shards = {dev.instance: dev for dev in topology.devices}
         logger.info("Loading model: %s", model_to_load)
 
-        # Resolve shard endpoints
-        api_properties = self.discovery.get_own_properties()
-        if self.topology and self.topology.devices:
-            # Build mapping from topology (service/instance -> properties)
-            shards: Dict[str, DnetDeviceProperties] = {
-                dev.instance: dev for dev in self.topology.devices
-            }
-        else:
-            # Fallback to discovery when no topology is configured
-            shards = self._get_shards_from_discovery()
-
         # Notify each shard to load their layers via HTTP
+        api_properties = self.discovery.get_own_properties()
         shard_statuses: List[ShardLoadStatus] = []
         async with httpx.AsyncClient() as http_client:
             for assignment in assignments_to_use:
@@ -612,13 +607,6 @@ class RingApiNode:
                         )
 
                 try:
-                    # Total layers from topology (present after bootstrap)
-                    total_layers = (
-                        self.topology.num_layers
-                        if self.topology
-                        else (max(layers) + 1 if layers else 0)
-                    )
-
                     # Build API callback address (gRPC)
                     api_callback_address = f"{api_properties.local_ip}:{self.grpc_port}"
 
@@ -630,7 +618,7 @@ class RingApiNode:
                         warmup=True,
                         next_node=next_shard,
                         window_size=assignment.window_size,
-                        total_layers=total_layers,
+                        total_layers=topology.num_layers,
                         api_callback_address=api_callback_address,
                     ).model_dump()
 

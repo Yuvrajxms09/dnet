@@ -336,9 +336,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):  # , StartupMixin)
                     if tied:
                         # End shard needs embeddings for tied projection
                         if not has_start:
-                            loaded_cnt += load_embeddings(
-                                self.model_metadata, self.model
-                            )
+                            loaded_cnt += load_embeddings(self.model_metadata, self.model)  # fmt: skip
                         try:
                             setattr(self.model, "force_tied_head", True)
                         except Exception:
