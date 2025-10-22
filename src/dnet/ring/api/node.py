@@ -850,7 +850,16 @@ class RingApiNode:
 
             # Prepare generate_step with gRPC callback
             api_properties = self.discovery.get_own_properties()
-            callback_addr = f"{api_properties.local_ip}:{self.grpc_port}"
+            # Prefer Thunderbolt IP for token callbacks if available
+            tb_ip = None
+            try:
+                tb = api_properties.thunderbolt
+                if tb and tb.ip_addr:
+                    tb_ip = tb.ip_addr
+            except Exception:
+                tb_ip = None
+            cb_ip = tb_ip or api_properties.local_ip
+            callback_addr = f"{cb_ip}:{self.grpc_port}"
             self.generate_step = create_generate_step_for_ring_with_grpc(
                 self.first_shard_stub,
                 callback_protocol="grpc",
