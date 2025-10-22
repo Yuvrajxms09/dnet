@@ -268,6 +268,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             self._mode = "fit" if requested_w >= local_count else "offload"
             self.config = ShardConfig.for_mode(self._mode)  # Reset config
+            set_prefetch_mode(self.config.prefetch_mode)  # Apply new config's prefetch mode
             eff_window_size = (
                 local_count
                 if (self._mode == "fit")

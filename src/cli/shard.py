@@ -12,7 +12,7 @@ from dnet.ring.shard import RingShardNode
 async def serve(
     grpc_port: int,
     http_port: int,
-    queue_size: int = 10,
+    queue_size: int = 128,
 ) -> None:
     """Serve the shard node.
 
