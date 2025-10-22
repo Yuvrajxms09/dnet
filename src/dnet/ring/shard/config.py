@@ -89,6 +89,6 @@ class ShardConfig:
             prefetch_mode="off",  # Use full prefetching for fit mode
             wire_dtype="fp16",
             warmup_windows=1,
-            streaming=False,
+            streaming=True,
             compress=False,
         )

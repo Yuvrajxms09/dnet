@@ -1327,6 +1327,9 @@ class RingApiNode:
             ]
             prompt_text = await self._convert_chat(req.messages)
             prompt = mx.array(self.tokenizer.encode(prompt_text))  # type: ignore
+            prompt_tokens = int(len(prompt))  # 1D token count
+            t_start = time.perf_counter()
+            t_first_token: Optional[float] = None
             detok = self.tokenizer.detokenizer
             detok.reset()
             # Initial role delta
@@ -1334,7 +1337,7 @@ class RingApiNode:
                 "id": nonce,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": getattr(req, "model", None) or "default_model",
+                "model": req.model,
                 "choices": [
                     {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
                 ],
@@ -1359,18 +1362,19 @@ class RingApiNode:
                 ),
                 arange(req.max_tokens or 0),
             ):
+                if t_first_token is None:
+                    t_first_token = time.perf_counter()
                 tokens.append(token)
                 detok.add_token(token)
-                delta = (
-                    detok.delta
-                    if hasattr(detok, "delta")
-                    else self.tokenizer.decode([token])
-                )
+                try:
+                    delta = detok.delta
+                except Exception:
+                    delta = self.tokenizer.decode([token])
                 chunk = {
                     "id": nonce,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": getattr(req, "model", None) or "default_model",
+                    "model": req.model,
                     "choices": [
                         {"index": 0, "delta": {"content": delta}, "finish_reason": None}
                     ],
@@ -1383,13 +1387,33 @@ class RingApiNode:
                 if stop.stop_met:
                     break
 
+            # Build end-of-stream chunk with usage + metrics
+            t_end = time.perf_counter()
+            total_s = max(t_end - t_start, 1e-9)
+            gen_s = max(t_end - (t_first_token or t_start), 1e-9)
+            tokens_generated = len(tokens)
             done = {
                 "id": nonce,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": getattr(req, "model", None) or "default_model",
+                "model": req.model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": tokens_generated,
+                    "total_tokens": prompt_tokens + tokens_generated,
+                },
             }
+            if req.profile:
+                metrics = {
+                    "total_ms": round(total_s * 1000.0, 3),
+                    "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
+                    "token_gen_ms": round(gen_s * 1000.0, 3),
+                    "tokens_generated": tokens_generated,
+                    "tps_overall": round((tokens_generated / total_s) if tokens_generated else 0.0, 4),
+                    "tps_decoding": round((tokens_generated / gen_s) if tokens_generated else 0.0, 4),
+                }
+                done["metrics"] = metrics
             yield f"data: {json.dumps(done)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -1401,8 +1425,12 @@ class RingApiNode:
 
         async def gen():
             prompt = mx.array(self.tokenizer.encode(req.prompt))  # type: ignore
+            prompt_tokens = int(len(prompt))
+            t_start = time.perf_counter()
+            t_first_token: Optional[float] = None
             detok = self.tokenizer.detokenizer
             detok.reset()
+            out_tokens = 0
             async for (token, _), _ in azip(
                 self.generate_step(
                     nonce=nonce,
@@ -1420,28 +1448,49 @@ class RingApiNode:
                 ),  # type: ignore
                 arange(req.max_tokens or 0),
             ):
+                if t_first_token is None:
+                    t_first_token = time.perf_counter()
+                out_tokens += 1
                 detok.add_token(token)
-                delta = (
-                    detok.delta
-                    if hasattr(detok, "delta")
-                    else self.tokenizer.decode([token])
-                )
+                try:
+                    delta = detok.delta
+                except Exception:
+                    delta = self.tokenizer.decode([token])
                 chunk = {
                     "id": nonce,
                     "object": "text_completion.chunk",
                     "created": created,
-                    "model": getattr(req, "model", None) or "default_model",
+                    "model": req.model,
                     "choices": [{"index": 0, "text": delta, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
+            # End-of-stream chunk with usage + metrics
+            t_end = time.perf_counter()
+            total_s = max(t_end - t_start, 1e-9)
+            gen_s = max(t_end - (t_first_token or t_start), 1e-9)
             done = {
                 "id": nonce,
                 "object": "text_completion.chunk",
                 "created": created,
-                "model": getattr(req, "model", None) or "default_model",
+                "model": req.model,
                 "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": out_tokens,
+                    "total_tokens": prompt_tokens + out_tokens,
+                },
             }
+            if req.profile:
+                metrics = {
+                    "total_ms": round(total_s * 1000.0, 3),
+                    "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
+                    "token_gen_ms": round(gen_s * 1000.0, 3),
+                    "tokens_generated": out_tokens,
+                    "tps_overall": round((out_tokens / total_s) if out_tokens else 0.0, 4),
+                    "tps_decoding": round((out_tokens / gen_s) if out_tokens else 0.0, 4),
+                }
+                done["metrics"] = metrics
             yield f"data: {json.dumps(done)}\n\n"
             yield "data: [DONE]\n\n"
 
