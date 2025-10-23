@@ -264,10 +264,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             local_count = max(1, len(self.assigned_layers))
 
             self._mode = "fit" if requested_w >= local_count else "offload"
-            # Preserve mxload_fastpath toggle across mode reset
-            prev_fastpath = self.config.mxload_fastpath
-            self.config = ShardConfig.for_mode(self._mode)  # Reset config
-            self.config.mxload_fastpath = prev_fastpath
+            # Reset config for the selected mode (adaptive defaults per mode)
+            # If you need to override mxload_fastpath, set it via CLI/config before load.
+            self.config = ShardConfig.for_mode(self._mode)
             set_prefetch_mode(
                 self.config.prefetch_mode
             )  # Apply new config's prefetch mode
