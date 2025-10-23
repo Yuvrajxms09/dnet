@@ -131,6 +131,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self._await_next_ready = False
         set_prefetch_mode(self.config.prefetch_mode)
         self._warmup_keep_flag = False
+        self._warmup_completed = False
 
         # Streaming
         self._stream_backoff_s = float(self.config.stream_backoff_s)
@@ -258,10 +259,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             except Exception:
                 pass
 
-            # Initialize memory pools (configurable)
-            self.input_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.input_pool_mb))
-            self.output_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.output_pool_mb))
-
             # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(req.window_size)))
             local_count = max(1, len(self.assigned_layers))
@@ -293,6 +290,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 self.config.mode,
                 self._mode,
             )
+
+            # Initialize memory pools with final config sizes
+            self.input_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.input_pool_mb))
+            self.output_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.output_pool_mb))
 
             # Initialize weight cache
             self.weight_cache = WeightCache(

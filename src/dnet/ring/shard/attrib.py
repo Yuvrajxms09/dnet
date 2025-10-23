@@ -43,6 +43,7 @@ class RingShardNodeAttributes:
     activation_computed_queue: asyncio.Queue[ActivationMessage]
     _defer_unload: bool
     _warmup_keep_flag: bool
+    _warmup_completed: bool
 
     # node
     grpc_port: int
