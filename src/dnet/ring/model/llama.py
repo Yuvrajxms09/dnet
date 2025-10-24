@@ -3,18 +3,20 @@ from typing import Any, Dict, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm.models.base import create_attention_mask
-from mlx_lm.models.qwen3 import ModelArgs, TransformerBlock
+from mlx_lm.models.llama import ModelArgs, TransformerBlock
 
 from .base import BaseRingModel
 from ...utils.logger import logger
 
 
-class Qwen3RingModel(BaseRingModel):
-    """Qwen3 model for ring topology inference.
-    Supports layer-wise application and distributed inference.
+class LlamaRingModel(BaseRingModel):
+    """Llama model for ring topology inference.
+
+    Mirrors mlx-lm's Llama modules but constructs only the locally assigned
+    decoder blocks and exposes layer-wise application.
     """
 
-    model_type = "qwen3"
+    model_type = "llama"
 
     def __init__(
         self,
@@ -34,7 +36,7 @@ class Qwen3RingModel(BaseRingModel):
 
         if "quantization" in model_config:
             try:
-                from mlx.nn.layers.quantized import QuantizedEmbedding
+                from mlx.nn.layers.quantized import QuantizedEmbedding  # type: ignore
 
                 qcfg = model_config["quantization"]
                 bits = int(qcfg.get("bits", 8))
@@ -64,38 +66,28 @@ class Qwen3RingModel(BaseRingModel):
             self.layers.append(TransformerBlock(config))
             self.abs_to_local[layer] = i
 
+        # Optional post-init quantization of Linear layers for offload shards
         if self.is_quantized and (not is_api_layer):
             try:
-                bits = (
-                    int(self.quantization_config.get("bits", 8))
-                    if hasattr(self, "quantization_config")
-                    else 8
-                )
-                group = (
-                    int(self.quantization_config.get("group_size", 64))
-                    if hasattr(self, "quantization_config")
-                    else 64
-                )
+                bits = int(self.quantization_config.get("bits", 8))
+                group = int(self.quantization_config.get("group_size", 64))
+
                 def _quant_pred(p, m):
                     return isinstance(m, nn.Linear)
 
-                nn.quantize(
-                    self, bits=bits, group_size=group, class_predicate=_quant_pred
-                )
+                nn.quantize(self, bits=bits, group_size=group, class_predicate=_quant_pred)
                 self._converted_to_quantized = True
             except Exception as _e:
                 logger.warning("Init-time quantization failed: %s", _e)
-        elif not is_api_layer:
-            pass
-        
+        else:
+            self._converted_to_quantized = False
 
-        self._converted_to_quantized = False
         self.force_tied_head: bool = False
         self._cached_mask_state = None
         self._cached_mask = None
 
         self._lazy_params = bool(getattr(shard_config, "lazy_params", False))
-        # Do not shrink params for quantized models; conversion relies on real shapes
+        # Do not shrink params for quantized models
         if self.is_quantized and self._lazy_params:
             self._lazy_params = False
         if (not self.is_api_layer) and self._lazy_params:
@@ -108,15 +100,13 @@ class Qwen3RingModel(BaseRingModel):
         try:
             import mlx.core as _mx
 
-            for name in ("weight", "bias", "scales", "biases"):
+            for name in ("weight", "scales", "biases", "bias"):
                 if hasattr(mod, name):
                     arr = getattr(mod, name)
                     try:
-                        # shp = tuple(arr.shape)
                         dt = arr.dtype
                     except Exception:
-                        continue
-                    # Minimal shapes for placeholders
+                        dt = _mx.float16
                     if name == "weight":
                         new_arr = _mx.zeros((1, 1), dtype=dt)
                     elif name in ("scales", "biases", "bias"):
@@ -129,13 +119,11 @@ class Qwen3RingModel(BaseRingModel):
 
     def _shrink_block(self, block):
         try:
-            # Attention projections
             if hasattr(block, "self_attn"):
                 attn = block.self_attn
                 for pn in ("q_proj", "k_proj", "v_proj", "o_proj"):
                     if hasattr(attn, pn):
                         self._shrink_linear_like(getattr(attn, pn))
-            # MLP projections
             if hasattr(block, "mlp"):
                 mlp = block.mlp
                 for pn in ("gate_proj", "up_proj", "down_proj"):
@@ -148,13 +136,8 @@ class Qwen3RingModel(BaseRingModel):
         for b in self.layers:
             self._shrink_block(b)
 
-    def unload_layers(self, abs_layers: list[int]):
-        """Shrink params for given absolute layer ids to placeholders.
-
-        Call after a window is evicted to free memory retained by module params.
-        """
-        # Do not shrink quantized models to avoid introducing (1,1) placeholders
-        # in QuantizedLinear modules which will break subsequent matmuls.
+    def unload_layers(self, abs_layers: List[int]):
+        # Skip for quantized models to avoid placeholder matmuls
         if self.is_quantized:
             return
         for abs_idx in abs_layers:
@@ -168,34 +151,23 @@ class Qwen3RingModel(BaseRingModel):
                 continue
 
     def embed(self, x: mx.array) -> mx.array:
-        if hasattr(self, "embed_tokens"):
-            return self.embed_tokens(x)
-        return x
+        return self.embed_tokens(x)
 
     def normalize(self, x: mx.array) -> mx.array:
-        if hasattr(self, "norm"):
-            return self.norm(x)
-        return x
+        return self.norm(x)
 
     def lm_project(self, x: mx.array) -> mx.array:
-        if hasattr(self, "lm_head") or hasattr(self, "embed_tokens"):
-            use_tied = bool(self.force_tied_head) or bool(
-                getattr(self.config, "tie_word_embeddings", False)
-            )
-            if use_tied or not hasattr(self, "lm_head"):
-                return self.embed_tokens.as_linear(x)
-            return self.lm_head(x)
-        return x
+        use_tied = bool(self.force_tied_head) or bool(getattr(self.config, "tie_word_embeddings", False))
+        if use_tied or not hasattr(self, "lm_head"):
+            return self.embed_tokens.as_linear(x)
+        return self.lm_head(x)
 
     def forward(self, x: mx.array, cache: Optional[List[Any]] = None) -> mx.array:
         mask = create_attention_mask(x, cache)
-
         if cache is None:
             cache = [None] * len(self.layers)
-
         for i, layer in enumerate(self.layers):
             x = layer(x, mask, cache[i] if i < len(cache) else None)
-
         return x
 
     def apply_single_layer(
@@ -203,7 +175,7 @@ class Qwen3RingModel(BaseRingModel):
     ) -> mx.array:
         if layer_idx not in self.abs_to_local:
             raise RuntimeError(f"Layer {layer_idx} not hosted on this model instance")
-        #  TODO: Mask reuse should respect concurrent requests
+        # Create/reuse attention mask when T > 1
         try:
             T = int(x.shape[1]) if len(x.shape) > 1 else 1
         except Exception:
@@ -221,19 +193,16 @@ class Qwen3RingModel(BaseRingModel):
                     self._cached_mask = mask
                     self._cached_mask_state = T
         local_idx = self.abs_to_local[layer_idx]
-
         c = None
         if cache is not None and local_idx < len(cache):
             c = cache[local_idx]
-
-        result = self.layers[local_idx](x, mask, c)
-        return result
+        return self.layers[local_idx](x, mask, c)
 
     def load_weights(self, weights, strict=False):
-        """Load weights into the model"""
-        
-        # Filter weights to only include what this shard needs
-        shard_weights = {}
+        """Load only local layer and API tensors. Remap abs->local indices.
+        Accepts keys in either 'model.layers.N.*' or 'layers.N.*' formats.
+        """
+        shard_weights: Dict[str, mx.array] = {}
 
         for key, value in weights:
             if key.startswith("model.layers.") or key.startswith("layers."):
@@ -250,15 +219,14 @@ class Qwen3RingModel(BaseRingModel):
                 if parts[0] == "model":
                     parts = parts[1:]
                 new_key = ".".join(parts)
-                
                 shard_weights[new_key] = value
-
-            elif key.startswith("embed_tokens") or key.startswith("norm") or key.startswith("lm_head") and not self.config.tie_word_embeddings:
+            elif key.startswith("embed_tokens") or key.startswith("norm") or (
+                key.startswith("lm_head") and not self.config.tie_word_embeddings
+            ):
                 shard_weights[key] = value
-            
+
         try:
             super().load_weights(list(shard_weights.items()), strict=strict)
-            
         except Exception as e:
             logger.error("Failed to load weights: %s", e)
             logger.error("Weight keys: %s", list(shard_weights.keys()))
@@ -270,7 +238,8 @@ class Qwen3RingModel(BaseRingModel):
 
     @property
     def head_dim(self) -> Tuple[int, int]:
-        return (self.config.head_dim, self.config.head_dim)
+        head_dim = self.config.head_dim or self.config.hidden_size // self.config.num_attention_heads
+        return (head_dim, head_dim)
 
     @property
     def n_kv_heads(self) -> int:

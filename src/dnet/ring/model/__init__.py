@@ -5,6 +5,7 @@ from typing import Any, List, Optional
 from ...utils.loader import subclass_where
 from .base import BaseRingModel
 from .deepseek_v2 import DeepseekV2RingModel
+from .llama import LlamaRingModel
 from .qwen3 import Qwen3RingModel
 
 
@@ -38,6 +39,7 @@ def get_ring_model(
 __all__ = [
     "BaseRingModel",
     "DeepseekV2RingModel",
+    "LlamaRingModel",
     "Qwen3RingModel",
     "get_ring_model",
 ]

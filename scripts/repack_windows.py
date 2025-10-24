@@ -102,6 +102,30 @@ def repack_windows(
             mx.save_safetensors(str(out_path), subset)
             written.append(out_path)
             print(f"Wrote {out_path} with {len(subset)} tensors")
+        # Always include API-layer tensors (embeddings, final norm, lm head)
+        api_subset: Dict[str, mx.array] = {}
+        try:
+            # Embeddings
+            for k, wt in md.embed_tokens.items():
+                api_subset[f"model.embed_tokens.{k}"] = load_weight(wt, mapped_files)
+            # Final norm
+            for k, wt in md.norm.items():
+                api_subset[f"model.norm.{k}"] = load_weight(wt, mapped_files)
+            # LM head
+            for k, wt in md.lm_head.items():
+                api_subset[f"lm_head.{k}"] = load_weight(wt, mapped_files)
+        except Exception as e:
+            print(f"Warning: failed to gather API-layer tensors: {e}")
+        if api_subset:
+            api_name = f"{out_prefix.name}_api.safetensors"
+            api_path = (out_prefix.parent / api_name)
+            mx.save_safetensors(str(api_path), api_subset)
+            written.append(api_path)
+            print(
+                f"Wrote {api_path} with {len(api_subset)} API-layer tensors (embed/norm/head)"
+            )
+        else:
+            print("Warning: No API-layer tensors found (embed/norm/head); check source model files")
     finally:
         for mf in mapped_files.values():
             try:
