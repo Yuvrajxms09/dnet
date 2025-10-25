@@ -89,7 +89,7 @@ class ShardConfig:
                 warmup_windows=1,
                 streaming=False,
                 compress=False,
-                mxload_fastpath=True,
+                mxload_fastpath=False,
                 input_pool_mb=256,
                 output_pool_mb=256,
             )

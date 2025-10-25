@@ -69,7 +69,7 @@ def main() -> None:
         "-q",
         "--queue-size",
         type=int,
-        default=10,
+        default=256,
         help="Activation queue size (default: 10)",
     )
     args = ap.parse_args()
