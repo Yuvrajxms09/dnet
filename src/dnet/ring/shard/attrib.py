@@ -33,7 +33,6 @@ class RingShardNodeAttributes:
     weight_cache: WeightCache
     executor: ThreadPoolExecutor
     _compute_busy: threading.Event
-    sequential_io: bool
     _prepared_window_layers: list[int]
     _prepare_fut: Optional[Any]
 

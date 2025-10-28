@@ -117,8 +117,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self.input_pool: Optional[LayerAwareMemoryPool] = None
         self.output_pool: Optional[LayerAwareMemoryPool] = None
         self.weight_cache: Optional[WeightCache] = None
-        # Offload IO strategy: sequential (no background prefetch) vs overlap
-        self.sequential_io: bool = bool(self.config.sequential_io)
         self._prepared_window_layers: list[int] = []
         self._prepare_fut = None
 
@@ -266,7 +264,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             self._resident_windows = int(
                 self.config.resident_windows
             )  # Update resident windows
-            self.sequential_io = bool(self.config.sequential_io)
+            # Mode already selects sequential IO behavior when offload
             eff_window_size = (
                 local_count
                 if (self._mode == "fit")
@@ -374,7 +372,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             # TODO: Make sure this is the right spot for prefetching
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
-                if not self.sequential_io:
+                if self._mode == "fit":
                     for lyr in initial_window:
                         self._prefetch_to_ram(lyr)
                         self._enqueue_weight_prefetch(lyr)

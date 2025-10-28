@@ -13,12 +13,12 @@ from dataclasses import dataclass, field
 class KVCacheConfig:
     """Quantized/unquantized KV cache configuration.
 
-    - mode: "fp16" (default), "int8", "int4", or "quant" (custom bits)
+    - mode: "fp16" (default), "8bit", "4bit", or "quant" (custom bits)
     - bits: number of bits when mode == "quant" (1..8)
     - group_size: grouping for quantized cache (e.g., 64)
     """
 
-    mode: str = "fp16"
+    mode: str = "8bit"
     bits: int = 8
     group_size: int = 64
     kv_ttl_s: float = 30.0
@@ -65,12 +65,8 @@ class ShardConfig:
     # KV cache quantization
     kv_cache: KVCacheConfig = field(default_factory=KVCacheConfig)
 
-    # Weight loading behavior
     # Enable mx.load fast-path only for explicitly repacked files/windows.
-    # Default False to avoid loading full multi-layer shard files in offload mode.
     mxload_fastpath: bool = False
-    # IO strategy: True for sequential (no background prefetch/overlap)
-    sequential_io: bool = False
 
     # Activation pool sizes (MB)
     input_pool_mb: int = 512
@@ -90,7 +86,6 @@ class ShardConfig:
                 streaming=False,
                 compress=False,
                 mxload_fastpath=True,  # Use mx.load fast-path with repacked per-layer/per-window files
-                sequential_io=True,
                 input_pool_mb=256,
                 output_pool_mb=256,
             )
@@ -104,7 +99,6 @@ class ShardConfig:
             streaming=True,
             compress=False,
             mxload_fastpath=False,
-            sequential_io=False,
             input_pool_mb=512,
             output_pool_mb=512,
         )

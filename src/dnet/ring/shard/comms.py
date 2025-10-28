@@ -394,7 +394,7 @@ class CommsMixin(RingShardNodeAttributes):
 
                     # Idle-only fastpath prefetch for inter-device overlap: after TX, warm next window
                     try:
-                        if self.sequential_io and self.window_size > 0:
+                        if self._mode == "offload" and self.window_size > 0:
                             next_window = self._next_local_layers(
                                 activation_msg.layer_id, self.window_size
                             )

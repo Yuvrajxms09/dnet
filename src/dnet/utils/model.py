@@ -405,22 +405,17 @@ def make_cache(
     kv_bits: int | None = None,
     kv_group: int | None = None,
 ):
-    """Create model KV cache with optional quantization (config-only).
-
-    This function does not read environment variables. Callers must pass
-    kv_mode/bits/group explicitly, or rely on the defaults below.
+    """Create model KV cache with optional quantization.
     """
     caches = cache.make_prompt_cache(model)
-
-    # Resolve mode strictly from parameters (no env)
     mode: str = (kv_mode or "fp16").strip().lower()
 
-    if mode in {"int8", "int4", "quant", "q"}:
+    if mode in {"8bit", "4bit", "quant", "q"}:
         bits_env = int(kv_bits if kv_bits is not None else 8)
         # Map mode shortcuts
-        if mode == "int4":
+        if mode == "4bit":
             bits = 4
-        elif mode == "int8":
+        elif mode == "8bit":
             bits = 8
         else:
             bits = max(1, min(8, bits_env))
@@ -431,7 +426,7 @@ def make_cache(
         for c in caches:
             if hasattr(c, "to_quantized"):
                 try:
-                    qc = c.to_quantized(group_size=group, bits=bits)  # type: ignore[attr-defined]
+                    qc = c.to_quantized(group_size=group, bits=bits)
                     converted.append(qc)
                     converted_any = True
                 except Exception as e:
@@ -453,6 +448,4 @@ def make_cache(
                 "KV quantization requested but not supported by cache type; using fp16 KV cache"
             )
             return caches
-
-    # Default fp16/unquantized cache
     return caches

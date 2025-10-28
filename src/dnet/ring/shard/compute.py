@@ -80,7 +80,7 @@ class ComputeMixin(RingShardNodeAttributes):
 
                 # In sequential offload, if an idle prefetch for this exact window is in-flight,
                 # wait for it to complete so the window is resident before binding/compute.
-                if self.sequential_io and window_layers and (
+                if self._mode == "offload" and window_layers and (
                     self._prepared_window_layers == window_layers
                 ):
                     fut = self._prepare_fut
@@ -400,11 +400,6 @@ class ComputeMixin(RingShardNodeAttributes):
                             )
                     except Exception:
                         pass
-
-                for nl in next_window:
-                    self._enqueue_weight_prefetch(nl)
-                # Finished all local work for this activation
                 return
-
         except Exception as e:
             logger.exception("Error processing activation: %s", e)
