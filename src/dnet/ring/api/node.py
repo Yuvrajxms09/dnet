@@ -72,7 +72,6 @@ from ..shard.models import (
     ShardProfileResponse,
 )
 from ..data_types import StopCondition
-from ..model import get_ring_model
 from .servicer import ShardApiServicer
 from ..common import TopologyInfo, LayerAssignment
 
@@ -113,7 +112,6 @@ class RingApiNode:
         self.grpc_port = grpc_port
 
         self.model_metadata: Optional[ModelMetadata] = None
-        self.model: Optional[Any] = None
         self.tokenizer: Optional[Any] = None
         self.generate_step: Optional[Any] = None
         self.model_name: Optional[str] = None
@@ -223,10 +221,11 @@ class RingApiNode:
 
         @self.app.get("/health")
         async def health() -> JSONResponse:
+            model_loaded = (self.tokenizer is not None) and (self.generate_step is not None)
             return JSONResponse(
                 content={
                     "status": "ok",
-                    "model_loaded": self.model is not None,
+                    "model_loaded": model_loaded,
                     "model_name": self.model_name,
                     "topology_configured": bool(self.topology),
                 }
@@ -306,7 +305,7 @@ class RingApiNode:
             """Handle chat completion requests.
 
             If streaming is requested, returns a StreamingResponse."""
-            if self.model is None:
+            if (self.tokenizer is None) or (self.generate_step is None):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="No model loaded. Call /v1/load_model first.",
@@ -376,8 +375,8 @@ class RingApiNode:
         )
         shards_list = [shards[name] for name in optimized_device_name_order]
         layer_assignments = compute_layer_assignments(
-            optimized_device_name_order, solution.w, solution.k, shards
-        ) #TODO: handle cases where k=1, w > n 
+            optimized_device_name_order, solution.w, solution.n, solution.k, shards
+        )
         self.topology = TopologyInfo(
             model=req.model,
             num_layers=model_metadata.num_layers,
@@ -418,6 +417,7 @@ class RingApiNode:
                     layers=assignment.layers,
                     next_instance=assignment.next_instance,
                     window_size=assignment.window_size,
+                    residency_size=assignment.window_size, # use window_size as residency_size for manual topology
                 )
             )
 
@@ -459,6 +459,7 @@ class RingApiNode:
                     layers=a.layers,
                     next_instance=a.next_instance or ring_map.get(a.instance),
                     window_size=a.window_size,
+                    residency_size=a.window_size
                 )
                 for a in normalized
             ]
@@ -617,15 +618,6 @@ class RingApiNode:
                 # Load tokenizer
                 self.tokenizer = load_tokenizer(Path(model_to_load), {})
 
-                # Load API-side model (embeddings, lm_head, etc.)
-                self.model = get_ring_model(
-                    self.model_metadata.model_type,
-                    self.model_metadata.model_config,
-                    is_api_layer=True,
-                )
-                # load_api_layer_weights(self.model_metadata, self.model)
-                # FIXME: I think we don't need to load lm_head + embedding at API side
-
                 # Connect to first shard (head device)
                 # this should be the first device in `self.topology.devices`
                 await self._connect_first_shard()
@@ -722,7 +714,6 @@ class RingApiNode:
 
         # Unload API-side model components
         try:
-            self.model = None
             self.tokenizer = None
             self.model_metadata = None
             self.model_name = None

@@ -130,6 +130,7 @@ def create_generate_step_for_ring_with_grpc(
 def compute_layer_assignments(
     device_names: list[str],
     solution_w: list[int],
+    solution_n: list[int],
     solution_k: int,
     shards: Dict[str, DnetDeviceProperties],
 ) -> list[LayerAssignment]:
@@ -138,15 +139,16 @@ def compute_layer_assignments(
     Args:
         device_names: Device names in solver order
         solution_w: Solver result `w` for list of assigned layers.
+        solution_n: Solver result `n` for number of GPU resident layers. 
         solution_k: Solver result `k` for number of rounds.
         shards: Discovered shards
 
     Returns:
         Tuple of (layer assignments per device per round, next instance per device in ring, prefetch window per device)
     """
-    if len(solution_w) != len(shards) or len(device_names) != len(shards):
+    if len(solution_w) != len(shards) or len(device_names) != len(shards) or len(solution_n) != len(shards):
         raise ValueError(
-            f"Device count mismatch: solution={len(solution_w)}, shards={len(shards)}"
+            f"Device count mismatch: solution={len(solution_w)}, shards={len(shards)}, solution_n={len(solution_n)}"
         )
 
     num_layers = sum(solution_w) * solution_k
@@ -160,12 +162,14 @@ def compute_layer_assignments(
     layer_assignments: Dict[str, list[list[int]]] = {
         name: [[] for _ in range(solution_k)] for name in device_names
     }
+    residency_sizes: Dict[str, int] = {}
     current_layer = 0
     for round_idx in range(solution_k):
         for device_idx, device_name in enumerate(device_names):
             for _ in range(solution_w[device_idx]):
                 layer_assignments[device_name][round_idx].append(current_layer)
                 current_layer += 1
+            residency_sizes[device_name] = solution_n[device_idx]
     assert current_layer == num_layers, (
         f"Assigned {current_layer} layers, expected {num_layers}"
     )
@@ -224,6 +228,7 @@ def compute_layer_assignments(
             layers=layer_assignments[name],
             next_instance=next_instance_map[name],
             window_size=window_sizes[name],
+            residency_size=residency_sizes[name],
         )
         for name in device_names
     ]
