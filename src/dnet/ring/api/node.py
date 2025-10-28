@@ -34,6 +34,8 @@ from distilp import (
 )
 from distilp.components.dense_common import HALDAResult
 
+from dnet.ring.model.base import BaseRingModel
+
 from ...protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from ...protos.shard_api_comm_pb2_grpc import (
     add_ShardApiServiceServicer_to_server,
@@ -113,10 +115,10 @@ class RingApiNode:
         self.grpc_port = grpc_port
 
         self.model_metadata: Optional[ModelMetadata] = None
-        self.model: Optional[Any] = None
+        self.model: Optional[BaseRingModel] = None
+        self.model_name: Optional[str] = None
         self.tokenizer: Optional[Any] = None
         self.generate_step: Optional[Any] = None
-        self.model_name: Optional[str] = None
         self.topology: Optional[TopologyInfo] = None
         self.app = FastAPI()
         self.running = False
@@ -233,9 +235,14 @@ class RingApiNode:
             )
 
         @self.app.get("/v1/topology")
-        async def topology() -> TopologyInfo:
+        async def topology() -> JSONResponse:
             if self.topology:
-                return self.topology
+                return JSONResponse(
+                    content={
+                        "model": self.model_name,
+                        "topology": self.topology.model_dump(),
+                    }
+                )
             else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -494,12 +501,13 @@ class RingApiNode:
         if self.topology:
             topology = self.topology
 
-            if req.model and req.model != self.topology.model:
+            if req.model and req.model != self.model_name:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",
                     req.model,
-                    self.topology.model,
+                    self.model_name,
                 )
+                model_to_load = self.model_name
         else:
             # ensure model is given
             if not req.model:
@@ -516,8 +524,8 @@ class RingApiNode:
             topology = await self._handle_prepare_topology(
                 PrepareTopologyRequest(model=req.model)
             )
+            model_to_load = req.model
 
-        model_to_load = topology.model
         assignments_to_use = topology.assignments
         shards = {dev.instance: dev for dev in topology.devices}
         logger.info("Loading model: %s", model_to_load)
@@ -672,8 +680,6 @@ class RingApiNode:
                 message="No topology configured, nothing to unload",
             )
 
-        # Get shards from topology
-
         # Call unload_model on each shard via HTTP
         shard_statuses: List[ShardUnloadStatus] = []
         async with httpx.AsyncClient() as http_client:
@@ -723,7 +729,7 @@ class RingApiNode:
 
         # Unload API-side model components
         try:
-            self.model = None
+            self.model = None  # the model instance
             self.tokenizer = None
             self.model_metadata = None
             self.model_name = None

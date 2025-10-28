@@ -155,7 +155,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             max_workers=int(self._device_prefetch_workers or 4)
         )
         self._active_nonce: Optional[str] = None
-        
+
         self._bound_versions: Dict[int, int] = {}
         self._x_stats = bool(self.config.x_stats)
         self._streams = {}
@@ -249,9 +249,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             self._mode = "fit" if requested_w >= local_count else "offload"
             self.config = ShardConfig.for_mode(self._mode)
-            self._resident_windows = int(
-                self.config.resident_windows
-            )
+            self._resident_windows = int(self.config.resident_windows)
             eff_window_size = (
                 local_count
                 if (self._mode == "fit")
@@ -270,8 +268,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             )
 
             # Initialize memory pools with final config sizes
-            self.input_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.input_pool_mb))
-            self.output_pool = LayerAwareMemoryPool(total_memory_mb=int(self.config.output_pool_mb))
+            self.input_pool = LayerAwareMemoryPool(
+                total_memory_mb=int(self.config.input_pool_mb)
+            )
+            self.output_pool = LayerAwareMemoryPool(
+                total_memory_mb=int(self.config.output_pool_mb)
+            )
 
             # Initialize weight cache
             self.weight_cache = WeightCache(
@@ -354,7 +356,10 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     # Fall back to direct call if executor is unavailable
                     self._warmup_shard()
             elif req.warmup and self._mode != "fit":
-                logger.info("Warmup requested but skipped in offload mode on node %s", self.node_id)
+                logger.info(
+                    "Warmup requested but skipped in offload mode on node %s",
+                    self.node_id,
+                )
 
             # TODO: Make sure this is the right spot for prefetching
             initial_window = self._assigned_sorted[: self.window_size]
@@ -368,7 +373,9 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     self._prepared_window_layers = list(initial_window)
                     try:
                         await asyncio.get_running_loop().run_in_executor(
-                            self.executor, self._prepare_window_blocking, list(initial_window)
+                            self.executor,
+                            self._prepare_window_blocking,
+                            list(initial_window),
                         )
                     except Exception:
                         # Fallback: best-effort synchronous prepare if executor unavailable
@@ -1081,7 +1088,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         )
 
     def _start_discovery(self) -> None:
-        """Start mDNS discovery service."""
+        """Start discovery service."""
 
         hostname = gethostname()
         # TODO: optionally take shard name from CLI
