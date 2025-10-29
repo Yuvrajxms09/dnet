@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import mlx.core as mx
@@ -42,6 +42,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
 )
 
 from ...utils.logger import logger
+from ...utils.banner import print_startup_banner
 from ...utils.model import ModelMetadata, get_model_metadata
 from .utils import (
     create_generate_step_for_ring_with_grpc,
@@ -74,7 +75,6 @@ from ..shard.models import (
     ShardProfileResponse,
 )
 from ..data_types import StopCondition
-from ..model import get_ring_model
 from .servicer import ShardApiServicer
 from ..common import TopologyInfo, LayerAssignment
 
@@ -116,7 +116,6 @@ class RingApiNode:
 
         self.model_metadata: Optional[ModelMetadata] = None
         self.model: Optional[BaseRingModel] = None
-
         self.tokenizer: Optional[Any] = None
         self.generate_step: Optional[Any] = None
         self.topology: Optional[TopologyInfo] = None
@@ -132,6 +131,12 @@ class RingApiNode:
         self.first_shard_stub: Optional[DnetRingServiceStub] = None
         self.discovery = DnetP2P("lib/dnet-p2p/lib")
         self.pending_requests: Dict[str, asyncio.Future] = {}
+
+        # Print ASCII art banner if available
+        try:
+            print_startup_banner()
+        except Exception:
+            pass
 
         logger.info(
             "API node initialized on HTTP port %s, gRPC port %s",
@@ -225,10 +230,12 @@ class RingApiNode:
 
         @self.app.get("/health")
         async def health() -> JSONResponse:
+            model_loaded = (self.tokenizer is not None) and (self.generate_step is not None)
             return JSONResponse(
                 content={
                     "status": "ok",
                     "model": self.topology.model if self.topology else None,
+                    "model_loaded": model_loaded,
                     "topology_configured": bool(self.topology),
                 }
             )
@@ -308,7 +315,7 @@ class RingApiNode:
             """Handle chat completion requests.
 
             If streaming is requested, returns a StreamingResponse."""
-            if self.model is None:
+            if (self.tokenizer is None) or (self.generate_step is None):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="No model loaded. Call /v1/load_model first.",
@@ -351,10 +358,9 @@ class RingApiNode:
         model_metadata = get_model_metadata(req.model)
 
         # Profile model
-        batch_sizes = [1, 2]  # TODO: make it configurable
-        sequence_length = 512  # TODO: make it configurable
+        batch_sizes = [1]
         model_profile = await self._profile_model(
-            req.model, batch_sizes, sequence_length
+            req.model, batch_sizes, req.seq_len
         )
 
         # Get shards from discovery
@@ -375,11 +381,11 @@ class RingApiNode:
             shard_profiles, thunderbolt_conns
         )
         solution = await self._run_solver(
-            shard_profiles, model_profile, optimized_device_name_order
+            shard_profiles, model_profile, optimized_device_name_order, req.kv_bits
         )
         shards_list = [shards[name] for name in optimized_device_name_order]
         layer_assignments = compute_layer_assignments(
-            optimized_device_name_order, solution.w, solution.k, shards
+            optimized_device_name_order, solution.w, solution.n, solution.k, shards
         )
         self.topology = TopologyInfo(
             model=req.model,
@@ -388,7 +394,7 @@ class RingApiNode:
             assignments=layer_assignments,
             solution=asdict(solution),
         )
-
+        print(f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}")
         logger.info(
             "Topology prepared: %d devices, %d layers",
             len(shards_list),
@@ -421,6 +427,7 @@ class RingApiNode:
                     layers=assignment.layers,
                     next_instance=assignment.next_instance,
                     window_size=assignment.window_size,
+                    residency_size=assignment.window_size, # use window_size as residency_size for manual topology
                 )
             )
 
@@ -462,6 +469,7 @@ class RingApiNode:
                     layers=a.layers,
                     next_instance=a.next_instance or ring_map.get(a.instance),
                     window_size=a.window_size,
+                    residency_size=a.window_size
                 )
                 for a in normalized
             ]
@@ -508,7 +516,7 @@ class RingApiNode:
         elif req.model:
             # prepare topology on-the-fly
             topology = await self._handle_prepare_topology(
-                PrepareTopologyRequest(model=req.model)
+                PrepareTopologyRequest(model=req.model, kv_bits=req.kv_bits, seq_len=req.seq_len)
             )
             model_to_load = req.model
         else:
@@ -539,7 +547,7 @@ class RingApiNode:
                 ]
 
                 if instance not in shards:
-                    logger.warning(f"Shard {instance} not found in discovery")
+                    logger.warning("Shard %s not found in discovery", instance)
                     shard_statuses.append(
                         ShardLoadStatus(
                             instance=instance,
@@ -579,6 +587,7 @@ class RingApiNode:
                         warmup=True,
                         next_node=next_shard,
                         window_size=assignment.window_size,
+                        residency_size=assignment.residency_size,
                         total_layers=topology.num_layers,
                         api_callback_address=api_callback_address,
                     ).model_dump()
@@ -620,15 +629,6 @@ class RingApiNode:
 
                 # Load tokenizer
                 self.tokenizer = load_tokenizer(Path(model_to_load), {})
-
-                # Load API-side model (embeddings, lm_head, etc.)
-                self.model = get_ring_model(
-                    self.model_metadata.model_type,
-                    self.model_metadata.model_config,
-                    is_api_layer=True,
-                )
-                # load_api_layer_weights(self.model_metadata, self.model)
-                # FIXME: I think we don't need to load lm_head + embedding at API side
 
                 # Connect to first shard (head device)
                 # this should be the first device in `self.topology.devices`
@@ -867,7 +867,7 @@ class RingApiNode:
             batch_sizes=batch_sizes,
             sequence_length=sequence_length,
         )
-        logger.info(f"Model profiling completed for {repo_id}.")
+        logger.info("Model profiling completed for %s.", repo_id)
         return load_model_profile_from_dict(asdict(model_profile_split))
 
     async def _collect_shard_profiles(
@@ -972,6 +972,7 @@ class RingApiNode:
         shard_profiles: Dict[str, DeviceProfile],
         model_profile: ModelProfile,
         device_order: List[str],
+        kv_bits: Literal["4bit", "8bit", "fp16"]
     ) -> HALDAResult:
         """Run distilp with model and device profiles.
 
@@ -997,6 +998,7 @@ class RingApiNode:
             model=model_profile,
             mip_gap=1e-4,
             plot=False,
+            kv_bits=kv_bits
         )
 
         logger.info(

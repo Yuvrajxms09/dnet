@@ -46,6 +46,7 @@ from ...utils.model import (
     load_lm_head,
 )
 from ...utils.logger import logger
+from ...utils.banner import print_startup_banner
 from .config import ShardConfig
 from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
@@ -141,7 +142,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         # Queues for async processing
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
+        # Ring-forward queue (non-final frames)
         self.activation_computed_queue: asyncio.Queue[ActivationMessage] = (
+            asyncio.Queue(maxsize=queue_size)
+        )
+        # Token-delivery queue (final shard -> API)
+        self.activation_token_queue: asyncio.Queue[ActivationMessage] = (
             asyncio.Queue(maxsize=queue_size)
         )
         self.ingress_q: asyncio.Queue[dnet_ring_pb2.ActivationRequest] = asyncio.Queue(
@@ -198,6 +204,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         self._kv_last_seen: Dict[str, float] = {}
         self._kv_ttl_s: float = max(1.0, float(self.config.kv_cache.kv_ttl_s))
 
+        # Print ASCII art banner if available
+        try:
+            print_startup_banner()
+        except Exception:
+            pass
+
         logger.info(
             "Shard node %s initialized with queue_size=%d",
             self.node_id,
@@ -246,16 +258,30 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             # Decide mode dynamically from assignment + requested window
             requested_w = int(max(1, int(req.window_size)))
             local_count = max(1, len(self.assigned_layers))
+            n_residency = int(max(1, int(req.residency_size)))
 
-            self._mode = "fit" if requested_w >= local_count else "offload"
-            self.config = ShardConfig.for_mode(self._mode)
-            self._resident_windows = int(self.config.resident_windows)
-            eff_window_size = (
-                local_count
-                if (self._mode == "fit")
-                else max(1, min(requested_w, local_count))
-            )
-            self.window_size = eff_window_size
+            if n_residency < requested_w:
+                self._mode = "sliding_fit"
+                self.config = ShardConfig.for_mode(self._mode)
+                self._resident_windows = int(self.config.resident_windows)
+                self.window_size = max(1, min(n_residency, local_count))
+                logger.info(
+                    "Node %s: sliding_fit enabled (m=%s, w=%s, n=%s) -> window_size=%s, resident_windows=%s",
+                    self.node_id,
+                    local_count,
+                    requested_w,
+                    n_residency,
+                    self.window_size,
+                    self._resident_windows,
+                )
+            else:
+                self._mode = "fit" if requested_w >= local_count else "offload"
+                self.config = ShardConfig.for_mode(self._mode)
+                self._resident_windows = int(self.config.resident_windows)
+                eff_window_size = (
+                    local_count if (self._mode == "fit") else max(1, min(requested_w, local_count))
+                )
+                self.window_size = eff_window_size
 
             logger.info(
                 "Node %s: Using prefetch window size: %d (requested=%s, local_count=%s, mode=%s). \n With mode: %s",
@@ -283,6 +309,7 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 prefetch_threads=self._prefetch_threads,
                 resident_windows=self._resident_windows,
                 use_mxload_fastpath=self.config.mxload_fastpath,
+                prefetch_mode=self.config.prefetch_mode,
             )
 
             # Load the model
@@ -361,15 +388,12 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     self.node_id,
                 )
 
-            # TODO: Make sure this is the right spot for prefetching
             initial_window = self._assigned_sorted[: self.window_size]
             if not (self._warmup_completed and self._warmup_keep_flag):
                 if self._mode == "fit":
-                    for lyr in initial_window:
-                        self._prefetch_to_ram(lyr)
-                        self._enqueue_weight_prefetch(lyr)
-                else:
-                    # Prepare first window (offload)
+                    # Prefetch disabled in fit mode to avoid duplicate RAM usage
+                    pass
+                elif self._mode == "offload":
                     self._prepared_window_layers = list(initial_window)
                     try:
                         await asyncio.get_running_loop().run_in_executor(
@@ -378,7 +402,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                             list(initial_window),
                         )
                     except Exception:
-                        # Fallback: best-effort synchronous prepare if executor unavailable
                         self._prepare_window_blocking(list(initial_window))
 
             m = len(self._assigned_sorted)
@@ -450,12 +473,21 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
             # Clear memory pools
             if self.weight_cache:
+                # Stop any in-flight prefetch and close layer manager resources
+                try:
+                    self.weight_cache.cancel_all_prefetch()
+                except Exception:
+                    pass
                 # Clear all cached weights
                 for layer_id in list(self._bound_versions.keys()):
                     try:
                         self.weight_cache.evict_layer(layer_id)
                     except Exception:
                         pass
+                try:
+                    self.weight_cache.layer_manager.close()
+                except Exception:
+                    pass
                 self.weight_cache = None
 
             self.input_pool = None
@@ -1065,7 +1097,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
 
         self.background_tasks = [
             asyncio.create_task(self._ingress_worker()),
-            asyncio.create_task(self._send_worker()),
+            asyncio.create_task(self._send_worker()),  # ring-forward sends
+            asyncio.create_task(self._send_token_worker()),  # token sends
         ]
         # Start idle sweeper to close silent streams
         try:
@@ -1363,7 +1396,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                     start_idx : start_idx + max(1, window)
                 ]
                 for wl in window_layers:
-                    if self._mode == "fit":
+                    # Prefetch disabled in fit mode; allow only when non-fit and enabled
+                    if self._mode != "fit" and self.config.prefetch_mode != "off":
                         self._prefetch_to_ram(wl)
                         self._enqueue_weight_prefetch(wl)
                 return JSONResponse(content={"prefetched": window_layers})

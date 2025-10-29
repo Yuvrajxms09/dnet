@@ -14,6 +14,9 @@ class LayerAssignment(BaseModel):
         None, description="Next device name in ring (null if connects to API)"
     )
     window_size: int = Field(..., description="Window size for this device")
+    residency_size: int = Field(
+        ..., description="Number of resident layers on GPU any given time"
+    )
 
 
 class TopologyInfo(BaseModel):

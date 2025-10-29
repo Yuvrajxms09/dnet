@@ -68,6 +68,9 @@ class ShardConfig:
     # Enable mx.load fast-path only for explicitly repacked files/windows.
     mxload_fastpath: bool = False
 
+    # Prefetch control: "off" | "sequential" | "full" (config-driven)
+    prefetch_mode: str = "off"
+
     # Activation pool sizes (MB)
     input_pool_mb: int = 512
     output_pool_mb: int = 512
@@ -75,6 +78,21 @@ class ShardConfig:
     @staticmethod
     def for_mode(mode: str) -> "ShardConfig":
         m = (mode or "fit").strip().lower()
+        if m == "sliding_fit":
+            # Sequential intra-device windowing with strict residency cap and mmap path
+            return ShardConfig(
+                mode="sliding_fit",
+                resident_windows=1,
+                lazy_params=True,
+                wire_dtype="fp16",
+                warmup_windows=1,
+                streaming=False,
+                compress=False,
+                mxload_fastpath=False,  # force mmap/madvise path; no mx.load
+                prefetch_mode="sequential",
+                input_pool_mb=256,
+                output_pool_mb=256,
+            )
         if m == "offload":
             # Focus on minimal RAM usage; allow on-demand reads
             return ShardConfig(
@@ -86,6 +104,7 @@ class ShardConfig:
                 streaming=False,
                 compress=False,
                 mxload_fastpath=True,  # Use mx.load fast-path with repacked per-layer/per-window files
+                prefetch_mode="off",
                 input_pool_mb=256,
                 output_pool_mb=256,
             )
@@ -97,8 +116,11 @@ class ShardConfig:
             wire_dtype="fp16",
             warmup_windows=1,
             streaming=True,
+            stream_backoff_s=0.1,
+            stream_idle_s=30.0,
             compress=False,
             mxload_fastpath=False,
+            prefetch_mode="off",
             input_pool_mb=512,
             output_pool_mb=512,
         )
