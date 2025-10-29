@@ -347,7 +347,7 @@ class ComputeMixin(RingShardNodeAttributes):
                         fut = asyncio.run_coroutine_threadsafe(
                             target_q.put(output_msg), self._loop
                         )
-                        fut.result(timeout=10)
+                        fut.result()
                     else:
                         raise RuntimeError("Event loop not available for TX queue")
                 except Exception as e:
