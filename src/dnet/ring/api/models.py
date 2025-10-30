@@ -324,6 +324,9 @@ class PrepareTopologyManualRequest(BaseModel):
     """
 
     model: str = Field(..., description="Model name or HuggingFace repo ID")
+    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
+        default="8bit", description="KV cache quantization to use"
+    )
     devices: List[ManualDevice] = Field(..., description="Manual device endpoints")
     assignments: List[LayerAssignment] = Field(
         ..., description="Layer assignments per device (rounds or flat)"

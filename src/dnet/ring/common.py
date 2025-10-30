@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from dnet_p2p import DnetDeviceProperties
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,9 @@ class TopologyInfo(BaseModel):
     """Stored topology information for the current model."""
 
     model: str = Field(..., description="Model name or HuggingFace repo ID")
+    kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
+        ..., description="KV cache quantization used by solver and shards"
+    )
     num_layers: int = Field(..., description="Total number of layers in model")
     devices: List[DnetDeviceProperties] = Field(
         ..., description="Devices (in solver order)"

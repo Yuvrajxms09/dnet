@@ -408,6 +408,7 @@ class RingApiNode:
         )
         self.topology = TopologyInfo(
             model=req.model,
+            kv_bits=req.kv_bits,
             num_layers=model_metadata.num_layers,
             devices=shards_list,
             assignments=layer_assignments,
@@ -512,6 +513,7 @@ class RingApiNode:
         # Persist manual topology
         self.topology = TopologyInfo(
             model=req.model,
+            kv_bits=req.kv_bits,
             num_layers=int(num_layers),
             devices=devices_props,
             assignments=normalized,
@@ -539,11 +541,19 @@ class RingApiNode:
         if self.topology:
             topology = self.topology
 
-            if req.model and req.model != self.topology.model:
+            if req.model and req.model != topology.model:
                 logger.info(
                     "load_model request model %s overridden by topology model %s",
                     req.model,
-                    self.topology.model,
+                    topology.model,
+                )
+            # Always use kv_bits from topology; log if caller asked for different
+            kv_bits_use = topology.kv_bits
+            if req.kv_bits != kv_bits_use:
+                logger.info(
+                    "load_model request kv_bits %s overridden by topology kv_bits %s",
+                    req.kv_bits,
+                    kv_bits_use,
                 )
         else:
             # ensure model is given
@@ -561,6 +571,7 @@ class RingApiNode:
             topology = await self._handle_prepare_topology(
                 PrepareTopologyRequest(model=req.model, kv_bits=req.kv_bits, seq_len=req.seq_len)
             )
+            kv_bits_use = topology.kv_bits
 
         model_to_load = topology.model
         assignments_to_use = topology.assignments
@@ -623,6 +634,7 @@ class RingApiNode:
                         window_size=assignment.window_size,
                         residency_size=assignment.residency_size,
                         total_layers=topology.num_layers,
+                        kv_bits=kv_bits_use,
                         api_callback_address=api_callback_address,
                     ).model_dump()
 

@@ -296,6 +296,26 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 self._mode,
             )
 
+            # KV cache settings from API request (always provided)
+            kv = (req.kv_bits or "").strip().lower()
+            if kv == "4bit":
+                self.config.kv_cache.mode = "4bit"
+                self.config.kv_cache.bits = 4
+            elif kv == "8bit":
+                self.config.kv_cache.mode = "8bit"
+                self.config.kv_cache.bits = 8
+            else:
+                # fp16 (or default): not quantized; bits value unused by make_cache
+                self.config.kv_cache.mode = "fp16"
+                self.config.kv_cache.bits = max(1, int(self.config.kv_cache.bits or 8))
+            logger.info(
+                "Node %s: KV cache configured: mode=%s bits=%s group=%s",
+                self.node_id,
+                self.config.kv_cache.mode,
+                self.config.kv_cache.bits,
+                self.config.kv_cache.group_size,
+            )
+
             # For sliding_fit/offload, repack only assigned layers and enable fast-path
             if self._mode in {"sliding_fit", "offload"}:
                 try:
@@ -1361,7 +1381,8 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                 logger.info(
                     f"HTTP /load_model: model={req.model_path}, layers={req.layers}, "
                     f"next_node={req.next_node or 'none'}, window_size={req.window_size}, "
-                    f"total_layers={req.total_layers}, api_callback={req.api_callback_address or 'none'}"
+                    f"total_layers={req.total_layers}, kv_bits={req.kv_bits or 'default'}, "
+                    f"api_callback={req.api_callback_address or 'none'}"
                 )
                 result = await self.load_model(req)
                 return result
