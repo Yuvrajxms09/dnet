@@ -23,7 +23,7 @@ def test_single_round_postprocess_simple():
         k=1,
         #     ____
         w=[4, 1, 3],
-        n=[4, 1, 3],
+        n=[4, 1, 2],
         sets={},  # ignored
         obj_value=0,  # ignored
     )
@@ -32,7 +32,7 @@ def test_single_round_postprocess_simple():
     assert new_device_names == ["dev1", "dev3"]
     assert new_solution.k == 1
     assert new_solution.w == [4, 4]
-    assert new_solution.n == [4, 3]  # should not change
+    assert new_solution.n == [4, 3]
 
 
 def test_single_round_postprocess_complex():
@@ -50,7 +50,7 @@ def test_single_round_postprocess_complex():
     assert new_device_names == ["dev1", "dev3", "dev5", "dev6"]
     assert new_solution.k == 1
     assert new_solution.w == [5, 5, 2, 2]
-    assert new_solution.n == [4, 4, 1, 1]  # should not change
+    assert new_solution.n == [5, 4, 2, 1]
 
 
 def test_optimize_device_ordering():

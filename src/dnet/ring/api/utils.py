@@ -143,29 +143,31 @@ def postprocess_single_round(
     while 1 in solution.w:
         for i, w in enumerate(solution.w):
             if w == 1:
+                # NOTE: we are not checking `n` here in particular but assuming its `<= w`,
+                # we are safe to increment that on the target device
+
                 # assigned a single layer, reassign to neighbor (wrapping around)
                 left_idx = (i - 1) % len(solution.w)
                 right_idx = (i + 1) % len(solution.w)
 
                 # prefer neighbor with fewer assigned layers
                 if solution.w[left_idx] < solution.w[right_idx]:
-                    solution.w[left_idx] += 1
-                elif solution.w[left_idx] > solution.w[right_idx]:
-                    solution.w[right_idx] += 1
-                else:
-                    # equal, 50-50 chance
+                    chosen_idx = left_idx
+                elif solution.w[right_idx] < solution.w[left_idx]:
+                    chosen_idx = right_idx
+                else:  # equal, 50-50 chance
                     if np.random.rand() < 0.5:
-                        solution.w[left_idx] += 1
+                        chosen_idx = left_idx
                     else:
-                        solution.w[right_idx] += 1
+                        chosen_idx = right_idx
+
+                # update solution values
+                solution.w[chosen_idx] += 1
+                solution.n[chosen_idx] += 1
+
+                # remove device from solution & names
                 solution.w.pop(i)
-
-                # update residency as well
                 solution.n.pop(i)
-                # note that we do not update the residency of neighbors here, because
-                # they are already saturated
-
-                # remove device from device names
                 popped = device_names.pop(i)
                 logger.info(
                     f"Removed device {popped} with single layer, reassigned to neighbor"
