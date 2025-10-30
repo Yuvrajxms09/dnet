@@ -1,11 +1,12 @@
 """API utilities for ring topology generation."""
 
 import asyncio
-from typing import AsyncGenerator, Dict, Tuple, Optional
+from typing import AsyncGenerator, Dict, Tuple
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 import mlx.core as mx
 import numpy as np
 from distilp import DeviceProfile
+from distilp.components.dense_common import HALDAResult
 
 from dnet.protos import dnet_ring_pb2
 from dnet.protos.dnet_ring_pb2_grpc import DnetRingServiceStub
@@ -110,10 +111,10 @@ def create_generate_step_for_ring_with_grpc(
             y = mx.array([int(result)], dtype=mx.int32)
             logprobs = mx.array([], dtype=mx.float32)
             if repetition_penalty:
-                repetition_context.append(y.item())
+                repetition_context.append(y.item())  # type: ignore # FIXME: !!!
             if repetition_context_size:
-                if len(repetition_context) > repetition_context_size:
-                    repetition_context = repetition_context[-repetition_context_size:]
+                if len(repetition_context) > repetition_context_size:  # type: ignore # FIXME: !!!
+                    repetition_context = repetition_context[-repetition_context_size:]  # type: ignore # FIXME: !!!
             return y, logprobs
 
         y, logprobs = await _step(y)
@@ -121,10 +122,58 @@ def create_generate_step_for_ring_with_grpc(
         while True:
             next_y, next_logprobs = await _step(y)
             mx.async_eval(next_y)
-            yield y.item(), logprobs
+            yield y.item(), logprobs  # type: ignore # FIXME: !!!
             y, logprobs = next_y, next_logprobs
 
     return generate_step
+
+
+def postprocess_single_round(
+    device_names: list[str], solution: HALDAResult
+) -> tuple[list[str], HALDAResult]:
+    """Postprocess HALDA solution for single-round case (k=1).
+
+    This will adjust the assignments so that single-layer assigned devices are ignored, and
+    those layers are instead given to their immediate neighbors."""
+    if solution.k != 1:
+        return (device_names, solution)  # do nothing for k > 1
+
+    # keep doing this until no single-layer devices remain
+    # FIXME: do this more performant
+    while 1 in solution.w:
+        for i, w in enumerate(solution.w):
+            if w == 1:
+                # assigned a single layer, reassign to neighbor (wrapping around)
+                left_idx = (i - 1) % len(solution.w)
+                right_idx = (i + 1) % len(solution.w)
+
+                # prefer neighbor with fewer assigned layers
+                if solution.w[left_idx] < solution.w[right_idx]:
+                    solution.w[left_idx] += 1
+                elif solution.w[left_idx] > solution.w[right_idx]:
+                    solution.w[right_idx] += 1
+                else:
+                    # equal, 50-50 chance
+                    if np.random.rand() < 0.5:
+                        solution.w[left_idx] += 1
+                    else:
+                        solution.w[right_idx] += 1
+                solution.w.pop(i)
+
+                # update residency as well
+                solution.n.pop(i)
+                # note that we do not update the residency of neighbors here, because
+                # they are already saturated
+
+                # remove device from device names
+                popped = device_names.pop(i)
+                logger.info(
+                    f"Removed device {popped} with single layer, reassigned to neighbor"
+                )
+
+                break  # continue with outer while loop
+
+    return (device_names, solution)
 
 
 def compute_layer_assignments(
@@ -139,31 +188,34 @@ def compute_layer_assignments(
     Args:
         device_names: Device names in solver order
         solution_w: Solver result `w` for list of assigned layers.
-        solution_n: Solver result `n` for number of GPU resident layers. 
+        solution_n: Solver result `n` for number of GPU resident layers.
         solution_k: Solver result `k` for number of rounds.
         shards: Discovered shards
 
     Returns:
         Tuple of (layer assignments per device per round, next instance per device in ring, prefetch window per device)
     """
-    if len(solution_w) != len(shards) or len(device_names) != len(shards) or len(solution_n) != len(shards):
+    if (
+        len(solution_w) != len(shards)
+        or len(device_names) != len(shards)
+        or len(solution_n) != len(shards)
+    ):
         raise ValueError(
-            f"Device count mismatch: solution={len(solution_w)}, shards={len(shards)}, solution_n={len(solution_n)}"
+            f"Device count mismatch: w={len(solution_w)}, n={len(solution_n)}, shards={len(shards)}"
         )
 
+    # number of layers equal to total assigned layers across all devices over all rounds
     num_layers = sum(solution_w) * solution_k
     logger.info(
-        "Distributing %d layers to %d devices in %d rounds",
-        num_layers,
-        len(shards),
-        solution_k,
+        f"Distributing {num_layers} layers to {len(shards)} devices in {solution_k} rounds",
     )
 
+    # compute assigned layers per device per round
     layer_assignments: Dict[str, list[list[int]]] = {
         name: [[] for _ in range(solution_k)] for name in device_names
     }
-    residency_sizes: Dict[str, int] = {}
     current_layer = 0
+    residency_sizes: Dict[str, int] = {}
     for round_idx in range(solution_k):
         for device_idx, device_name in enumerate(device_names):
             for _ in range(solution_w[device_idx]):
@@ -174,30 +226,18 @@ def compute_layer_assignments(
         f"Assigned {current_layer} layers, expected {num_layers}"
     )
 
-    # Compute next instance for each device in ring topology
-    # In ring: dev1 -> dev2 -> ... -> devN -> dev1 (wraps around)
-    # Each shard will detect when processing the final layer and send to API
-    next_instance_map: Dict[str, Optional[str]] = {}
+    # compute next instance for each device in ring topology
+    # `dev1 -> dev2 -> ... -> devN -> dev1` (wraps around)
+    next_instance_map: Dict[str, str] = {}
+    for i, instance in enumerate(device_names):
+        if i < len(device_names) - 1:
+            next_instance_map[instance] = device_names[i + 1]
+        else:
+            next_instance_map[instance] = device_names[0]  # wrap around
+    for instance in device_names:
+        logger.info("Ring: %s -> %s", instance, next_instance_map[instance])
 
-    if len(device_names) == 1:
-        # Single device: forwards to itself in a loop
-        next_instance_map[device_names[0]] = device_names[0]
-        logger.info("Ring (single device): %s -> SELF (loops back)", device_names[0])
-    else:
-        # Multiple devices: each forwards to the next in the ring
-        for i, instance in enumerate(device_names):
-            if i < len(device_names) - 1:
-                # Forward to next device
-                next_instance_map[instance] = device_names[i + 1]
-            else:
-                # Last device wraps to first device
-                next_instance_map[instance] = device_names[0]
-
-        # Log ring topology
-        for instance in device_names:
-            logger.info("Ring: %s -> %s", instance, next_instance_map[instance])
-
-    # Compute window size for each device: total_layers_per_device / k
+    # compute window size for each device: `total_layers_per_device / k`
     window_sizes: Dict[str, int] = {}
     for instance, rounds_layers in layer_assignments.items():
         # Flatten to count total layers
@@ -258,8 +298,8 @@ def optimize_device_ordering(
     if not head_devices:
         logger.warning("No head device found in profiles, using first device")
         head_devices = [device_names[0]] if device_names else []
-
-    logger.info("Found %d head device(s): %s", len(head_devices), head_devices)
+    else:
+        logger.info("Found %d head device(s): %s", len(head_devices), head_devices)
 
     # FIXME: shards on the same machine should be adjacent too!
 

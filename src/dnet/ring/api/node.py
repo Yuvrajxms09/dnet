@@ -48,6 +48,7 @@ from .utils import (
     create_generate_step_for_ring_with_grpc,
     compute_layer_assignments,
     optimize_device_ordering,
+    postprocess_single_round,
 )
 from .models import (
     ChatParams,
@@ -230,7 +231,9 @@ class RingApiNode:
 
         @self.app.get("/health")
         async def health() -> JSONResponse:
-            model_loaded = (self.tokenizer is not None) and (self.generate_step is not None)
+            model_loaded = (self.tokenizer is not None) and (
+                self.generate_step is not None
+            )
             return JSONResponse(
                 content={
                     "status": "ok",
@@ -359,9 +362,7 @@ class RingApiNode:
 
         # Profile model
         batch_sizes = [1]
-        model_profile = await self._profile_model(
-            req.model, batch_sizes, req.seq_len
-        )
+        model_profile = await self._profile_model(req.model, batch_sizes, req.seq_len)
 
         # Get shards from discovery
         shards = self._get_shards_from_discovery()
@@ -383,10 +384,14 @@ class RingApiNode:
         solution = await self._run_solver(
             shard_profiles, model_profile, optimized_device_name_order, req.kv_bits
         )
-        shards_list = [shards[name] for name in optimized_device_name_order]
+        optimized_device_name_order, solution = postprocess_single_round(
+            optimized_device_name_order, solution
+        )
         layer_assignments = compute_layer_assignments(
             optimized_device_name_order, solution.w, solution.n, solution.k, shards
         )
+
+        shards_list = [shards[name] for name in optimized_device_name_order]
         self.topology = TopologyInfo(
             model=req.model,
             num_layers=model_metadata.num_layers,
@@ -394,7 +399,9 @@ class RingApiNode:
             assignments=layer_assignments,
             solution=asdict(solution),
         )
-        print(f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}")
+        print(
+            f"Topology solution: k {solution.k}, w {solution.w}, n {solution.n}, objective: {solution.obj_value}"
+        )
         logger.info(
             "Topology prepared: %d devices, %d layers",
             len(shards_list),
@@ -427,7 +434,7 @@ class RingApiNode:
                     layers=assignment.layers,
                     next_instance=assignment.next_instance,
                     window_size=assignment.window_size,
-                    residency_size=assignment.window_size, # use window_size as residency_size for manual topology
+                    residency_size=assignment.window_size,  # use window_size as residency_size for manual topology
                 )
             )
 
@@ -438,6 +445,7 @@ class RingApiNode:
                 raise ValueError("No layers provided in assignments")
             num_layers = max(flat) + 1
 
+        # FIXME: we can perhaps use req.devices as is
         devices_props: List[DnetDeviceProperties] = []
         for d in req.devices:
             devices_props.append(
@@ -469,7 +477,7 @@ class RingApiNode:
                     layers=a.layers,
                     next_instance=a.next_instance or ring_map.get(a.instance),
                     window_size=a.window_size,
-                    residency_size=a.window_size
+                    residency_size=a.window_size,
                 )
                 for a in normalized
             ]
@@ -511,12 +519,22 @@ class RingApiNode:
                 )
                 # use existing model from topology
                 model_to_load = topology.model
-            else:
+            elif req.model:
                 model_to_load = req.model
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "No model specified in request and no model in existing topology. "
+                        "Call /v1/prepare_topology or include 'model' to bootstrap with discovery."
+                    ),
+                )
         elif req.model:
             # prepare topology on-the-fly
             topology = await self._handle_prepare_topology(
-                PrepareTopologyRequest(model=req.model, kv_bits=req.kv_bits, seq_len=req.seq_len)
+                PrepareTopologyRequest(
+                    model=req.model, kv_bits=req.kv_bits, seq_len=req.seq_len
+                )
             )
             model_to_load = req.model
         else:
@@ -972,7 +990,7 @@ class RingApiNode:
         shard_profiles: Dict[str, DeviceProfile],
         model_profile: ModelProfile,
         device_order: List[str],
-        kv_bits: Literal["4bit", "8bit", "fp16"]
+        kv_bits: Literal["4bit", "8bit", "fp16"],
     ) -> HALDAResult:
         """Run distilp with model and device profiles.
 
@@ -998,7 +1016,7 @@ class RingApiNode:
             model=model_profile,
             mip_gap=1e-4,
             plot=False,
-            kv_bits=kv_bits
+            kv_bits=kv_bits,
         )
 
         logger.info(
