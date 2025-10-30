@@ -1,4 +1,4 @@
-from typing import Callable, Literal, Optional, Any
+from typing import Literal, Optional, Any
 from fastapi import FastAPI
 import grpc.aio as aio_grpc
 import asyncio
@@ -82,17 +82,27 @@ class RingShardNodeAttributes:
     next_node_channel: Optional[aio_grpc.Channel]
     next_node_stub: Optional[Any]
 
-    _mode: Literal["fit", "offload"]
+    _mode: Literal["sliding_fit", "fit", "offload"]
+
+    # compression
     _compression_pct: float
+    _compress: bool
+    _compress_min_bytes: int
 
     # shared methods (declared for type checking; implemented by mixins/node)
-    def _prefetch_to_ram(self, layer_id: int) -> None:  # pragma: no cover - interface stub
+    def _prefetch_to_ram(
+        self, layer_id: int
+    ) -> None:  # pragma: no cover - interface stub
         raise NotImplementedError
 
-    def _enqueue_weight_prefetch(self, layer_id: int) -> None:  # pragma: no cover - interface stub
+    def _enqueue_weight_prefetch(
+        self, layer_id: int
+    ) -> None:  # pragma: no cover - interface stub
         raise NotImplementedError
 
-    def _next_local_layers(self, after_layer: int, count: int) -> list[int]:  # pragma: no cover - interface stub
+    def _next_local_layers(
+        self, after_layer: int, count: int
+    ) -> list[int]:  # pragma: no cover - interface stub
         raise NotImplementedError
 
     def _get_or_make_kv(self, nonce: str) -> list:  # pragma: no cover - interface stub
