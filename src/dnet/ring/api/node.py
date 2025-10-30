@@ -385,7 +385,11 @@ class RingApiNode:
             optimized_device_name_order, solution
         )
         layer_assignments = compute_layer_assignments(
-            optimized_device_name_order, solution.w, solution.n, solution.k, shards
+            optimized_device_name_order,
+            shards,
+            solution.w,
+            solution.n,
+            solution.k,
         )
 
         shards_list = [shards[name] for name in optimized_device_name_order]

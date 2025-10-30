@@ -95,8 +95,8 @@ def test_optimize_device_ordering():
 
 def test_layer_assignments():
     # the order here is important
-    device_names = ["dev1", "dev2", "dev3"]
-    devices = {
+    shard_order = ["dev1", "dev2", "dev3"]
+    shards = {
         "dev1": DnetDeviceProperties(
             instance="dev1", local_ip="192.168.0.1", server_port=0, shard_port=0
         ),
@@ -109,7 +109,7 @@ def test_layer_assignments():
     }
 
     assignments = compute_layer_assignments(
-        device_names, [3, 5, 4], [3, 4, 2], 2, devices
+        shard_order, shards, [3, 5, 4], [3, 4, 2], 2
     )
 
     # [0]: dev1

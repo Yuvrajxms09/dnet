@@ -177,101 +177,77 @@ def postprocess_single_round(
 
 
 def compute_layer_assignments(
-    device_names: list[str],
+    shard_order: list[str],
+    shards: Dict[str, DnetDeviceProperties],
     solution_w: list[int],
     solution_n: list[int],
     solution_k: int,
-    shards: Dict[str, DnetDeviceProperties],
 ) -> list[LayerAssignment]:
     """Compute round-aware layer assignments, next node mapping, and prefetch windows from solver output.
 
     Args:
-        device_names: Device names in solver order
+        shard_names: Name of the shards in the order they were given to the solver.
+        shards: Discovered shards (some may be extra & unused)
         solution_w: Solver result `w` for list of assigned layers.
         solution_n: Solver result `n` for number of GPU resident layers.
         solution_k: Solver result `k` for number of rounds.
-        shards: Discovered shards
 
     Returns:
-        Tuple of (layer assignments per device per round, next instance per device in ring, prefetch window per device)
+        Layer assignments for each shard, in the same order as `shard_names`.
     """
-    if (
-        len(solution_w) != len(shards)
-        or len(device_names) != len(shards)
-        or len(solution_n) != len(shards)
-    ):
+    if len(solution_w) != len(shard_order) or len(solution_n) != len(shard_order):
         raise ValueError(
-            f"Device count mismatch: w={len(solution_w)}, n={len(solution_n)}, shards={len(shards)}"
+            f"Device count mismatch: w={len(solution_w)}, n={len(solution_n)}, devices={len(shard_order)}"
         )
 
     # number of layers equal to total assigned layers across all devices over all rounds
     num_layers = sum(solution_w) * solution_k
     logger.info(
-        f"Distributing {num_layers} layers to {len(shards)} devices in {solution_k} rounds",
+        f"Distributing {num_layers} layers to {len(shard_order)} devices in {solution_k} rounds",
     )
 
-    # compute assigned layers per device per round
-    layer_assignments: Dict[str, list[list[int]]] = {
-        name: [[] for _ in range(solution_k)] for name in device_names
-    }
+    # compute assigned layers
     current_layer = 0
-    residency_sizes: Dict[str, int] = {}
+    assigned_layers: Dict[str, list[list[int]]] = {
+        name: [[] for _ in range(solution_k)] for name in shard_order
+    }
     for round_idx in range(solution_k):
-        for device_idx, device_name in enumerate(device_names):
+        for device_idx, device_name in enumerate(shard_order):
             for _ in range(solution_w[device_idx]):
-                layer_assignments[device_name][round_idx].append(current_layer)
+                assigned_layers[device_name][round_idx].append(current_layer)
                 current_layer += 1
-            residency_sizes[device_name] = solution_n[device_idx]
+
     assert current_layer == num_layers, (
         f"Assigned {current_layer} layers, expected {num_layers}"
     )
 
-    # compute next instance for each device in ring topology
-    # `dev1 -> dev2 -> ... -> devN -> dev1` (wraps around)
-    next_instance_map: Dict[str, str] = {}
-    for i, instance in enumerate(device_names):
-        if i < len(device_names) - 1:
-            next_instance_map[instance] = device_names[i + 1]
-        else:
-            next_instance_map[instance] = device_names[0]  # wrap around
-    for instance in device_names:
-        logger.info("Ring: %s -> %s", instance, next_instance_map[instance])
-
-    # compute window size for each device: `total_layers_per_device / k`
+    # compute residency & windows sizes & neighbors for each shard
+    residency_sizes: Dict[str, int] = {}
     window_sizes: Dict[str, int] = {}
-    for instance, rounds_layers in layer_assignments.items():
-        # Flatten to count total layers
-        total_layers = sum(len(round_layers) for round_layers in rounds_layers)
-        if total_layers > 0:
-            window_size = max(1, total_layers // solution_k)
-            window_sizes[instance] = window_size
-            logger.info(
-                "Window size for %s: %d (total_layers=%d, k=%d)",
-                instance,
-                window_size,
-                total_layers,
-                solution_k,
-            )
+    next_instances: Dict[str, str] = {}
+    for i, instance in enumerate(shard_order):
+        residency_sizes[instance] = solution_n[i]
+        window_sizes[instance] = max(1, solution_w[i] // solution_k)
+
+        # `dev_1 -> dev_2 -> ... -> dev_n -> dev_1` (wraps around)
+        if i < len(shard_order) - 1:
+            next_instances[instance] = shard_order[i + 1]
         else:
-            # FIXME: how to handle?
-            logger.error(
-                "No layers assigned to %s, setting window size to 1",
-                instance,
-            )
-            window_sizes[instance] = 1
+            next_instances[instance] = shard_order[0]  # wrap around
 
-    logger.info("Layer assignments (by rounds): %s", layer_assignments)
-
-    return [
+    assignments = [
         LayerAssignment(
             instance=name,
-            layers=layer_assignments[name],
-            next_instance=next_instance_map[name],
+            layers=assigned_layers[name],
+            next_instance=next_instances[name],
             window_size=window_sizes[name],
             residency_size=residency_sizes[name],
         )
-        for name in device_names
+        for name in shard_order
     ]
+
+    logger.info("Assignments: %s", assignments)
+    return assignments
 
 
 def optimize_device_ordering(
