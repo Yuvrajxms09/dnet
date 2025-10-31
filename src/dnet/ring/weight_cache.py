@@ -251,3 +251,13 @@ class WeightCache:
             except Exception:
                 continue
         return count
+
+    def get_resident_layers(self) -> List[int]:
+        """Return the current resident layer ids ordered by recency.
+
+        Ordering is from oldest to newest based on last access time. This allows
+        callers to keep the most recently used tail and evict the least recent head.
+        """
+        with self.lock:
+            items = sorted(self.cache.items(), key=lambda kv: kv[1][1])
+            return [lid for lid, _ in items]

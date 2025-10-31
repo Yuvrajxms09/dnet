@@ -67,6 +67,7 @@ class ComputeMixin(RingShardNodeAttributes):
             while True:
                 start_time = time.perf_counter()
                 processed = 0
+                did_early_swap = False
 
                 # Determine contiguous local window starting at current_layer
                 window_layers: List[int] = []
@@ -89,6 +90,58 @@ class ComputeMixin(RingShardNodeAttributes):
                             fut.result(timeout=30)
                         except Exception:
                             pass
+
+                # In sliding_fit with a single resident window, proactively evict only the
+                # non-needed head from the current resident set before loading new weights.
+                # This prevents LRU from evicting the useful tail during materialization.
+                if self._mode == "sliding_fit" and int(self._resident_windows) <= 1 and window_layers:
+                    try:
+                        # Current requested window
+                        curr = list(window_layers)
+                        # Budget equals window_size for single resident window
+                        try:
+                            budget = max(1, int(self.window_size) or 1)
+                        except Exception:
+                            budget = max(1, int(self.window_size))
+                        # Derive actual resident layers from cache ordered oldest->newest
+                        resident = []
+                        try:
+                            resident = self.weight_cache.get_resident_layers()  # type: ignore[union-attr]
+                        except Exception:
+                            resident = []
+                        # Consider only layers not part of the current window
+                        prev_only = [lid for lid in resident if lid not in curr]
+                        keep_quota = max(0, budget - len(curr))
+                        keep_tail = prev_only[-keep_quota:] if keep_quota > 0 else []
+                        evict_head = [lid for lid in prev_only if lid not in set(keep_tail)]
+                        if evict_head:
+                            try:
+                                evicted_cnt = self.weight_cache.evict_layers(evict_head)  # type: ignore[union-attr]
+                            except Exception:
+                                evicted_cnt = 0
+                            try:
+                                if hasattr(self.model, "unload_layers"):
+                                    self.model.unload_layers(evict_head)  # type: ignore[attr-defined]
+                                    for lid in evict_head:
+                                        self._bound_versions.pop(lid, None)
+                            except Exception:
+                                pass
+                            did_early_swap = True
+                            if self._profile:
+                                try:
+                                    logger.info(
+                                        "[PROFILE][DELTA-SWAP][EARLY] node=%s nonce=%s evict_head=%s keep_tail=%s add=%s evicted=%s",
+                                        self.node_id,
+                                        activation_msg.nonce,
+                                        evict_head,
+                                        keep_tail,
+                                        window_layers,
+                                        evicted_cnt,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
                 # Ensure weights for the window are resident and bind only if arrays changed
                 # if model fits and we've already bound these layers, skip the scan entirely.
@@ -189,7 +242,10 @@ class ComputeMixin(RingShardNodeAttributes):
                     # that are likely to be reused.
                     if self._mode == "sliding_fit":
                         if int(self._resident_windows) <= 1:
-                            if not self._recent_windows:
+                            if did_early_swap:
+                                # Early delta-swap already trimmed resident set for this window
+                                pass
+                            elif not self._recent_windows:
                                 # First window in token: seed resident set
                                 self._recent_windows.append(list(window_layers))
                             else:
