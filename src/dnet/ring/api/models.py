@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, Literal
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from ..common import TopologyInfo, LayerAssignment
+from ..common import LayerAssignment
 
 
 class RoleMapping(BaseModel):
@@ -303,10 +303,6 @@ class PrepareTopologyRequest(BaseModel):
     )
 
 
-class PrepareTopologyResponse(TopologyInfo):
-    pass
-
-
 class ManualDevice(BaseModel):
     """Manual device specification for topology (no discovery)."""
 
@@ -327,6 +323,7 @@ class PrepareTopologyManualRequest(BaseModel):
     kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
         default="8bit", description="KV cache quantization to use"
     )
+    # FIXME: can use DnetDeviceProperties instead?
     devices: List[ManualDevice] = Field(..., description="Manual device endpoints")
     assignments: List[LayerAssignment] = Field(
         ..., description="Layer assignments per device (rounds or flat)"

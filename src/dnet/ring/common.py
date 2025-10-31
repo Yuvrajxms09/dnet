@@ -22,7 +22,8 @@ class LayerAssignment(BaseModel):
 class TopologyInfo(BaseModel):
     """Stored topology information for the current model."""
 
-    model: str = Field(..., description="Model name or HuggingFace repo ID")
+    model: Optional[str] = Field(
+        ..., description="Loaded model name or HuggingFace repo ID"
     kv_bits: Literal["4bit", "8bit", "fp16"] = Field(
         ..., description="KV cache quantization used by solver and shards"
     )
