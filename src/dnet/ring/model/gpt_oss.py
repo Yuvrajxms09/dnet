@@ -38,10 +38,31 @@ class GptOssRingModel(BaseRingModel):
             self.layer_types = (["sliding_attention", "full_attention"] * half)[: int(config.num_hidden_layers)]
 
         # API layer owns embeddings/norm/head when used at endpoints
-        if is_api_layer:
+        # Embedding / norm / head modules
+        # Create them unconditionally for consistency with other ring models
+        # (end shard needs lm_head; start shard needs embed)
+        try:
+            if "quantization" in model_config:
+                from mlx.nn.layers.quantized import QuantizedEmbedding  # type: ignore
+
+                qcfg = model_config["quantization"]
+                bits = int(qcfg.get("bits", 8))
+                group = int(qcfg.get("group_size", 64))
+                self.embed_tokens = QuantizedEmbedding(
+                    config.vocab_size, config.hidden_size, group_size=group, bits=bits
+                )
+            else:
+                self.embed_tokens = nn.Embedding(
+                    config.vocab_size, config.hidden_size
+                )
+        except Exception:
             self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-            self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if not getattr(config, "tie_word_embeddings", False):
+            self.lm_head = nn.Linear(
+                config.hidden_size, config.vocab_size, bias=False
+            )
 
         self.layers: List[nn.Module] = []
         self.abs_to_local: Dict[int, int] = {}
@@ -53,6 +74,26 @@ class GptOssRingModel(BaseRingModel):
         self._cached_full_mask = None
         self._cached_swa_mask = None
 
+        # Optional post-init quantization of Linear layers for offload shards
+        self.is_quantized = "quantization" in model_config
+        if self.is_quantized and (not is_api_layer):
+            try:
+                qcfg = model_config["quantization"]
+                bits = int(qcfg.get("bits", 8))
+                group = int(qcfg.get("group_size", 64))
+
+                def _quant_pred(p, m):
+                    return isinstance(m, nn.Linear)
+
+                nn.quantize(
+                    self, bits=bits, group_size=group, class_predicate=_quant_pred
+                )
+                self._converted_to_quantized = True
+            except Exception:
+                self._converted_to_quantized = False
+        else:
+            self._converted_to_quantized = False
+
     def embed(self, x: mx.array) -> mx.array:
         return self.embed_tokens(x) if self.is_api_layer else x
 
@@ -60,7 +101,10 @@ class GptOssRingModel(BaseRingModel):
         return self.norm(x) if self.is_api_layer else x
 
     def lm_project(self, x: mx.array) -> mx.array:
-        return self.lm_head(x) if self.is_api_layer else x
+        use_tied = bool(getattr(self.config, "tie_word_embeddings", False))
+        if use_tied or not hasattr(self, "lm_head"):
+            return self.embed_tokens.as_linear(x)
+        return self.lm_head(x)
 
     def _mask_for_layer(self, abs_idx: int, x: mx.array, c: Any) -> Optional[mx.array]:
         try:
@@ -114,12 +158,50 @@ class GptOssRingModel(BaseRingModel):
                     parts = parts[1:]
                 new_key = ".".join(parts)
                 shard_weights[new_key] = value
-            elif self.is_api_layer and (
-                key.startswith("embed_tokens") or key.startswith("norm") or key.startswith("lm_head")
-            ):
+            elif key.startswith("embed_tokens") or key.startswith("norm") or key.startswith("lm_head"):
                 shard_weights[key] = value
+
         if shard_weights:
+            shard_weights = self._sanitize_weights(shard_weights)
             super().load_weights(list(shard_weights.items()), strict=strict)
+
+    def _sanitize_weights(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+        # Mirror mlx-lm GPT-OSS sanitize behavior for fused gate_up_proj and quant keys
+        if any("gate_proj.weight" in k for k in weights.keys()):
+            return weights
+        new_weights: Dict[str, mx.array] = {}
+        for k, v in weights.items():
+            if "gate_up_proj" in k and "bias" not in k:
+                if "_blocks" in k:
+                    v = v.view(mx.uint32).flatten(-2)
+                    k = k.replace("_blocks", ".weight")
+                if "_scales" in k:
+                    k = k.replace("_scales", ".scales")
+                new_weights[k.replace("gate_up_proj", "gate_proj")] = mx.contiguous(
+                    v[..., ::2, :]
+                )
+                new_weights[k.replace("gate_up_proj", "up_proj")] = mx.contiguous(
+                    v[..., 1::2, :]
+                )
+            elif "down_proj" in k and "bias" not in k:
+                if "_blocks" in k:
+                    v = v.view(mx.uint32).flatten(-2)
+                    k = k.replace("_blocks", ".weight")
+                if "_scales" in k:
+                    k = k.replace("_scales", ".scales")
+                new_weights[k] = v
+            elif "gate_up_proj_bias" in k:
+                new_weights[k.replace("gate_up_proj_bias", "gate_proj.bias")] = (
+                    mx.contiguous(v[..., ::2])
+                )
+                new_weights[k.replace("gate_up_proj_bias", "up_proj.bias")] = (
+                    mx.contiguous(v[..., 1::2])
+                )
+            elif "down_proj_bias" in k:
+                new_weights[k.replace("down_proj_bias", "down_proj.bias")] = v
+            else:
+                new_weights[k] = v
+        return new_weights
 
     def unload_layers(self, abs_layers: List[int]):
         for abs_idx in abs_layers:
@@ -134,7 +216,6 @@ class GptOssRingModel(BaseRingModel):
 
     def _shrink_linear_like(self, mod):
         try:
-            import mlx.core as _mx
             for name in ("weight", "bias", "scales", "biases"):
                 if hasattr(mod, name):
                     arr = getattr(mod, name)
@@ -143,9 +224,9 @@ class GptOssRingModel(BaseRingModel):
                     except Exception:
                         continue
                     if name == "weight":
-                        new_arr = _mx.zeros((1, 1), dtype=dt)
+                        new_arr = mx.zeros((1, 1), dtype=dt)
                     else:
-                        new_arr = _mx.zeros((1,), dtype=dt)
+                        new_arr = mx.zeros((1,), dtype=dt)
                     setattr(mod, name, new_arr)
         except Exception:
             pass
@@ -193,4 +274,3 @@ class GptOssRingModel(BaseRingModel):
             else:
                 caches.append(KVCache())
         return caches
-
