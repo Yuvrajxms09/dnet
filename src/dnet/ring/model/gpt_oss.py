@@ -174,7 +174,7 @@ class GptOssRingModel(BaseRingModel):
             return None
 
     def embed(self, x: mx.array) -> mx.array:
-        return self.embed_tokens(x) if self.is_api_layer else x
+        return self.embed_tokens(x)
 
     def normalize(self, x: mx.array) -> mx.array:
         return self.norm(x) if self.is_api_layer else x
