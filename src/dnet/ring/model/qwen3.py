@@ -98,21 +98,17 @@ class Qwen3RingModel(BaseRingModel):
 
     def _shrink_linear_like(self, mod):
         try:
-            import mlx.core as _mx
-
             for name in ("weight", "bias", "scales", "biases"):
                 if hasattr(mod, name):
                     arr = getattr(mod, name)
                     try:
-                        # shp = tuple(arr.shape)
                         dt = arr.dtype
                     except Exception:
                         continue
-                    # Minimal shapes for placeholders
                     if name == "weight":
-                        new_arr = _mx.zeros((1, 1), dtype=dt)
+                        new_arr = mx.zeros((1, 1), dtype=dt)
                     elif name in ("scales", "biases", "bias"):
-                        new_arr = _mx.zeros((1,), dtype=dt)
+                        new_arr = mx.zeros((1,), dtype=dt)
                     else:
                         continue
                     setattr(mod, name, new_arr)
