@@ -84,6 +84,8 @@ class LayerManager:
         logger.info(f"Initialized LLM manager with layers {self.assigned_layers}")
 
     def _memadvise_layer(self, layer_idx: int, memadvise: int) -> bool:
+        if self._use_mxload_fastpath:
+            return True
         if layer_idx not in self.assigned_layers:
             return False
 
@@ -214,6 +216,8 @@ class LayerManager:
 
     def release_layer(self, layer_idx: int):
         """Mark layer as not needed anymore"""
+        if self._use_mxload_fastpath:
+            return True
         result = self._memadvise_layer(layer_idx, MADV_DONTNEED)
         if result:
             logger.info(f"Released layer {layer_idx}")
@@ -278,14 +282,7 @@ class LayerManager:
         return self.executor.submit(self.prefetch_layer, layer_idx)
 
     def close(self):
-        """Clean up resources"""
         self.executor.shutdown(wait=True)
-
-        for mapped_file in self.mapped_files.values():
-            mapped_file.mmap.close()
-            mapped_file.file.close()
-        self.executor.shutdown(wait=True)
-
         for mapped_file in self.mapped_files.values():
             mapped_file.mmap.close()
             mapped_file.file.close()
