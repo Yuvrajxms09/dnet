@@ -42,7 +42,12 @@ from ...protos.shard_api_comm_pb2_grpc import (
 
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
-from ...utils.model import ModelMetadata, get_model_metadata
+from ...utils.model import (
+    ModelMetadata,
+    get_model_metadata,
+    get_model_config_json,
+    resolve_tokenizer_dir,
+)
 from .utils import (
     create_generate_step_for_ring_with_grpc,
     compute_layer_assignments,
@@ -376,8 +381,25 @@ class RingApiNode:
         """
         logger.info("Preparing topology for model: %s", req.model)
 
-        # Load model metadata
-        model_metadata = get_model_metadata(req.model)
+        # Load only config.json to avoid weight downloads on API node
+        cfg = get_model_config_json(req.model)
+        num_layers_raw = cfg.get("num_hidden_layers")
+        if not isinstance(num_layers_raw, int):
+            raise ValueError(
+                "num_hidden_layers missing or invalid in config.json; cannot prepare topology without scanning weights"
+            )
+        num_layers = num_layers_raw
+
+        embedding_raw = cfg.get("embedding_size")
+        if isinstance(embedding_raw, int):
+            embedding_size = embedding_raw
+        else:
+            hidden_raw = cfg.get("hidden_size")
+            if not isinstance(hidden_raw, int):
+                raise ValueError(
+                    "embedding_size/hidden_size missing or invalid in config.json; cannot profile payload size"
+                )
+            embedding_size = hidden_raw
 
         # Profile model
         batch_sizes = [1]
@@ -393,7 +415,7 @@ class RingApiNode:
         shard_profiles, thunderbolt_conns = await self._collect_shard_profiles(
             shards,
             req.model,
-            model_metadata.embedding_size,
+            embedding_size,
             req.max_batch_exp,
             batch_sizes,
         )
@@ -418,7 +440,7 @@ class RingApiNode:
         self.topology = TopologyInfo(
             model=req.model,
             kv_bits=req.kv_bits,
-            num_layers=model_metadata.num_layers,
+            num_layers=num_layers,
             devices=shards_list,
             assignments=layer_assignments,
             solution=asdict(solution),
@@ -436,7 +458,7 @@ class RingApiNode:
                     list(solution.w),
                     list(solution.n),
                     solution.obj_value,
-                    model_metadata.num_layers,
+                    num_layers,
                 )
         except Exception:
             pass
@@ -445,7 +467,7 @@ class RingApiNode:
         logger.info(
             "Topology prepared: %d devices, %d layers",
             len(shards_list),
-            model_metadata.num_layers,
+            num_layers,
         )
 
         return self.topology
@@ -696,10 +718,9 @@ class RingApiNode:
         # Check if all shards loaded successfully
         if all(status.success for status in shard_statuses):
             try:
-                self.model_metadata = get_model_metadata(model_to_load)
-
-                # Load tokenizer
-                self.tokenizer = load_tokenizer(Path(model_to_load), {})
+                # Load tokenizer without forcing weight downloads on API node
+                tok_dir = resolve_tokenizer_dir(model_to_load)
+                self.tokenizer = load_tokenizer(tok_dir, {})
 
                 # Connect to first shard (head device)
                 # this should be the first device in `self.topology.devices`

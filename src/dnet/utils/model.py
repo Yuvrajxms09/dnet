@@ -15,7 +15,9 @@ from typing import Any, Dict, Tuple
 import mlx.core as mx
 import numpy as np
 from mlx_lm.utils import get_model_path
+from huggingface_hub import hf_hub_download
 from mlx_lm.models import cache
+from mlx_lm.models.cache import RotatingKVCache
 
 from .serialization import safetensor_dtype_map
 from ..ring.model.base import BaseRingModel
@@ -151,6 +153,63 @@ class ModelMetadata:
     @property
     def model_config(self) -> Any:
         return self.config
+
+
+def get_model_config_json(model_path: str) -> Dict[str, Any]:
+    """Load only the model's config.json without downloading weights.
+
+    If `model_path` is a local directory, reads config.json from it.
+    Otherwise, downloads just config.json from Hugging Face Hub.
+    """
+    p = Path(model_path)
+    if p.exists() and p.is_dir():
+        cfg_path = p / "config.json"
+        with open(cfg_path, "r") as f:
+            return json.load(f)
+    # Remote repo id: fetch config.json only
+    cfg_file = hf_hub_download(repo_id=model_path, filename="config.json")
+    with open(cfg_file, "r") as f:
+        return json.load(f)
+
+
+def resolve_tokenizer_dir(model: str | Path) -> Path:
+    """Return a local directory containing tokenizer assets for a model.
+
+    - If `model` is a local directory and contains tokenizer files, return it.
+    - Otherwise, download minimal tokenizer files from HF and return the cache dir.
+    """
+    p = Path(model)
+    if p.exists() and p.is_dir():
+        for name in ("tokenizer.json", "tokenizer.model"):
+            if (p / name).exists():
+                return p
+        # Fallback: still return p if it's a directory; load_tokenizer may handle variants
+        return p
+
+    # Remote repo id: fetch tokenizer files into HF cache and return their parent dir
+    candidates = [
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "vocab.json",
+        "merges.txt",
+        "added_tokens.json",
+    ]
+    parent: Path | None = None
+    last_err: Exception | None = None
+    for fname in candidates:
+        try:
+            fpath = hf_hub_download(repo_id=str(model), filename=fname)
+            parent = Path(fpath).parent
+        except Exception as e:
+            last_err = e
+            continue
+    if parent is not None:
+        return parent
+    if last_err is not None:
+        raise last_err
+    raise FileNotFoundError("Could not resolve tokenizer files for model")
 
 
 class MappedFile:
@@ -423,25 +482,37 @@ def make_cache(
 
         converted = []
         converted_any = False
+        skipped_rotating = 0
+        failed = 0
         for c in caches:
+            if isinstance(c, RotatingKVCache):
+                skipped_rotating += 1
+                converted.append(c)
+                continue
             if hasattr(c, "to_quantized"):
                 try:
                     qc = c.to_quantized(group_size=group, bits=bits)
                     converted.append(qc)
                     converted_any = True
-                except Exception as e:
-                    logger.warning(
-                        "KV quantization failed for one cache entry: %s; using fp16 entry",
-                        e,
-                    )
+                except Exception:
+                    failed += 1
                     converted.append(c)
             else:
                 converted.append(c)
 
         if converted_any:
-            logger.info(
-                "Enabled quantized KV cache: bits=%s, group_size=%s", bits, group
-            )
+            if skipped_rotating or failed:
+                logger.info(
+                    "Enabled quantized KV cache: bits=%s, group_size=%s (skipped_rotating=%s, failed=%s)",
+                    bits,
+                    group,
+                    skipped_rotating,
+                    failed,
+                )
+            else:
+                logger.info(
+                    "Enabled quantized KV cache: bits=%s, group_size=%s", bits, group
+                )
             return converted
         else:
             logger.info(
