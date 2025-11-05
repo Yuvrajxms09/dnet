@@ -69,9 +69,28 @@ class ShardProfileRequest(BaseModel):
 
 
 class ShardProfileResponse(BaseModel):
-    """Response from device profiling and latency measurement."""
+    """Response from device profiling."""
 
     profile: Dict[str, Any] = Field(..., description="Device profile information")
+
+
+class MeasureLatencyRequest(BaseModel):
+    """Request to measure latency to other devices."""
+
+    devices: Dict[str, DnetDeviceProperties] = Field(
+        ..., description="Device information mapping"
+    )
+    thunderbolts: Dict[str, ThunderboltConnection] = Field(
+        default={}, description="Thunderbolt connection information from this device"
+    )
+    payload_sizes: List[int] = Field(
+        default=[1024], description="Payload sizes to test for latency measurement"
+    )
+
+
+class MeasureLatencyResponse(BaseModel):
+    """Response from latency measurement."""
+
     latency: LatencyResults = Field(..., description="Latency measurement results")
 
 

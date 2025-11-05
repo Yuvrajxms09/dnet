@@ -42,6 +42,7 @@ from ...protos.shard_api_comm_pb2_grpc import (
 
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
+from ...utils.latency import calculate_median_latency_seconds
 from ...utils.model import (
     ModelMetadata,
     get_model_metadata,
@@ -74,6 +75,8 @@ from .models import (
     UnloadModelResponse,
 )
 from ..shard.models import (
+    MeasureLatencyRequest,
+    MeasureLatencyResponse,
     ShardProfileRequest,
     ShardLoadModelRequest,
     ShardLoadModelResponse,
@@ -996,10 +999,10 @@ class RingApiNode:
         # Find Thunderbolt connections
         all_thunderbolts = discover_all_thunderbolt_connections(shards)
 
-        # Call each shard's /profile endpoint
-        # FIXME: do this in parallel
-        shard_profiles: Dict[str, DeviceProfile] = {}
         async with httpx.AsyncClient() as client:
+            # Step 1: Health check all shards in parallel
+            logger.info("Starting health checks for all shards...")
+            health_tasks, shard_list = [], []
             for shard_name, shard_props in shards.items():
                 if shard_props.is_manager:
                     logger.warning(
@@ -1007,52 +1010,169 @@ class RingApiNode:
                     )
                     continue
 
+                shard_list.append((shard_name, shard_props))
                 server_port, server_ip = shard_props.server_port, shard_props.local_ip
+                health_url = f"http://{server_ip}:{server_port}/health"
+                health_tasks.append(client.get(health_url, timeout=5.0))
 
-                try:
-                    shard_url = f"http://{server_ip}:{server_port}/profile"
-                    logger.info(
-                        "Calling /profile endpoint for shard %s at %s",
-                        shard_name,
-                        shard_url,
+            health_results = await asyncio.gather(*health_tasks, return_exceptions=True)
+
+            # Filter healthy shards
+            healthy_shards = []
+            for (shard_name, shard_props), health_result in zip(shard_list, health_results):
+                if isinstance(health_result, Exception):
+                    logger.warning("Health check failed for %s: %s", shard_name, health_result)
+                    continue
+                if health_result.status_code == 200:
+                    healthy_shards.append((shard_name, shard_props))
+                    logger.info("Health check passed for %s", shard_name)
+                else:
+                    logger.warning("Health check failed for %s: status %s", shard_name, health_result.status_code)
+
+            logger.info("Healthy shards: %d/%d", len(healthy_shards), len(shard_list))
+
+            if not healthy_shards:
+                logger.error("No healthy shards found!")
+                return {}, all_thunderbolts
+
+            # Step 2: Measure latencies on all healthy shards in parallel
+            logger.info("Measuring latencies for all healthy shards...")
+            latency_tasks = []
+            for shard_name, shard_props in healthy_shards:
+                server_port, server_ip = shard_props.server_port, shard_props.local_ip
+                latency_url = f"http://{server_ip}:{server_port}/measure_latency"
+                latency_request = MeasureLatencyRequest(
+                    devices=shards,
+                    thunderbolts=all_thunderbolts.get(shard_name, {}),
+                    payload_sizes=payload_sizes,
+                )
+                latency_tasks.append(
+                    client.post(latency_url, json=latency_request.model_dump(), timeout=1000.0)
+                )
+
+            latency_results = await asyncio.gather(*latency_tasks, return_exceptions=True)
+
+            # Store latency data for each shard
+            shard_latencies = {}
+            final_healthy_shards = []
+
+            for (shard_name, shard_props), latency_result in zip(healthy_shards, latency_results):
+                if isinstance(latency_result, Exception):
+                    logger.warning(
+                        "Latency measurement failed for %s: %s", shard_name, latency_result
                     )
-
-                    response = await client.post(
-                        shard_url,
-                        json=ShardProfileRequest(
-                            repo_id=repo_id,
-                            thunderbolts=all_thunderbolts.get(shard_name, {}),
-                            payload_sizes=payload_sizes,
-                            max_batch_exp=max_batch_exp,
-                            devices=shards,
-                        ).model_dump(),
-                        timeout=1000.0,
-                    )
-
-                    if response.status_code == 200:
-                        profile_data = ShardProfileResponse.model_validate(
-                            response.json()
-                        )
-                        profile = load_device_profile_from_dict(profile_data.profile)
-                        logger.info(
-                            "Successfully collected profile from %s", shard_name
-                        )
-
-                        # Mark head device (same local IP as API)
-                        if shard_props.local_ip == this_device.local_ip:
-                            profile.is_head = True
-
-                        # FIXME: DeviceProfileInfo to DeviceProfile should be better
-                        shard_profiles[shard_name] = profile
+                    continue
+                else:
+                    if latency_result.status_code == 200:
+                        latency_data = MeasureLatencyResponse.model_validate(latency_result.json())
+                        shard_latencies[shard_name] = latency_data.latency
+                        final_healthy_shards.append((shard_name, shard_props))
+                        logger.info("Latency measurement succeeded for %s", shard_name)
                     else:
-                        logger.error(
-                            "Failed to get profile from %s: %s",
+                        logger.warning(
+                            "Latency measurement failed for %s: status %s",
                             shard_name,
-                            response.status_code,
+                            latency_result.status_code,
                         )
 
-                except Exception as e:
-                    logger.exception("Error calling /profile for %s: %s", shard_name, e)
+            logger.info("Latencies collected from %d shards", len(shard_latencies))
+
+            if not final_healthy_shards:
+                logger.error("No shards with successful latency measurements!")
+                return {}, all_thunderbolts
+
+            # Step 3: Group healthy shards by local_ip (same device)
+            shards_by_device: Dict[str, List[Tuple[str, DnetDeviceProperties]]] = {}
+            for shard_name, shard_props in final_healthy_shards:
+                local_ip = shard_props.local_ip
+                if local_ip not in shards_by_device:
+                    shards_by_device[local_ip] = []
+                shards_by_device[local_ip].append((shard_name, shard_props))
+
+            logger.info("Grouped shards into %d devices", len(shards_by_device))
+
+            # Step 4: Profile devices (parallel per device, sequential per shard within device)
+            async def profile_device_shards(
+                device_ip: str, device_shards: List[Tuple[str, DnetDeviceProperties]]
+            ) -> List[Tuple[str, DeviceProfile]]:
+                """Profile all shards on a single device sequentially."""
+                profiles = []
+
+                for shard_name, shard_props in device_shards:
+                    try:
+                        server_port, server_ip = shard_props.server_port, shard_props.local_ip
+                        profile_url = f"http://{server_ip}:{server_port}/profile"
+
+                        logger.info(
+                            "Calling /profile endpoint for shard %s at %s",
+                            shard_name,
+                            profile_url,
+                        )
+
+                        response = await client.post(
+                            profile_url,
+                            json=ShardProfileRequest(
+                                repo_id=repo_id,
+                                thunderbolts=all_thunderbolts.get(shard_name, {}),
+                                payload_sizes=payload_sizes,
+                                max_batch_exp=max_batch_exp,
+                                devices=shards,
+                            ).model_dump(),
+                            timeout=1000.0,
+                        )
+
+                        if response.status_code == 200:
+                            profile_data = ShardProfileResponse.model_validate(response.json())
+                            profile = load_device_profile_from_dict(profile_data.profile)
+
+                            # Mark head device (same local IP as API)
+                            if shard_props.local_ip == this_device.local_ip:
+                                profile.is_head = True
+
+                            profiles.append((shard_name, profile))
+                            logger.info("Successfully collected profile from %s", shard_name)
+                        else:
+                            logger.error(
+                                "Failed to get profile from %s: %s",
+                                shard_name,
+                                response.status_code,
+                            )
+
+                    except Exception as e:
+                        logger.exception("Error calling /profile for %s: %s", shard_name, e)
+
+                return profiles
+
+            # Run profiling for all devices in parallel
+            device_tasks = [
+                profile_device_shards(device_ip, device_shards)
+                for device_ip, device_shards in shards_by_device.items()
+            ]
+            device_results = await asyncio.gather(*device_tasks, return_exceptions=True)
+
+            # Step 5: Merge latency data into device profiles
+            shard_profiles: Dict[str, DeviceProfile] = {}
+
+            for device_result in device_results:
+                if isinstance(device_result, Exception):
+                    logger.error("Device profiling failed: %s", device_result)
+                    continue
+
+                for shard_name, profile in device_result:
+                    # Set t_comm using median latency
+                    if shard_name in shard_latencies:
+                        median_latency = calculate_median_latency_seconds(shard_latencies[shard_name])
+                        if median_latency is not None:
+                            profile.t_comm = float(median_latency)
+                            logger.info(
+                                f"Set t_comm for {shard_name} to median latency: {profile.t_comm:.6f}s"
+                            )
+                        else:
+                            logger.warning(
+                                f"No valid latency measurements for {shard_name}, keeping default t_comm"
+                            )
+
+                    shard_profiles[shard_name] = profile
 
         logger.info("Collected profiles from %d shards", len(shard_profiles))
         return shard_profiles, all_thunderbolts
