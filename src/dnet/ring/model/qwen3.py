@@ -152,11 +152,7 @@ class Qwen3RingModel(BaseRingModel):
         super().load_weights(list(shard_weights.items()), strict=strict)
 
     def sanitize(self, weights):
-        # Remove unused precomputed rotary freqs
-        weights = {
-            k: v for k, v in weights.items() if "self_attn.rotary_emb.inv_freq" not in k
-        }
-        # Respect tied embeddings: do not load a separate lm_head when tied
+        # Qwen3: only handle tied embeddings
         try:
             if bool(getattr(self.config, "tie_word_embeddings", False)):
                 weights.pop("lm_head.weight", None)

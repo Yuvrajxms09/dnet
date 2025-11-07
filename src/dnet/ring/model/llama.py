@@ -133,6 +133,19 @@ class LlamaRingModel(BaseRingModel):
 
         super().load_weights(list(shard_weights.items()), strict=strict)
 
+    def sanitize(self, weights):
+        # Remove unused precomputed rotary freqs
+        weights = {
+            k: v for k, v in weights.items() if "self_attn.rotary_emb.inv_freq" not in k
+        }
+        # Respect tied embeddings
+        try:
+            if bool(getattr(self.config, "tie_word_embeddings", False)):
+                weights.pop("lm_head.weight", None)
+        except Exception:
+            pass
+        return weights
+
     # Map absolute config keys to local module paths for quantization overrides
     # _abskey_to_local_path inherited from BaseRingModel handles mapping
 
