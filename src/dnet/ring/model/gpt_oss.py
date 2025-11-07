@@ -214,8 +214,10 @@ class GptOssRingModel(BaseRingModel):
             mask = create_attention_mask(x, c, window_size=self.window_size)
         return self.layers[local_idx](x, mask, c)
 
-    def _sanitize_weights(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
-        # Port of non-ring Model.sanitize (supports quantized blocks/scales)
+    def sanitize_weights(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+        """
+        Tensor-level normalization
+        """
         if any("gate_proj.weight" in k for k in weights.keys()):
             return weights
 
@@ -253,105 +255,39 @@ class GptOssRingModel(BaseRingModel):
                 new_w[k] = v
         return new_w
 
-    # Public sanitize hook so base quantization can normalize weight keyspace
-    # before deciding which modules to quantize based on presence of `.scales`.
-    # This version is tolerant of placeholder/non-array values (used by the
-    # quantization gating pass), and will only rewrite keys without touching
-    # values when arrays are not provided.
     def sanitize(self, weights: Dict[str, Any]) -> Dict[str, Any]:
-        # Fast-path: if already sanitized (key contains gate_proj), return
+        """
+        Config-level normalization
+        """
         if any("gate_proj.weight" in k for k in weights.keys()):
             return weights
         new_w: Dict[str, Any] = {}
         for k, v in weights.items():
-            is_array = isinstance(v, mx.array)
             if "gate_up_proj" in k and "bias" not in k:
                 k_eff = k
-                v_eff = v
-                if "_blocks" in k:
-                    # Only reshape when real arrays are provided; otherwise keep as-is
-                    if is_array:
-                        v_eff = v.view(mx.uint32).flatten(-2)
-                    k_eff = k.replace("_blocks", ".weight")
-                if "_scales" in k:
-                    k_eff = k.replace("_scales", ".scales")
-                # Duplicate into gate_proj and up_proj branches; keep values as-is when not arrays
-                new_w[k_eff.replace("gate_up_proj", "gate_proj")] = (
-                    mx.contiguous(v_eff[..., ::2, :]) if is_array else v_eff
-                )
-                new_w[k_eff.replace("gate_up_proj", "up_proj")] = (
-                    mx.contiguous(v_eff[..., 1::2, :]) if is_array else v_eff
-                )
+                if "_blocks" in k_eff:
+                    k_eff = k_eff.replace("_blocks", ".weight")
+                if "_scales" in k_eff:
+                    k_eff = k_eff.replace("_scales", ".scales")
+                new_w[k_eff.replace("gate_up_proj", "gate_proj")] = v
+                new_w[k_eff.replace("gate_up_proj", "up_proj")] = v
             elif "down_proj" in k and "bias" not in k:
                 k_eff = k
-                v_eff = v
-                if "_blocks" in k:
-                    if is_array:
-                        v_eff = v.view(mx.uint32).flatten(-2)
-                    k_eff = k.replace("_blocks", ".weight")
-                if "_scales" in k:
-                    k_eff = k.replace("_scales", ".scales")
-                new_w[k_eff] = v_eff
+                if "_blocks" in k_eff:
+                    k_eff = k_eff.replace("_blocks", ".weight")
+                if "_scales" in k_eff:
+                    k_eff = k_eff.replace("_scales", ".scales")
+                new_w[k_eff] = v
             elif "gate_up_proj_bias" in k:
-                if is_array:
-                    new_w[k.replace("gate_up_proj_bias", "gate_proj.bias")] = (
-                        mx.contiguous(v[..., ::2])
-                    )
-                    new_w[k.replace("gate_up_proj_bias", "up_proj.bias")] = (
-                        mx.contiguous(v[..., 1::2])
-                    )
-                else:
-                    # Keep a single entry under gate_proj.bias for gating; value unused
-                    new_w[k.replace("gate_up_proj_bias", "gate_proj.bias")] = v
-                    new_w[k.replace("gate_up_proj_bias", "up_proj.bias")] = v
+                new_w[k.replace("gate_up_proj_bias", "gate_proj.bias")] = v
+                new_w[k.replace("gate_up_proj_bias", "up_proj.bias")] = v
             elif "down_proj_bias" in k:
                 new_w[k.replace("down_proj_bias", "down_proj.bias")] = v
             else:
                 new_w[k] = v
         return new_w
 
-    def load_weights(self, weights, strict: bool = False):
-        # to dict
-        try:
-            wdict = {k: v for k, v in weights}
-        except Exception:
-            wdict = dict(weights)
-
-        # sanitize first
-        wdict = self._sanitize_weights(wdict)
-
-        shard_w: Dict[str, mx.array] = {}
-        for key, value in wdict.items():
-            if key.startswith("model.layers.") or key.startswith("layers."):
-                parts = key.split(".")
-                idx_pos = 2 if parts[0] == "model" else 1
-                try:
-                    abs_idx = int(parts[idx_pos])
-                except Exception:
-                    continue
-                if abs_idx not in self.abs_to_local:
-                    continue
-                local_idx = self.abs_to_local[abs_idx]
-                parts[idx_pos] = str(local_idx)
-                if parts[0] == "model":
-                    parts = parts[1:]
-                new_key = ".".join(parts)
-                shard_w[new_key] = value
-
-            elif key.startswith(
-                (
-                    "model.embed_tokens",
-                    "embed_tokens",
-                    "model.norm",
-                    "norm",
-                    "model.lm_head",
-                    "lm_head",
-                )
-            ):
-                new_key = key[6:] if key.startswith("model.") else key
-                shard_w[new_key] = value
-
-        super().load_weights(list(shard_w.items()), strict=strict)
+    # load_weights inherited from BaseRingModel
 
     def make_cache(self) -> List[Any]:
         caches: List[Any] = []

@@ -238,7 +238,7 @@ class WeightCache:
             del self.cache[layer_id]
             if layer_id in self.reference_counts:
                 del self.reference_counts[layer_id]
-            logger.info("Proactively evicted layer %s from cache", layer_id)
+            logger.debug("Proactively evicted layer %s from cache", layer_id)
             return True
 
     def evict_layers(self, layer_ids: List[int]) -> int:

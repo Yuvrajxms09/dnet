@@ -1,5 +1,5 @@
 """Ring shard node implementation with dynamic model loading."""
-
+import os
 import asyncio
 import threading
 import time
@@ -45,11 +45,10 @@ from ...utils.model import (
     load_final_norm,
     load_lm_head,
 )
-from ...utils.repack import ensure_repacked_for_layers
-from pathlib import Path
-import os
+from ...utils.repack import ensure_repacked_for_layers, delete_repacked_layers
 from ...utils.logger import logger
 from ...utils.banner import print_startup_banner
+from ...utils.profile_subproc import profile_device_via_subprocess
 from .config import ShardConfig
 from ...utils.model import ModelMetadata, get_model_metadata
 from ...utils.time import utc_epoch_now
@@ -376,7 +375,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
                         model_metadata=self.model_metadata,
                     )
                 )
-                self.model.finalize_quantization_sinks()  # type: ignore[attr-defined]
                 logger.info(
                     "[QUANT] applied=%s for model=%s",
                     applied,
@@ -521,6 +519,15 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             logger.info("Node %s: Unloading model", self.node_id)
 
             # Clear model and cache
+            try:
+                _ = delete_repacked_layers(
+                    model_id=None,
+                    all_flag=False,
+                    base_dir=os.getenv("DNET_REPACK_DIR", "repacked_models"),
+                    current_model_path=self.model_path,
+                )
+            except Exception:
+                pass
             self.model = None
             self.cache = None
             self.model_metadata = None
@@ -1540,9 +1547,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
               - model_id: restrict cleanup to this model bucket
               - all: when true, remove the entire repack directory base
             """
-            import shutil
-            from ...utils.repack import _sanitize_model_id
-
             try:
                 payload = await request.json()
             except Exception:
@@ -1550,33 +1554,14 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
             model_id = (payload or {}).get("model_id")
             all_flag = bool((payload or {}).get("all", False))
 
-            base_dir = Path(os.getenv("DNET_REPACK_DIR", "repacked_models"))
-            removed: list[str] = []
-
             try:
-                if all_flag:
-                    if base_dir.exists():
-                        shutil.rmtree(base_dir, ignore_errors=True)
-                        removed.append(str(base_dir))
-                else:
-                    if model_id:
-                        safe = _sanitize_model_id(str(model_id))
-                        target = base_dir / safe
-                        if target.exists():
-                            shutil.rmtree(target, ignore_errors=True)
-                            removed.append(str(target))
-                    else:
-                        # Default: remove buckets for current model_path if it is an HF id
-                        try:
-                            if self.model_path:
-                                safe = _sanitize_model_id(self.model_path)
-                                target = base_dir / safe
-                                if target.exists():
-                                    shutil.rmtree(target, ignore_errors=True)
-                                    removed.append(str(target))
-                        except Exception:
-                            pass
-                return JSONResponse(content={"removed": removed})
+                removed = delete_repacked_layers(
+                    model_id=model_id,
+                    all_flag=all_flag,
+                    base_dir=os.getenv("DNET_REPACK_DIR", "repacked_models"),
+                    current_model_path=self.model_path,
+                )
+                return JSONResponse(content={"removed": list(removed)})
             except Exception as e:
                 logger.error("/cleanup_repacked failed: %s", e)
                 return JSONResponse(status_code=500, content={"error": str(e)})
@@ -1591,8 +1576,6 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         Returns:
             Device profile information as a plain dict
         """
-        from ...utils.profile_subproc import profile_device_via_subprocess
-
         profile_dict = profile_device_via_subprocess(
             repo_id, max_batch_exp=max_batch_exp, debug=0
         )

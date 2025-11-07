@@ -108,7 +108,90 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
             Number of layers
         """
 
-    # -------- Quantization helpers shared across ring models --------
+    def load_weights(self, file_or_weights, strict: bool = False):
+        """Bind weights for this shard
+        """
+
+        wdict: Dict[str, Any]
+        if isinstance(file_or_weights, dict):
+            wdict = dict(file_or_weights)
+        elif isinstance(file_or_weights, (list, tuple)):
+            try:
+                wdict = {
+                    (k.decode("utf-8") if isinstance(k, (bytes, bytearray)) else str(k) if not isinstance(k, str) else k): v
+                    for (k, v) in file_or_weights  # type: ignore[misc]
+                }
+            except UnicodeError:
+                wdict = dict(file_or_weights)  # type: ignore[arg-type]
+        elif isinstance(file_or_weights, str):
+            try:
+                wdict = mx.load(file_or_weights)  # type: ignore[assignment]
+            except ValueError:
+                wdict = {}
+        else:
+            try:
+                wdict = dict(file_or_weights)  # type: ignore[arg-type]
+            except ValueError:
+                wdict = {}
+
+        # Model-specific canonicalization: prefer tensor-level when available
+        try:
+            if hasattr(self, "sanitize_weights"):
+                # type: ignore[attr-defined]
+                wdict = getattr(self, "sanitize_weights")(wdict)
+            elif hasattr(self, "sanitize"):
+                # type: ignore[attr-defined]
+                wdict = getattr(self, "sanitize")(wdict)
+        except Exception:
+            # Be permissive: proceed even if sanitize fails
+            pass
+
+        shard_w: Dict[str, mx.array] = {}
+
+        def _has_module(name: str) -> bool:
+            return hasattr(self, name)
+
+        tie = bool(getattr(self.config, "tie_word_embeddings", False))
+
+        for key, value in wdict.items():
+            # Per-layer tensors: accept both model.layers.N.* and layers.N.*
+            if key.startswith("model.layers.") or key.startswith("layers."):
+                parts = key.split(".")
+                idx_pos = 2 if parts[0] == "model" else 1
+                try:
+                    abs_idx = int(parts[idx_pos])
+                except Exception:
+                    continue
+                # Map absolute -> local for hosted layers only
+                abs2loc = getattr(self, "abs_to_local", {}) or {}
+                if abs_idx not in abs2loc:
+                    continue
+                local_idx = abs2loc[abs_idx]
+                parts[idx_pos] = str(local_idx)
+                # Drop leading 'model.' if present
+                if parts[0] == "model":
+                    parts = parts[1:]
+                new_key = ".".join(parts)
+                shard_w[new_key] = value
+                continue
+
+            # API-layer tensors: embed_tokens.*, norm.*, lm_head.* (strip optional model.)
+            if key.startswith("model."):
+                bare = key[6:]
+            else:
+                bare = key
+            if bare.startswith("embed_tokens.") and _has_module("embed_tokens"):
+                shard_w[bare] = value
+                continue
+            if bare.startswith("norm.") and _has_module("norm"):
+                shard_w[bare] = value
+                continue
+            if bare.startswith("lm_head.") and _has_module("lm_head") and (not tie):
+                shard_w[bare] = value
+                continue
+
+        return super().load_weights(list(shard_w.items()), strict=strict)
+
     def _abskey_to_local_path(self, key: str) -> Optional[str]:
         """Generic mapping of absolute weight/config keys to local module paths.
 
@@ -163,7 +246,6 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
             except Exception:
                 weight_names = set()
 
-            # Optionally sanitize names using model's sanitize hook (keys only)
             try:
                 if hasattr(self, "sanitize") and weight_names:
                     wdict = {k: True for k in weight_names}
@@ -182,30 +264,13 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
             has_qspec = bool(qspec)
             if isinstance(qspec, dict) and qspec:
                 # Always read global defaults from root when present
-                try:
-                    if "bits" in qspec:
-                        g_bits = int(qspec.get("bits", 0) or 0)
-                except Exception:
-                    g_bits = 0
-                try:
-                    if "group_size" in qspec:
-                        g_group = int(qspec.get("group_size", 0) or 0)
-                except Exception:
-                    g_group = 0
-                try:
-                    if "mode" in qspec:
-                        g_mode = (
-                            str(qspec.get("mode", "affine")).strip().lower() or "affine"
-                        )
-                except Exception:
-                    pass
-                # Allow config to request disabling sinks after quant
-                try:
-                    ds = qspec.get("disable_sinks", None)
-                    if isinstance(ds, bool):
-                        setattr(self, "_disable_sinks_on_quant", ds)
-                except Exception:
-                    pass
+                g_bits = int(qspec.get("bits", 0) or 0)
+                g_group = int(qspec.get("group_size", 0) or 0)
+                g_mode = str(qspec.get("mode", "affine")).strip().lower() or "affine"
+                
+                ds = qspec.get("disable_sinks")
+                if isinstance(ds, bool):
+                    self._disable_sinks_on_quant = ds
 
                 # Collect per-path overrides from remaining dict-valued entries
                 for k, v in qspec.items():
@@ -351,36 +416,7 @@ class BaseRingModel(nn.Module, metaclass=ABCMeta):
                 pass
             return False
 
-    def finalize_quantization_sinks(self) -> None:
-        """Optionally disable attention sinks after quantization.
-
-        By default, keep sinks enabled. Disable only when explicitly requested
-        via config or environment: set `quantization.disable_sinks=true` in the
-        model config or `DNET_DISABLE_SINKS=1` in the environment.
-        """
-        try:
-            disable_flag = False
-            try:
-                import os as _os
-
-                disable_flag = str(
-                    _os.getenv("DNET_DISABLE_SINKS", "0")
-                ).strip().lower() in {"1", "true", "yes", "on"}
-            except Exception:
-                disable_flag = False
-            disable_flag = disable_flag or bool(
-                getattr(self, "_disable_sinks_on_quant", False)
-            )
-            if disable_flag and bool(getattr(self, "_converted_to_quantized", False)):
-                for mod in getattr(self, "layers", []) or []:
-                    try:
-                        attn = getattr(mod, "self_attn", None)
-                        if attn is not None and hasattr(attn, "sinks"):
-                            setattr(attn, "sinks", None)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    
 
     @staticmethod
     def _shrink_linear_like(mod) -> None:

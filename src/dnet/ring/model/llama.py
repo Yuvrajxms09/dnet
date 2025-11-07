@@ -102,36 +102,7 @@ class LlamaRingModel(BaseRingModel):
             c = cache[local_idx]
         return self.layers[local_idx](x, mask, c)
 
-    def load_weights(self, weights, strict=False):
-        """Load only local layer and API tensors. Remap abs->local indices.
-        Accepts keys in either 'model.layers.N.*' or 'layers.N.*' formats.
-        """
-        shard_weights: Dict[str, mx.array] = {}
-
-        for key, value in weights:
-            if key.startswith("model.layers.") or key.startswith("layers."):
-                parts = key.split(".")
-                idx_pos = 2 if parts[0] == "model" else 1
-                try:
-                    abs_idx = int(parts[idx_pos])
-                except Exception:
-                    continue
-                if abs_idx not in self.abs_to_local:
-                    continue
-                local_idx = self.abs_to_local[abs_idx]
-                parts[idx_pos] = str(local_idx)
-                if parts[0] == "model":
-                    parts = parts[1:]
-                new_key = ".".join(parts)
-                shard_weights[new_key] = value
-            elif (
-                key.startswith("embed_tokens")
-                or key.startswith("norm")
-                or (key.startswith("lm_head") and not self.config.tie_word_embeddings)
-            ):
-                shard_weights[key] = value
-
-        super().load_weights(list(shard_weights.items()), strict=strict)
+    # load_weights inherited from BaseRingModel
 
     def sanitize(self, weights):
         # Remove unused precomputed rotary freqs

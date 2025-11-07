@@ -212,3 +212,98 @@ def ensure_repacked_for_layers(
     except Exception:
         pass
     return out_root, repacked
+
+
+def delete_repacked_layers(
+    *,
+    model_id: str | None = None,
+    all_flag: bool = False,
+    base_dir: str | Path | None = None,
+    current_model_path: str | None = None,
+) -> list[str]:
+    """Delete repacked per-layer buckets under the base directory.
+
+    Args:
+        model_id: Optional HF repo id (sanitized) to target a specific bucket
+        all_flag: When True, remove the entire base repack directory
+        base_dir: Base directory; defaults to env DNET_REPACK_DIR or 'repacked_models'
+        current_model_path: Optional current model path/id used when model_id is None
+
+    Returns:
+        List of removed paths (as strings)
+    """
+    import shutil
+
+    if base_dir is None:
+        base_dir = os.getenv("DNET_REPACK_DIR", "repacked_models")
+    base = Path(base_dir)
+    removed: list[str] = []
+
+    if all_flag:
+        if base.exists():
+            shutil.rmtree(base, ignore_errors=True)
+            removed.append(str(base))
+        return removed
+
+    # Remove a specific model bucket by id if provided
+    if model_id:
+        safe = _sanitize_model_id(str(model_id))
+        target = base / safe
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+            removed.append(str(target))
+        return removed
+
+    # Default: if current_model_path is provided, attempt to remove its bucket.
+    # Handle three cases robustly:
+    #  1) If a repack manifest exists under the path, read the original model_id
+    #     and delete base_dir/<sanitize(model_id)>.
+    #  2) If the path is inside base_dir, delete the bucket root base_dir/<safe>.
+    #  3) Fallback to previous behavior (sanitize the path string).
+    if current_model_path:
+        try:
+            pcur = Path(current_model_path)
+
+            # Case 1: manifest with original model_id
+            try:
+                man_path = pcur / "repack-manifest.json"
+                if man_path.exists():
+                    manifest = json.loads(man_path.read_text())
+                    src_id = manifest.get("model_id")
+                    if src_id:
+                        safe = _sanitize_model_id(str(src_id))
+                        target = base / safe
+                        if target.exists():
+                            shutil.rmtree(target, ignore_errors=True)
+                            removed.append(str(target))
+                            return removed
+            except Exception:
+                pass
+
+            # Case 2: current path is within base repack directory
+            try:
+                pb = base.resolve()
+                pr = pcur.resolve()
+                rel = pr.relative_to(pb)
+                parts = rel.parts
+                if parts:
+                    bucket = pb / parts[0]
+                    if bucket.exists():
+                        shutil.rmtree(bucket, ignore_errors=True)
+                        removed.append(str(bucket))
+                        return removed
+            except Exception:
+                pass
+
+            # Case 3: Fallback to sanitizing the provided path string
+            try:
+                safe = _sanitize_model_id(str(current_model_path))
+                target = base / safe
+                if target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                    removed.append(str(target))
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return removed
