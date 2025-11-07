@@ -1002,7 +1002,8 @@ class RingApiNode:
         async with httpx.AsyncClient() as client:
             # Step 1: Health check all shards in parallel
             logger.info("Starting health checks for all shards...")
-            health_tasks, shard_list = [], []
+            health_tasks: list[asyncio._CoroutineLike[httpx.Response]] = []
+            shard_list: list[tuple[str, DnetDeviceProperties]] = []
             for shard_name, shard_props in shards.items():
                 if shard_props.is_manager:
                     logger.warning(
