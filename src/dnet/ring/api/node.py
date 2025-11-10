@@ -18,7 +18,7 @@ from mlx_lm.tokenizer_utils import load_tokenizer
 
 from dnet_p2p import (
     DnetDeviceProperties,
-    DnetP2P,
+    AsyncDnetP2P,
     discover_all_thunderbolt_connections,
     ThunderboltConnection,
 )
@@ -134,7 +134,7 @@ class RingApiNode:
         self.api_grpc_server: Optional[aio_grpc.Server] = None
         self.first_shard_channel: Optional[aio_grpc.Channel] = None
         self.first_shard_stub: Optional[DnetRingServiceStub] = None
-        self.discovery = DnetP2P("lib/dnet-p2p/lib")
+        self.discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
         self.pending_requests: Dict[str, asyncio.Future] = {}
 
         # Print ASCII art banner if available
@@ -158,11 +158,11 @@ class RingApiNode:
         self.running = True
 
         await self._start_grpc_server()
-        self._start_discovery()
+        await self._start_discovery()
         await self._start_http_server(shutdown_trigger)
         await asyncio.sleep(0.2)
 
-    def _start_discovery(self) -> None:
+    async def _start_discovery(self) -> None:
         """Start discovery service."""
         from secrets import token_hex
         from socket import gethostname
@@ -175,7 +175,7 @@ class RingApiNode:
             self.grpc_port,
             is_manager=True,
         )
-        self.discovery.start()
+        await self.discovery.async_start()
         logger.info("Discovery service started for API node")
 
     async def _start_grpc_server(self) -> None:
@@ -259,7 +259,7 @@ class RingApiNode:
 
         @self.app.get("/v1/devices")
         async def get_devices() -> JSONResponse:
-            devices = self.discovery.get_properties()
+            devices = await self.discovery.async_get_properties()
             devices_dict = {
                 instance: device_props.model_dump()
                 for instance, device_props in devices.items()
@@ -324,7 +324,7 @@ class RingApiNode:
               - all: when true, remove the entire repack directory base
             """
             payload = body or {}
-            shards = self._get_shards_from_discovery()
+            shards = await self._get_shards_from_discovery()
             results: Dict[str, Any] = {}
             async with httpx.AsyncClient() as http_client:
                 for name, props in shards.items():
@@ -409,7 +409,7 @@ class RingApiNode:
         model_profile = await self._profile_model(req.model, batch_sizes, req.seq_len)
 
         # Get shards from discovery
-        shards = self._get_shards_from_discovery()
+        shards = await self._get_shards_from_discovery()
         if not shards:
             raise ValueError("No shards discovered. Ensure shard nodes are running.")
 
@@ -633,7 +633,7 @@ class RingApiNode:
         logger.info("Loading model: %s", model_to_load)
 
         # Notify each shard to load their layers via HTTP
-        api_properties = self.discovery.get_own_properties()
+        api_properties = await self.discovery.async_get_own_properties()
         shard_statuses: List[ShardLoadStatus] = []
         async with httpx.AsyncClient() as http_client:
             for assignment in assignments_to_use:
@@ -906,7 +906,7 @@ class RingApiNode:
             self.first_shard_stub = DnetRingServiceStub(self.first_shard_channel)
 
             # Prepare generate_step with gRPC callback
-            api_properties = self.discovery.get_own_properties()
+            api_properties = await self.discovery.async_get_own_properties()
             # Prefer Thunderbolt IP for token callbacks if available
             tb_ip = None
             try:
@@ -936,9 +936,9 @@ class RingApiNode:
             self.generate_step = None
             return False
 
-    def _get_shards_from_discovery(self) -> Dict[str, DnetDeviceProperties]:
+    async def _get_shards_from_discovery(self) -> Dict[str, DnetDeviceProperties]:
         """Get shards from discovery keyed by instance name (excluding managers)."""
-        devices = self.discovery.get_properties()
+        devices = await self.discovery.async_get_properties()
         # Normalize keys to the short "instance" form
         normalized: Dict[str, DnetDeviceProperties] = {}
         for _instance, props in devices.items():
@@ -985,7 +985,7 @@ class RingApiNode:
             embedding_size: Model embedding size
             max_batch_exp: Maximum batch size exponent
             batch_sizes: List of batch sizes to profile
-            all_thunderbolts: Pre-discovered thunderbolt connections per shard
+            thunderbolt_conns: Pre-discovered thunderbolt connections per shard
 
         Returns:
             Tuple of (collected shard profiles, thunderbolt connections)
@@ -1690,8 +1690,8 @@ class RingApiNode:
         # Stop discovery
         if self.discovery.is_running():
             logger.info("Stopping discovery service for API node")
-            self.discovery.stop()
-            self.discovery.free_instance()
+            await self.discovery.async_stop()
+            await self.discovery.async_free_instance()
         else:
             logger.warning("Discovery service was not running")
 
