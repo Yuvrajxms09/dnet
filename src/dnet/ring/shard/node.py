@@ -19,7 +19,6 @@ from grpc import aio as aio_grpc
 
 from dnet_p2p import AsyncDnetP2P, DnetDeviceProperties
 
-from dnet.utils.latency import calculate_median_latency_seconds
 from dnet.utils.serialization import tensor_to_bytes
 
 from .servicer import ShardServicer
@@ -27,6 +26,8 @@ from dnet.protos.dnet_ring_pb2_grpc import add_DnetRingServiceServicer_to_server
 
 from .models import (
     HealthResponse,
+    MeasureLatencyRequest,
+    MeasureLatencyResponse,
     ShardLoadModelRequest,
     ShardLoadModelResponse,
     ShardProfileRequest,
@@ -1438,35 +1439,30 @@ class RingShardNode(ComputeMixin, PrefetchMixin, CommsMixin):
         async def profile(req: ShardProfileRequest) -> ShardProfileResponse:
             logger.info("Received /profile request")
             try:
-                # Measure latencies
-                latency_results = await self._measure_latency_to_devices(
-                    req.devices, req.thunderbolts, req.payload_sizes
-                )
-
                 # Profile device using dperf
                 device_profile = await self._profile_device(
                     req.repo_id, req.max_batch_exp
                 )
 
-                # Overwrite `t_comm` with median latency (subprocess returns a dict)
-                median_latency = calculate_median_latency_seconds(latency_results)
-                if median_latency is not None:
-                    device_profile["t_comm"] = float(median_latency)
-                    logger.info(
-                        f"Set t_comm to median latency: {device_profile['t_comm']:.6f}s"
-                    )
-                else:
-                    logger.warning(
-                        "No valid latency measurements, keeping default t_comm"
-                    )
-
-                # Return the dict payload directly
-                return ShardProfileResponse(
-                    profile=device_profile,
-                    latency=latency_results,
-                )
+                return ShardProfileResponse(profile=device_profile)
             except Exception as e:
                 logger.error(f"Error in /profile endpoint: {e}")
+                raise
+
+        @self.app.post("/measure_latency")
+        async def measure_latency(
+            req: MeasureLatencyRequest,
+        ) -> MeasureLatencyResponse:
+            logger.info("Received /measure_latency request")
+            try:
+                # Measure latencies to other devices
+                latency_results = await self._measure_latency_to_devices(
+                    req.devices, req.thunderbolts, req.payload_sizes
+                )
+
+                return MeasureLatencyResponse(latency=latency_results)
+            except Exception as e:
+                logger.error(f"Error in /measure_latency endpoint: {e}")
                 raise
 
         @self.app.post("/load_model")
