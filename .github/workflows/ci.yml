@@ -25,6 +25,7 @@ jobs:
           echo "${{ secrets.CI_SSH_KEY }}" > ~/.ssh/dnet_id_ed25519
           chmod 600 ~/.ssh/dnet_id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/dnet_id_ed25519 -o IdentitiesOnly=yes"
 
       - name: Checkout submodules
         run: |
