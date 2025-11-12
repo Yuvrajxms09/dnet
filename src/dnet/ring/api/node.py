@@ -1123,7 +1123,7 @@ class RingApiNode:
             async def profile_device_shards(
                 device_shards: List[Tuple[str, DnetDeviceProperties]],
             ) -> List[Tuple[str, DeviceProfile]]:
-                profiles: list[Tuple[str, DeviceProfile]] = []
+                profiles: List[Tuple[str, DeviceProfile]] = []
 
                 for shard_name, shard_props in device_shards:
                     try:
