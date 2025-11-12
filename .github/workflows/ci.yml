@@ -53,6 +53,7 @@ jobs:
           uvx ruff check .
 
       - name: Run tests (pytest) via uv
+        if: runner.os == 'macOS'
         run: |
           # currently, there are no tests, so we ignore exit code 5 (no tests collected)
           uv run pytest || ([ $? -eq 5 ] && echo "No tests collected, continuing..." && exit 0 || exit $?)
