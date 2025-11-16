@@ -6,6 +6,7 @@ Reads TransportConfig/TopologyConfig, owns activation_computed_queue/activation_
 from __future__ import annotations
 from typing import Optional, Any
 import asyncio
+from queue import Full
 from dnet_p2p import (
     AsyncDnetP2P,
     DnetDeviceProperties,
@@ -46,8 +47,8 @@ class RingAdapter(TopologyAdapter):
 
         # Implement the required queues
         self._ingress_q: asyncio.Queue[ActivationRequest]= asyncio.Queue()
-        self._activation_computed_queue: asyncio.Queue[ActivationMessage] = asyncio.Queue()
-        self._activation_token_queue: asyncio.Queue[ActivationMessage] = asyncio.Queue()
+        self.ring_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue()
+        self.token_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue()
 
 
     async def start(self):
@@ -56,8 +57,9 @@ class RingAdapter(TopologyAdapter):
         self._loop = loop  # if you need it in workers
         self._tasks = [
             asyncio.create_task(self._ingress_worker()),
-            asyncio.create_task(self._send_worker()),
-            asyncio.create_task(self._send_token_worker()),
+            asyncio.create_task(self._egress_worker()),
+            asyncio.create_task(self._activation_tx_worker()),
+            asyncio.create_task(self._token_tx_worker()),
         ]
         if self._streaming_enabled:
             self._tasks.append(asyncio.create_task(self._stream_sweeper()))
@@ -109,7 +111,7 @@ class RingAdapter(TopologyAdapter):
                     self._active_nonce = req.nonce
                     self.runtime.get_or_make_kv(req.nonce)
 
-                if target_layer in self._assigned_set:
+                if target_layer in self.runtime._assigned_set:
                     # Heavy prep in executor (alloc/copy/decompress)
                     loop = asyncio.get_running_loop()
                     try:
@@ -127,16 +129,14 @@ class RingAdapter(TopologyAdapter):
                         continue
 
                     # Enqueue for compute (cancellable back-off)
-                    while self.running:
-                        try:
-                            self.runtime.activation_recv_queue.put_nowait(activation_msg)
-                            break
-                        except asyncio.QueueFull:
-                            await asyncio.sleep(0)
-                    else:
-                        logger.error("Failed to queue activation %s (node stopping)", activation_msg.nonce)
+                    loop = asyncio.get_running_loop()
+                    try:
+                        await loop.run_in_executor(
+                            None, self.runtime.activation_recv_queue.put, activation_msg
+                        )
+                    except Exception as e:
+                        logger.error("Failed to queue activation %s: %s", activation_msg.nonce, e)
                         if self.runtime.input_pool:
-                            # FIXME: !!!
                             self.runtime.input_pool.release(activation_msg.pool_id)
                 else:
                     # Forward to next node (not our layer)
@@ -150,11 +150,21 @@ class RingAdapter(TopologyAdapter):
             except Exception as e:
                 logger.error("Ingress worker error: %s", e)
 
-    async def _send_worker(self):
-        pass
+    async def _egress_worker(self, loop):
+        while self.running:
+            msg = await loop.run_in_executor(None, self.runtime.activation_send_queue.get)
+            target = self.token_tx_q if msg.is_final else self.ring_tx_q
+            await target.put(msg)
 
-    async def _send_token_worker(self):
-        pass
+    async def _activation_tx_worker(self):
+        while self.running or not self.ring_tx_q.empty():
+            msg = await self.ring_tx_q.get()
+            await self._send_ring_activation(msg)
+
+    async def _token_tx_worker(self):
+        while self.running or not self.token_tx_q.empty():
+            msg = await self.token_tx_q.get()
+            await self._send_final_token(msg)
 
     async def _connect_next_node(self) -> bool:
         """Connect to next node in ring.
