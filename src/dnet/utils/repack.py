@@ -151,22 +151,6 @@ def repack_per_layer(
                 mf.file.close()
             except Exception:
                 pass
-    try:
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-        logger.info(
-            "[REPACK] model=%s layers=%s..%s count=%s out=%s ms=%.1f",
-            model_path,
-            int(min(assigned_layers)) if assigned_layers else -1,
-            int(max(assigned_layers)) if assigned_layers else -1,
-            int(len(set(assigned_layers))),
-            str(out_root),
-            dt_ms,
-        )
-    except Exception:
-        pass
-    if written:
-        print(f"[repack] Wrote {written} per-layer file(s) under {out_root}")
-    return out_root
 
 
 def ensure_repacked_for_layers(
@@ -235,6 +219,7 @@ def delete_repacked_layers(
     import shutil
 
     if base_dir is None:
+        # TODO: change this to ~/.dria/dnet/
         base_dir = os.getenv("DNET_REPACK_DIR", "repacked_models")
     base = Path(base_dir)
     removed: list[str] = []
