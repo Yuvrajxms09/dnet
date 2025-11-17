@@ -5,7 +5,6 @@ RingAdapter: ring transport + topology glue around a topology‑agnostic runtime
 - Egress: read ActivationMessage from runtime and stream to next node or API
 - Streaming only: no unary fallback to keep logic simple and consistent
 """
-
 from __future__ import annotations
 from typing import Optional, Any
 import asyncio
@@ -19,6 +18,11 @@ from dnet_p2p import (
     discover_thunderbolt_connection,
 )
 from grpc import aio as aio_grpc
+from urllib.parse import urlparse
+
+from .....utils.grpc_config import GRPC_AIO_OPTIONS
+from .....utils.time import utc_epoch_now
+from .....protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc
 from .base import TopologyAdapter
 from ..runtime import ShardRuntime
 from .....protos.dnet_ring_pb2 import ActivationRequest
@@ -37,7 +41,6 @@ class RingAdapter(TopologyAdapter):
         self,
         runtime: ShardRuntime,
         discovery: AsyncDnetP2P,
-        streaming_enabled: bool,
         transport_config: Optional[TransportConfig] = None,
     ) -> None:
         super().__init__(runtime, discovery)
@@ -49,7 +52,7 @@ class RingAdapter(TopologyAdapter):
         self.running = False
         self._active_nonce: Optional[str] = None
 
-        self._streaming_enabled = streaming_enabled
+        self._streaming_enabled = self.transport_config.streaming
         self._streams: StreamManager = StreamManager(
             idle_timeout_s=self.transport_config.stream_idle_s,
             backoff_s=self.transport_config.stream_backoff_s,
@@ -61,14 +64,18 @@ class RingAdapter(TopologyAdapter):
         self.next_node_stub: Optional[Any] = None
 
         # Implement the required queues
-        self._ingress_q: asyncio.Queue[ActivationRequest] = asyncio.Queue()
-        self.ring_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue()
-        self.token_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue()
+        self.queue_size = runtime.max_queue_size
+        self._ingress_q: asyncio.Queue[ActivationRequest] = asyncio.Queue(maxsize=self.queue_size)
+        self.ring_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue(maxsize=self.queue_size)
+        self.token_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue(maxsize=self.queue_size)
 
         # API callback gRPC
         self.api_channel: Optional[aio_grpc.Channel] = None
         self.api_stub: Optional[Any] = None
         self.api_address: Optional[str] = None
+
+        self.total_layers: int = 0
+        self.api_callback_address: Optional[str] = None
 
     async def start(self):
         self.running = True
@@ -76,7 +83,7 @@ class RingAdapter(TopologyAdapter):
         self._loop = loop  # if you need it in workers
         self._tasks = [
             asyncio.create_task(self._ingress_worker()),
-            asyncio.create_task(self._egress_worker(loop)),
+            asyncio.create_task(self._egress_worker()),
             asyncio.create_task(self._ring_tx_worker()),
             asyncio.create_task(self._token_tx_worker()),
         ]
@@ -95,11 +102,11 @@ class RingAdapter(TopologyAdapter):
     def activation_token_queue(self) -> asyncio.Queue:
         return self.token_tx_q
 
-    async def ingress(self, data):
-        pass
+    async def ingress(self, request: ActivationRequest):
+        await self.admit_frame(request)
 
-    async def egress(self, data):
-        pass
+    async def egress(self, msg: ActivationMessage):
+        await self.ring_tx_q.put(msg)
 
     async def configure_topology(self, req: ShardLoadModelRequest):
         self.next_node = req.next_node
@@ -157,19 +164,12 @@ class RingAdapter(TopologyAdapter):
                         continue
 
                     # Enqueue for compute (cancellable back-off)
-                    while self.running:
-                        try:
-                            self.runtime.activation_recv_queue.put_nowait(
-                                activation_msg
-                            )
-                            break
-                        except Exception:
-                            await asyncio.sleep(0)
-                    else:
-                        logger.error(
-                            "Failed to queue activation %s (stopping)",
-                            activation_msg.nonce,
+                    try:
+                        await loop.run_in_executor(
+                            None, self.runtime.activation_recv_queue.put_nowait, activation_msg
                         )
+                    except Exception as e:
+                        logger.error("Failed to queue activation %s: %s", activation_msg.nonce, e)
                         if self.runtime.input_pool:
                             self.runtime.input_pool.release(activation_msg.pool_id)
                 else:
@@ -184,23 +184,28 @@ class RingAdapter(TopologyAdapter):
             except Exception as e:
                 logger.error("Ingress worker error: %s", e)
 
-    async def _egress_worker(self, loop):
+    async def _egress_worker(self):
+        loop = asyncio.get_running_loop()
         while self.running:
-            msg = await loop.run_in_executor(
-                None, self.runtime.activation_send_queue.get
-            )
+            try:
+                msg = await loop.run_in_executor(
+                    self.runtime.executor,
+                    self.runtime.activation_send_queue.get(timeout=0.5)
+                )
+            except asyncio.CancelledError:
+                break
             target = self.token_tx_q if msg.is_final else self.ring_tx_q
             await target.put(msg)
 
     async def _ring_tx_worker(self):
         while self.running or not self.ring_tx_q.empty():
             msg = await self.ring_tx_q.get()
-            await self._send_ring_activation(msg)
+            await self._send_activation(msg)
 
     async def _token_tx_worker(self):
         while self.running or not self.token_tx_q.empty():
             msg = await self.token_tx_q.get()
-            await self._send_final_token(msg)
+            await self._send_token(msg)
 
     async def _stream_sweeper(self):
         while self.running:
@@ -292,7 +297,7 @@ class RingAdapter(TopologyAdapter):
         )
         ctx.last_activity_t = asyncio.get_running_loop().time()
 
-    async def _send_ring_activation(self, msg: ActivationMessage):
+    async def _send_activation(self, msg: ActivationMessage):
         if not (self._streaming_enabled and self.next_node_stub):
             logger.error("Streaming disabled or next node not connected; cannot send")
             return
@@ -328,6 +333,107 @@ class RingAdapter(TopologyAdapter):
             pb2.ActivationFrame(request=request, seq=ctx.last_seq, end_of_request=False)
         )
         ctx.last_activity_t = asyncio.get_running_loop().time()
+
+        # Clear tensor reference to free memory
+        try:
+            msg.tensor = None
+        except Exception:
+            pass
+
+    async def _send_token(self, msg: ActivationMessage) -> None:
+        """
+        Final-hop delivery of a sampled token to the API.
+
+        Prefetch / offload logic lives in the compute policy; this is
+        purely transport: pick an address and SendToken over gRPC.
+        """
+        # 1) Pick the callback address
+        cb = msg.callback_url or ""
+        addr: Optional[str]
+
+        if cb:
+            parsed = urlparse(cb)
+            if parsed.scheme == "grpc" and parsed.netloc:
+                addr = parsed.netloc
+            else:
+                logger.error(
+                    "Shard %s: invalid gRPC callback URL for token: %s",
+                    self.runtime.shard_id,
+                    cb,
+                )
+                return
+        elif self.api_callback_address:
+            # Fallback to load_model-provided address: host:port
+            addr = self.api_callback_address  # type: ignore[attr-defined]
+        else:
+            logger.error(
+                "Shard %s: no callback URL for final token; nonce=%s",
+                self.runtime.shard_id,
+                msg.nonce,
+            )
+            return
+
+        # 2) Ensure API gRPC channel + stub
+        try:
+            if (self.api_channel is None) or (addr != self.api_address):
+                # Close old channel if any
+                try:
+                    if self.api_channel is not None:
+                        await self.api_channel.close()
+                except Exception:
+                    pass
+
+                self.api_address = addr
+                self.api_channel = aio_grpc.insecure_channel(
+                    addr, options=GRPC_AIO_OPTIONS
+                )
+                self.api_stub = shard_api_comm_pb2_grpc.ShardApiServiceStub(
+                    self.api_channel
+                )
+        except Exception as e:
+            logger.error(
+                "Shard %s: failed to create API channel for %s: %s",
+                self.runtime.shard_id,
+                addr,
+                e,
+            )
+            return
+
+        # 3) Send TokenRequest
+        t_rpc = time.perf_counter()
+        try:
+            token_id = int(getattr(msg, "token_id", -1))
+            req = shard_api_comm_pb2.TokenRequest(
+                nonce=msg.nonce,
+                token_id=token_id,
+                timestamp=utc_epoch_now(),
+            )
+            resp = await self.api_stub.SendToken(req)  # type: ignore[arg-type]
+            rpc_ms = (time.perf_counter() - t_rpc) * 1000.0
+
+            if not resp.success:
+                logger.error(
+                    "Shard %s: API SendToken failed for nonce=%s token=%s: %s",
+                    self.runtime.shard_id,
+                    msg.nonce,
+                    token_id,
+                    resp.message,
+                )
+            else:
+                logger.info(
+                    "[TX-TOKEN] shard=%s nonce=%s token=%s rpc_ms=%.2f",
+                    self.runtime.shard_id,
+                    msg.nonce,
+                    token_id,
+                    rpc_ms,
+                )
+        except Exception as e:
+            logger.exception(
+                "Shard %s: error sending token via gRPC for nonce=%s: %s",
+                self.runtime.shard_id,
+                msg.nonce,
+                e,
+            )
 
     async def _connect_next_node(self) -> bool:
         """Connect to next node in ring.
@@ -380,3 +486,30 @@ class RingAdapter(TopologyAdapter):
         self.next_node_channel = None
         self.next_node_stub = None
         return await self._connect_next_node()
+
+    async def shutdown(self) -> None:
+        # stop workers
+        self.running = False
+        for t in self._tasks:
+            t.cancel()
+        if self._tasks:
+            try:
+                await asyncio.gather(*self._tasks, return_exceptions=True)
+            except Exception:
+                pass
+        self._tasks.clear()
+        # close streams
+        for nonce in list(self._streams._streams.keys()):
+            await self._streams.end_stream(nonce)
+        # close gRPC client channels
+        if self.next_node_channel:
+            await self.next_node_channel.close()
+
+        self.next_node_channel = None
+        self.next_node_stub = None
+        if self.api_channel:
+            await self.api_channel.close()
+        self.api_channel = None
+        self.api_stub = None
+
+        logger.info("Shard %s: ring adapter shutdown complete", self.runtime.shard_id)

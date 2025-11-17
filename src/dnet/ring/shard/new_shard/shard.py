@@ -13,18 +13,24 @@ import asyncio
 from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter
 from ....protos.dnet_ring_pb2 import ActivationRequest
-
+from ....utils.banner import print_startup_banner
+from ..models import ShardLoadModelResponse
 
 class Shard:
-    def __init__(self, adapter: TopologyAdapter):
-        self.node_id = 0
+    def __init__(self, shard_id, adapter: TopologyAdapter):
+        self.node_id = shard_id
         self.adapter = adapter
         self.runtime: ShardRuntime = adapter.runtime
+        print_startup_banner()
 
     async def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.runtime.attach_loop(loop)
         self.runtime.start()  # starts compute_thread
         await self.adapter.start()
+
+    async def shutdown(self) -> None:
+        self.runtime.shutdown()
+        await self.adapter.shutdown()
 
     async def admit_frame(self, request: ActivationRequest) -> None:
         while self.adapter.running:
@@ -38,10 +44,17 @@ class Shard:
     async def reset_cache(self):
         self.runtime.reset_cache()
 
-    async def load_model(self, req):
+    async def load_model(self, req) -> ShardLoadModelResponse:
         self.runtime.load_model_core(req)
-        await self.adapter.configure_for_model(req)
+        await self.adapter.configure_topology(req)
+        return ShardLoadModelResponse(
+            success=True,
+            message="Model loaded successfully",
+            layers_loaded = self.runtime.assigned_layers,
+            load_time_ms=100
+        )
 
     async def unload_model(self): ...
+
     def queue_size(self) -> int:
         return self.runtime.queue_size()

@@ -18,10 +18,9 @@ from ....utils.model import ModelMetadata, get_model_metadata
 from ....utils.serialization import mlx_dtype_map
 from ...model.base import BaseRingModel as BaseShardModel
 import asyncio
-from .config import ComputeConfig, TransportConfig
+from .config import ComputeConfig, TransportConfig, TopologyConfig
 from ...memory_pool import LayerAwareMemoryPool
-from .policies import ComputePolicy, make_policy
-from ....utils.repack import ensure_repacked_for_layers
+from .policies import ComputePolicy, make_policy, plan_policy, PolicyPlan
 from ...model import get_ring_model
 from ....utils.model import (
     make_cache,
@@ -41,8 +40,10 @@ class ShardRuntime:
         shard_id,
         queue_size: int = 128,
         device_prefetch_workers: int = 4,
+        prefetch_threads: int = 2,
         compute_config: Optional[ComputeConfig] = None,
         transport_config: Optional[TransportConfig] = None,
+        topology_config: Optional[TopologyConfig] = None,
     ):
         self.shard_id = shard_id
         self.compute_config: ComputeConfig = (
@@ -52,14 +53,20 @@ class ShardRuntime:
             transport_config if transport_config else TransportConfig()
         )
 
+        self.topology_config: TopologyConfig = (
+            topology_config if topology_config else TopologyConfig()
+        )
+
         self.policy: Optional[ComputePolicy] = (
             None  # ComputePolicy to be assigned later
         )
 
         self._device_prefetch_workers = device_prefetch_workers
+        self.prefetch_threads = prefetch_threads
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Consumer queue for incoming activations/tokens
+        self.max_queue_size = queue_size
         self.activation_recv_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
         self.activation_send_queue: Queue[ActivationMessage] = Queue(maxsize=queue_size)
 
@@ -114,11 +121,24 @@ class ShardRuntime:
         self.compute_thread = threading.Thread(target=self._compute_worker, daemon=True)
         self.compute_thread.start()
 
+    def shutdown(self) -> None:
+        # stop compute loop
+        self.running = False
+        if self.compute_thread:
+            try:
+                self.compute_thread.join(timeout=5)
+            except Exception:
+                pass
+            self.compute_thread = None
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        self._kv_by_nonce.clear()
+        self._kv_last_seen.clear()
+
     def load_model_core(self, req: ShardLoadModelRequest) -> None:
         """
         load model
         """
-        # 1) Metadata + assignment
+        # Metadata + assignment
         self.model_metadata = get_model_metadata(req.model_path)
         self.assigned_layers = list(req.layers)
         self._assigned_sorted = sorted(self.assigned_layers)
@@ -129,40 +149,26 @@ class ShardRuntime:
         requested_w = max(1, int(req.window_size))
         n_residency = max(1, int(req.residency_size))
 
-        # 2) Mode + window
-        if n_residency < requested_w:
-            mode = "sliding_fit"
-            self.compute_config.mode = mode
-            resident_windows = 1  # sliding_fit preset
-            window_size = max(1, min(n_residency, local_count))
-        else:
-            mode = "fit" if requested_w >= local_count else "offload"
-            self.compute_config.mode = mode
-            # let config carry resident_windows, but clamp for safety
-            resident_windows = int(
-                getattr(self.compute_config, "resident_windows", 9999)
-            )
-            eff_window_size = (
-                local_count if mode == "fit" else max(1, min(requested_w, local_count))
-            )
-            window_size = eff_window_size
-
-        # self.policy.window_size = window_size
-        # self.policy._mode = mode
-        # self.policy._resident_windows = resident_windows
+        plan: PolicyPlan = plan_policy(
+            local_count=local_count,
+            requested_w=int(req.window_size),
+            residency_size=int(req.residency_size),
+            topology_config=self.topology_config,
+        )
 
         logger.info(
-            "Runtime %s: mode=%s m=%s requested_w=%s n_residency=%s -> window_size=%s resident_windows=%s",
+            "Runtime %s: mode=%s m=%s requested_w=%s n_residency=%s -> window_size=%s resident_windows=%s is_sliding%s",
             self.shard_id,
-            mode,
+            plan.mode,
             local_count,
             requested_w,
             n_residency,
-            window_size,
-            resident_windows,
+            plan.window_size,
+            plan.resident_windows,
+            plan.is_sliding
         )
 
-        # 3) KV cache config from API
+        # KV cache config from API
         kv = (req.kv_bits or "").strip().lower()
         if kv == "4bit":
             self.compute_config.kv_cache.mode = "4bit"
@@ -177,29 +183,14 @@ class ShardRuntime:
                 1, int(getattr(self.compute_config.kv_cache, "bits", 8))
             )
 
-        # 4) Repack for offload/sliding_fit (optional)
-        if mode in {"sliding_fit", "offload"}:
-            try:
-                repacked_dir, did_repack = ensure_repacked_for_layers(
-                    self.model_path, self._assigned_sorted
-                )
-                self.model_path = str(repacked_dir)
-                self.model_metadata = get_model_metadata(self.model_path)
-                self.compute_config.mxload_fastpath = True
-                self.compute_config.prefetch_mode = "off"
-                logger.info(
-                    "[REPACK] shard=%s dst=%s layers=%s repacked=%s ms=%.1f",
-                    self.shard_id,
-                    self.model_path,
-                    len(self._assigned_sorted),
-                    int(did_repack),
-                )
-            except Exception as e:
-                logger.warning(
-                    "Runtime %s: repack failed or skipped: %s", self.shard_id, e
-                )
+        # Create policy + weight cache
+        self.policy = make_policy(plan.mode, self, plan.resident_windows)
+        self.policy.window_size = plan.window_size
+        self.policy.configure_policy_for_model(req)
 
-        # 5) Pools
+        self.model_metadata = get_model_metadata(self.model_path)
+
+        # Init Pools
         self.input_pool = LayerAwareMemoryPool(
             total_memory_mb=int(self.compute_config.input_pool_mb)
         )
@@ -207,7 +198,7 @@ class ShardRuntime:
             total_memory_mb=int(self.compute_config.output_pool_mb)
         )
 
-        # 6) Load model
+        # Load model
         self.model = get_ring_model(
             self.model_metadata.model_type,
             self.model_metadata.model_config,
@@ -238,7 +229,7 @@ class ShardRuntime:
             kv_group=self.compute_config.kv_cache.group_size,
         )
 
-        # 7) Load API‑side weights (embed/norm/head) if needed
+        # Load API‑side weights (embed/norm/head) if needed
         try:
             has_start = 0 in self.assigned_layers
             has_end = (self.model_metadata.num_layers - 1) in self.assigned_layers
@@ -265,11 +256,6 @@ class ShardRuntime:
             logger.warning(
                 "Runtime %s: failed to load API‑layer weights: %s", self.shard_id, e
             )
-
-        # 8) Create policy + weight cache
-        self.policy = make_policy(mode, self, resident_windows)
-        self.policy.window_size = window_size
-        self.policy.configure_policy_for_model(req)
 
     def reset_cache(self):
         if not self.model:

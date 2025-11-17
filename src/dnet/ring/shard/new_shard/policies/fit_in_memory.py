@@ -23,7 +23,7 @@ class FitInMemoryPolicy(ComputePolicy):
             self.runtime.assigned_layers,
             self.runtime.model_metadata,
             window_size=self.window_size,
-            prefetch_threads=self.runtime.compute_config.prefetch_threads,
+            prefetch_threads=self.runtime.prefetch_threads,
             resident_windows=self._resident_windows,
             use_mxload_fastpath=self.runtime.compute_config.mxload_fastpath,
             prefetch_mode=self.runtime.compute_config.prefetch_mode,

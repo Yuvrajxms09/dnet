@@ -41,20 +41,25 @@ class TopologyAdapter(ABC):
         pass
 
     @abstractmethod
-    async def ingress(self, data):
+    async def ingress(self, req: ActivationRequest):
         """Handle incoming data to the shard.
         Ingress = network -> adapter -> runtime.
         """
         pass
 
     @abstractmethod
-    async def egress(self, data):
+    async def egress(self, msg: ActivationMessage):
         """Handle outgoing data from the shard.
         Egress = runtime -> adapter -> network.
         """
         pass
 
     @abstractmethod
-    async def configure_for_model(self, req):
+    async def configure_topology(self, req):
         """Configure the adapter for a new model load."""
+        pass
+
+    @abstractmethod
+    async def shutdown(self):
+        """Shutdown the adapter and any background tasks."""
         pass

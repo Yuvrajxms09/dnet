@@ -37,9 +37,10 @@ class HTTPServer:
     HTTP API server for shard node.
     """
 
-    def __init__(self, http_port: int, shard: Shard, discovery: AsyncDnetP2P) -> None:
+    def __init__(self, http_port: int, grpc_port: int, shard: Shard, discovery: AsyncDnetP2P) -> None:
         self.shard = shard
         self.http_port: int = http_port
+        self.grpc_port: int = grpc_port
         self.app = FastAPI()
         self.http_server: Optional[asyncio.Task] = None
         self.discovery = discovery
@@ -59,6 +60,26 @@ class HTTPServer:
         self.http_server = asyncio.create_task(
             aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
         )
+
+    async def shutdown(self) -> None:
+        """Shutdown HTTP server."""
+        if self.http_server and not self.http_server.done():
+            self.http_server.cancel()
+            try:
+                await self.http_server
+            except asyncio.CancelledError:
+                pass
+        logger.info("HTTP server on port %d stopped", self.http_port)
+
+    async def wait_closed(self, timeout: float = 5.0) -> bool:
+        if not self.http_server:
+            return True
+        try:
+            await asyncio.wait_for(self.http_server, timeout)
+            logger.info("HTTP server on port %d stopped", self.http_port)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     async def _measure_latency_to_devices(
         self,
@@ -214,7 +235,7 @@ class HTTPServer:
                 model_path=self.shard.runtime.model_path,
                 assigned_layers=self.shard.runtime.assigned_layers,
                 queue_size=self.shard.runtime.queue_size(),
-                grpc_port=self.shard.grpc_server.grpc_port,
+                grpc_port=self.grpc_port,
                 http_port=self.http_port,
                 instance=instance,
             )

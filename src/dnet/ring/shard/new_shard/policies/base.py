@@ -3,7 +3,6 @@ from typing import List, Optional, Any, Dict
 from dnet.ring.weight_cache import WeightCache
 from dnet.ring.shard.models import ShardLoadModelRequest
 from dnet.ring.data_types import ActivationMessage
-from dnet.ring.shard.new_shard.runtime import ShardRuntime
 from dnet.utils.logger import logger
 import mlx.core as mx
 
@@ -19,7 +18,7 @@ def register_policy(mode: str):
 
 
 def make_policy(
-    mode: str, runtime: ShardRuntime, resident_windows: int
+    mode: str, runtime, resident_windows: int
 ) -> "ComputePolicy":
     m = (mode or "fit").strip().lower()
     cls = POLICY_REGISTRY.get(m)
@@ -32,7 +31,7 @@ def make_policy(
 class ComputePolicy(ABC):
     """Abstract compute policy for ShardRuntime"""
 
-    def __init__(self, runtime: ShardRuntime, resident_windows: int):
+    def __init__(self, runtime, resident_windows: int):
         self.runtime = runtime
         self.weight_cache: Optional[WeightCache] = None
         # TODO: Maybe rename this to something prefetch related?

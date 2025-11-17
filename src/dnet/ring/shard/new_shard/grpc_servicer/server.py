@@ -26,3 +26,11 @@ class GrpcServer:
         except RuntimeError:
             logger.error("Couldn't start gRPC server.")
         logger.info("gRPC server started on %s", listen_addr)
+
+    async def shutdown(self):
+        """
+        Shutdown gRPC server
+        """
+        if self.server:
+            await self.server.stop(grace=5)
+            logger.info("gRPC server on port %d stopped", self.grpc_port)

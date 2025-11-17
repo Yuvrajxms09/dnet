@@ -47,6 +47,6 @@ class TransportConfig:
 class TopologyConfig:
     """Topology configuration for a shard process."""
 
-    resident_windows: int = 2
+    resident_windows: int = 1
     warmup_windows: int = 1
     x_stats: bool = False
