@@ -1,4 +1,4 @@
-from typing import Optional, Mapping
+from typing import Optional, Mapping, Any
 import os
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
@@ -44,7 +44,7 @@ class HTTPServer:
         self.http_server: Optional[asyncio.Task] = None
         self.discovery = discovery
 
-    async def _start_http_server(self, shutdown_trigger: asyncio.Event) -> None:
+    async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         await self._setup_routes()
 
         # Start HTTP server in background

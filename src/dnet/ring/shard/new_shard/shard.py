@@ -21,8 +21,7 @@ class Shard:
         self.adapter = adapter
         self.runtime: ShardRuntime = adapter.runtime
 
-    async def start(self):
-        loop = asyncio.get_running_loop()
+    async def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.runtime.attach_loop(loop)
         self.runtime.start()  # starts compute_thread
         await self.adapter.start()

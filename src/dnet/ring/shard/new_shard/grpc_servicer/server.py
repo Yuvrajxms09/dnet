@@ -7,8 +7,8 @@ from .....utils.logger import logger
 
 
 class GrpcServer:
-    def __init__(self, shard: Shard):
-        self.grpc_port: int = 58080
+    def __init__(self, grpc_port: int, shard: Shard):
+        self.grpc_port: int = grpc_port
         self.shard = shard
         self.server: Optional[aio_grpc.Server] = None
         self.servicer = GrpcServicer(self.shard)
