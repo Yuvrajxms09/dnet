@@ -1,4 +1,5 @@
 from typing import Optional, Mapping
+import os
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
 import asyncio
@@ -26,11 +27,16 @@ from dnet_p2p import AsyncDnetP2P
 from ....protos import dnet_ring_pb2
 from ....protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from grpc import aio as aio_grpc
+from dnet.utils.profile_subproc import profile_device_via_subprocess
+from distilp.common import DeviceProfile
+from dnet.utils.repack import delete_repacked_layers
+
 
 class HTTPServer:
     """
     HTTP API server for shard node.
     """
+
     def __init__(self, http_port: int, shard: Shard, discovery: AsyncDnetP2P) -> None:
         self.shard = shard
         self.http_port: int = http_port
@@ -175,6 +181,22 @@ class HTTPServer:
 
         return LatencyResults(results=latency_results_dict)
 
+    async def _profile_device(self, repo_id: str, max_batch_exp: int) -> DeviceProfile:
+        """Profile device using a profiler in a subprocess and return the object.
+
+        Args:
+            repo_id: Hugging Face repository ID
+            max_batch_exp: Maximum batch size exponent (2^max_batch_exp)
+
+        Returns:
+            Device profile information as a plain dict
+        """
+        profile_dict = profile_device_via_subprocess(
+            repo_id, max_batch_exp=max_batch_exp, debug=0
+        )
+        logger.info("Device profiling completed for node %s", self.shard.node_id)
+        return profile_dict
+
     async def _setup_routes(self) -> None:
         """Setup HTTP routes."""
 
@@ -285,7 +307,7 @@ class HTTPServer:
                     model_id=model_id,
                     all_flag=all_flag,
                     base_dir=os.getenv("DNET_REPACK_DIR", "repacked_models"),
-                    current_model_path=self.model_path,
+                    current_model_path=self.shard.runtime.model_path,
                 )
                 return JSONResponse(content={"removed": list(removed)})
             except Exception as e:

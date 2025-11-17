@@ -1,5 +1,6 @@
 from .base import register_policy, ComputePolicy
 
+
 @register_policy("offload")
 @register_policy("sliding_fit")
 class OffloadingPolicy(ComputePolicy):

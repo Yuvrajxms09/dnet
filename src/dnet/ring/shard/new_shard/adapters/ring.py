@@ -5,11 +5,11 @@ RingAdapter: ring transport + topology glue around a topology‑agnostic runtime
 - Egress: read ActivationMessage from runtime and stream to next node or API
 - Streaming only: no unary fallback to keep logic simple and consistent
 """
+
 from __future__ import annotations
 from typing import Optional, Any
 import asyncio
 import time
-from urllib.parse import urlparse
 import numpy as np
 from dnet.ring.shard.models import ShardLoadModelRequest
 import mlx.core as mx
@@ -31,15 +31,20 @@ from .....core.communication.activation_serializer import ActivationSerializer
 from dnet.utils.serialization import dtype_map, mlx_dtype_map
 from dnet.compression import decompress_tensor_from_protobuf_data
 from .....protos import dnet_ring_pb2 as pb2
-from .....protos import shard_api_comm_pb2, shard_api_comm_pb2_grpc
 
 class RingAdapter(TopologyAdapter):
-
-    def __init__(self, runtime: ShardRuntime, discovery: AsyncDnetP2P, streaming_enabled: bool,
-                 transport_config: Optional[TransportConfig] = None) -> None:
+    def __init__(
+        self,
+        runtime: ShardRuntime,
+        discovery: AsyncDnetP2P,
+        streaming_enabled: bool,
+        transport_config: Optional[TransportConfig] = None,
+    ) -> None:
         super().__init__(runtime, discovery)
 
-        self.transport_config: TransportConfig = transport_config if transport_config else TransportConfig()
+        self.transport_config: TransportConfig = (
+            transport_config if transport_config else TransportConfig()
+        )
 
         self.running = False
         self._active_nonce: Optional[str] = None
@@ -64,7 +69,6 @@ class RingAdapter(TopologyAdapter):
         self.api_channel: Optional[aio_grpc.Channel] = None
         self.api_stub: Optional[Any] = None
         self.api_address: Optional[str] = None
-
 
     async def start(self):
         self.running = True
@@ -117,8 +121,7 @@ class RingAdapter(TopologyAdapter):
         return
 
     async def _ingress_worker(self):
-        """Drains ingress queue and processes frames with heavy work offloaded.
-        """
+        """Drains ingress queue and processes frames with heavy work offloaded."""
         while self.running:
             try:
                 req = await self.ingress_q.get()
@@ -131,7 +134,7 @@ class RingAdapter(TopologyAdapter):
                 target_layer = activation.layer_id + 1
 
                 # Detect new sequence per node: initialize per-nonce KV
-                #TODO: replace it with a helper function
+                # TODO: replace it with a helper function
                 if req.nonce != self._active_nonce:
                     self._active_nonce = req.nonce
                     self.runtime.get_or_make_kv(req.nonce)
@@ -156,13 +159,16 @@ class RingAdapter(TopologyAdapter):
                     # Enqueue for compute (cancellable back-off)
                     while self.running:
                         try:
-                            self.runtime.activation_recv_queue.put_nowait(activation_msg)
+                            self.runtime.activation_recv_queue.put_nowait(
+                                activation_msg
+                            )
                             break
                         except Exception:
                             await asyncio.sleep(0)
                     else:
                         logger.error(
-                            "Failed to queue activation %s (stopping)", activation_msg.nonce
+                            "Failed to queue activation %s (stopping)",
+                            activation_msg.nonce,
                         )
                         if self.runtime.input_pool:
                             self.runtime.input_pool.release(activation_msg.pool_id)
@@ -180,7 +186,9 @@ class RingAdapter(TopologyAdapter):
 
     async def _egress_worker(self, loop):
         while self.running:
-            msg = await loop.run_in_executor(None, self.runtime.activation_send_queue.get)
+            msg = await loop.run_in_executor(
+                None, self.runtime.activation_send_queue.get
+            )
             target = self.token_tx_q if msg.is_final else self.ring_tx_q
             await target.put(msg)
 
@@ -199,7 +207,9 @@ class RingAdapter(TopologyAdapter):
             await self._streams.cleanup_idle_streams()
             await asyncio.sleep(1.0)
 
-    def _prepare_activation_message_blocking(self, request: ActivationRequest) -> Optional[ActivationMessage]:
+    def _prepare_activation_message_blocking(
+        self, request: ActivationRequest
+    ) -> Optional[ActivationMessage]:
         if self.runtime.input_pool is None:
             logger.error("Shard %s: input pool not initialized", self.runtime.shard_id)
             return None
@@ -238,7 +248,10 @@ class RingAdapter(TopologyAdapter):
             msg.dtype = "tokens"
             msg.shape = shp
             return msg
-        expected = int(np.prod(activation.shape)) * np.dtype(dtype_map[activation.dtype]).itemsize
+        expected = (
+            int(np.prod(activation.shape))
+            * np.dtype(dtype_map[activation.dtype]).itemsize
+        )
         actual = len(activation.data)
         if expected != actual:
             logger.error(
@@ -262,10 +275,13 @@ class RingAdapter(TopologyAdapter):
 
     async def _forward_activation(self, request: ActivationRequest):
         if not (self._streaming_enabled and self.next_node_stub):
-            logger.error("Streaming disabled or next node not connected; cannot forward")
+            logger.error(
+                "Streaming disabled or next node not connected; cannot forward"
+            )
             return
         ctx = await self._streams.get_or_create_stream(
-            request.nonce, lambda it: self.next_node_stub.StreamActivations(it)  # type: ignore[attr-defined]
+            request.nonce,
+            lambda it: self.next_node_stub.StreamActivations(it),  # type: ignore[attr-defined]
         )
         if not ctx or not ctx.open or ctx.disabled:
             logger.error("Stream not available for nonce %s", request.nonce)
@@ -301,7 +317,8 @@ class RingAdapter(TopologyAdapter):
         request.timestamp = int(time.time() * 1000)
 
         ctx = await self._streams.get_or_create_stream(
-            msg.nonce, lambda it: self.next_node_stub.StreamActivations(it)  # type: ignore[attr-defined]
+            msg.nonce,
+            lambda it: self.next_node_stub.StreamActivations(it),  # type: ignore[attr-defined]
         )
         if not ctx or not ctx.open or ctx.disabled:
             logger.error("Stream not available for nonce %s", msg.nonce)

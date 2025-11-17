@@ -9,10 +9,11 @@ from dnet.utils.serialization import mlx_dtype_map
 from dnet.utils.time import utc_epoch_now
 from .base import register_policy, ComputePolicy
 
+
 @register_policy("fit")
 class FitInMemoryPolicy(ComputePolicy):
-
     """Everything fits - no offloading needed"""
+
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
         self._mode = "fit"
         local_count = max(1, len(self.runtime.assigned_layers))
@@ -25,16 +26,16 @@ class FitInMemoryPolicy(ComputePolicy):
             prefetch_threads=self.runtime.compute_config.prefetch_threads,
             resident_windows=self._resident_windows,
             use_mxload_fastpath=self.runtime.compute_config.mxload_fastpath,
-            prefetch_mode=self.runtime.compute_config.prefetch_mode
+            prefetch_mode=self.runtime.compute_config.prefetch_mode,
         )
 
     def process(self, msg: ActivationMessage) -> None:
         if (
-                not self.runtime.model
-                or not self.runtime.model_metadata
-                or not self.weight_cache
-                or not self.runtime.input_pool
-                or not self.runtime.output_pool
+            not self.runtime.model
+            or not self.runtime.model_metadata
+            or not self.weight_cache
+            or not self.runtime.input_pool
+            or not self.runtime.output_pool
         ):
             logger.error(
                 "Runtime %s: cannot process activation - model not loaded",
@@ -82,7 +83,9 @@ class FitInMemoryPolicy(ComputePolicy):
                 if to_bind:
                     self.runtime._compute_busy.set()
                     with self.runtime._mlx_lock:
-                        self.runtime.model.load_weights(list(to_bind.items()), strict=False)
+                        self.runtime.model.load_weights(
+                            list(to_bind.items()), strict=False
+                        )
                 else:
                     return
 

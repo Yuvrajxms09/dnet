@@ -16,6 +16,7 @@ from .....protos import dnet_ring_pb2 as pb2
 from .....utils.logger import logger
 from dnet.ring.shard.new_shard.shard import Shard
 
+
 class GrpcServicer(DnetRingServiceServicer):
     """gRPC servicer implementation"""
 

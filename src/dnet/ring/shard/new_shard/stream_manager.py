@@ -45,7 +45,9 @@ class StreamManager:
     def get_ctx(self, nonce: str) -> Optional[StreamContext]:
         return self._streams.get(nonce)
 
-    async def get_or_create_stream(self, nonce: str, call_factory: CallFactory) -> Optional[StreamContext]:
+    async def get_or_create_stream(
+        self, nonce: str, call_factory: CallFactory
+    ) -> Optional[StreamContext]:
         ctx = self._streams.get(nonce)
         if ctx and ctx.open:
             try:
@@ -125,6 +127,4 @@ class StreamManager:
         return closed
 
 
-
 __all__ = ["StreamManager", "StreamContext"]
-

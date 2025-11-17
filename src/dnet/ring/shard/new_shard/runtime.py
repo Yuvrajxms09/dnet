@@ -3,6 +3,7 @@ ShardRuntime: owns model, KV cache, pools, windowing, weight cache, _process_act
 No ring, no gRPC, no discovery. Just: submit(ActivationIn) -> ActivationOut.
  Only knows: ingress queue in, egress queue out￼
 """
+
 import queue
 from queue import Queue
 from typing import Optional, List, Any, Dict
@@ -29,24 +30,31 @@ from ....utils.model import (
     load_lm_head,
 )
 
+
 class ShardRuntime:
     """
     Topology-agnostic shard runtime.
     """
+
     def __init__(
-            self,
-            shard_id,
-            queue_size: int = 128,
-            device_prefetch_workers: int = 4,
-            compute_config: Optional[ComputeConfig] = None,
-            transport_config: Optional[TransportConfig] = None,
+        self,
+        shard_id,
+        queue_size: int = 128,
+        device_prefetch_workers: int = 4,
+        compute_config: Optional[ComputeConfig] = None,
+        transport_config: Optional[TransportConfig] = None,
     ):
-
         self.shard_id = shard_id
-        self.compute_config: ComputeConfig = compute_config if compute_config else ComputeConfig()
-        self.transport_config: TransportConfig = transport_config if transport_config else TransportConfig()
+        self.compute_config: ComputeConfig = (
+            compute_config if compute_config else ComputeConfig()
+        )
+        self.transport_config: TransportConfig = (
+            transport_config if transport_config else TransportConfig()
+        )
 
-        self.policy: Optional[ComputePolicy] = None  # ComputePolicy to be assigned later
+        self.policy: Optional[ComputePolicy] = (
+            None  # ComputePolicy to be assigned later
+        )
 
         self._device_prefetch_workers = device_prefetch_workers
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -92,11 +100,14 @@ class ShardRuntime:
         self._kv_last_seen: Dict[str, float] = {}
         self._kv_ttl_s: float = self.compute_config.kv_cache.kv_ttl_s
 
-    def attach_loop(self, loop): self._loop = loop
+    def attach_loop(self, loop):
+        self._loop = loop
 
-    def queue_size(self) -> int: return self.activation_recv_queue.qsize()
+    def queue_size(self) -> int:
+        return self.activation_recv_queue.qsize()
 
-    def emit_result(self, msg: ActivationMessage) -> None: self.activation_send_queue.put_nowait(msg)
+    def emit_result(self, msg: ActivationMessage) -> None:
+        self.activation_send_queue.put_nowait(msg)
 
     def start(self):
         self.running = True
@@ -128,17 +139,17 @@ class ShardRuntime:
             mode = "fit" if requested_w >= local_count else "offload"
             self.compute_config.mode = mode
             # let config carry resident_windows, but clamp for safety
-            resident_windows = int(getattr(self.compute_config, "resident_windows", 9999))
+            resident_windows = int(
+                getattr(self.compute_config, "resident_windows", 9999)
+            )
             eff_window_size = (
-                local_count
-                if mode == "fit"
-                else max(1, min(requested_w, local_count))
+                local_count if mode == "fit" else max(1, min(requested_w, local_count))
             )
             window_size = eff_window_size
 
-        #self.policy.window_size = window_size
-        #self.policy._mode = mode
-        #self.policy._resident_windows = resident_windows
+        # self.policy.window_size = window_size
+        # self.policy._mode = mode
+        # self.policy._resident_windows = resident_windows
 
         logger.info(
             "Runtime %s: mode=%s m=%s requested_w=%s n_residency=%s -> window_size=%s resident_windows=%s",
@@ -181,7 +192,7 @@ class ShardRuntime:
                     self.shard_id,
                     self.model_path,
                     len(self._assigned_sorted),
-                    int(did_repack)
+                    int(did_repack),
                 )
             except Exception as e:
                 logger.warning(
@@ -251,7 +262,9 @@ class ShardRuntime:
                     int(tied),
                 )
         except Exception as e:
-            logger.warning("Runtime %s: failed to load API‑layer weights: %s", self.shard_id, e)
+            logger.warning(
+                "Runtime %s: failed to load API‑layer weights: %s", self.shard_id, e
+            )
 
         # 8) Create policy + weight cache
         self.policy = make_policy(mode, self, resident_windows)

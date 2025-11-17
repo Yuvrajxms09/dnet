@@ -2,7 +2,8 @@
 TopologyAdapter base: takes a ShardRuntime, wires transport in/out.
 Defines “ingress” and “egress” hooks but no concrete protocol.
 """
-from abc import ABC,abstractmethod
+
+from abc import ABC, abstractmethod
 import asyncio
 from .....protos.dnet_ring_pb2 import ActivationRequest
 from ....data_types import ActivationMessage
@@ -12,6 +13,7 @@ class TopologyAdapter(ABC):
     """
     Base class for topology adapters.
     """
+
     def __init__(self, runtime, discovery):
         self.runtime = runtime
         self.discovery = discovery

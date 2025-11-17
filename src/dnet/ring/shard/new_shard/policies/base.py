@@ -7,26 +7,32 @@ from dnet.ring.shard.new_shard.runtime import ShardRuntime
 from dnet.utils.logger import logger
 import mlx.core as mx
 
-POLICY_REGISTRY: dict[str, type['ComputePolicy']] = {}
+POLICY_REGISTRY: dict[str, type["ComputePolicy"]] = {}
+
 
 def register_policy(mode: str):
     def deco(cls: type[ComputePolicy]):
         POLICY_REGISTRY[mode] = cls
         return cls
+
     return deco
 
-def make_policy(mode: str, runtime: ShardRuntime, resident_windows: int) -> 'ComputePolicy':
+
+def make_policy(
+    mode: str, runtime: ShardRuntime, resident_windows: int
+) -> "ComputePolicy":
     m = (mode or "fit").strip().lower()
     cls = POLICY_REGISTRY.get(m)
     if cls is None:
         raise ValueError(f"Unsupported compute mode: {m}")
     return cls(runtime, resident_windows)
 
+
 # Policy is the "weights + windowing + pre/post‑compute" brain.
 class ComputePolicy(ABC):
     """Abstract compute policy for ShardRuntime"""
-    def __init__(self, runtime: ShardRuntime, resident_windows: int):
 
+    def __init__(self, runtime: ShardRuntime, resident_windows: int):
         self.runtime = runtime
         self.weight_cache: Optional[WeightCache] = None
         # TODO: Maybe rename this to something prefetch related?
@@ -42,7 +48,7 @@ class ComputePolicy(ABC):
 
         self._bound_versions: Dict[int, int] = {}
         self._mode: Optional[str] = None
-        self.window_size = 0 # set dynamically
+        self.window_size = 0  # set dynamically
 
     @abstractmethod
     def process(self, req: ActivationMessage):
@@ -65,10 +71,12 @@ class ComputePolicy(ABC):
 
         for i, layer in enumerate(s):
             if layer > after_layer:
-                return s[i: i + count]
+                return s[i : i + count]
         return []  # No layers found after the specified one
 
-    def _delta_swap_eviction(self, window_layers: List[int], resident: List[int]) -> int:
+    def _delta_swap_eviction(
+        self, window_layers: List[int], resident: List[int]
+    ) -> int:
         budget = max(1, int(self.window_size or 1))
         curr_set = set(window_layers)
         prev_only = [lid for lid in resident if lid not in curr_set]
@@ -93,7 +101,9 @@ class ComputePolicy(ABC):
                 pass
         return len(evicted)
 
-    def _bind_layer_weights(self, window_layers: List[int], msg) -> Optional[Dict[str, mx.array]]:
+    def _bind_layer_weights(
+        self, window_layers: List[int], msg
+    ) -> Optional[Dict[str, mx.array]]:
         """Bind weights for window layers if needed."""
         # Early exit if all weights are already bound and fit in window
         fast_fit = len(self.runtime._assigned_sorted) <= self.window_size

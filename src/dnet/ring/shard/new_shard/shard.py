@@ -8,10 +8,12 @@ build shard = RingShard(runtime, adapter, ports, discovery, …)
 grpc_servicer = ShardServicer(shard)
 app = FastAPI(); attach_routes(app, shard)
 """
+
 import asyncio
 from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter
 from ....protos.dnet_ring_pb2 import ActivationRequest
+
 
 class Shard:
     def __init__(self, adapter: TopologyAdapter):
@@ -42,4 +44,5 @@ class Shard:
         await self.adapter.configure_for_model(req)
 
     async def unload_model(self): ...
-    def queue_size(self) -> int: return self.runtime.queue_size()
+    def queue_size(self) -> int:
+        return self.runtime.queue_size()

@@ -20,12 +20,14 @@ class KVCacheConfig:
 @dataclass
 class ComputeConfig:
     """Compute configuration for a shard process."""
+
     # We shouldn't need prefetch_mode here anymore
     prefetch_mode = "off"
     mxload_fastpath: bool = True
     input_pool_mb: int = 512
     output_pool_mb: int = 512
     kv_cache: KVCacheConfig = field(default_factory=KVCacheConfig)
+
 
 @dataclass
 class TransportConfig:
@@ -39,6 +41,7 @@ class TransportConfig:
     explicit_eor: bool = False
     compress: bool = False
     compress_min_bytes: int = 65536
+
 
 @dataclass
 class TopologyConfig:

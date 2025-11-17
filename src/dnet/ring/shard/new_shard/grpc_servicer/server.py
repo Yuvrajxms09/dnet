@@ -5,6 +5,7 @@ from grpc import aio as aio_grpc
 from typing import Optional
 from .....utils.logger import logger
 
+
 class GrpcServer:
     def __init__(self, shard: Shard):
         self.grpc_port: int = 58080
