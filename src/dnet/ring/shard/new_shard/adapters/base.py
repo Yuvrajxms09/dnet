@@ -43,14 +43,14 @@ class TopologyAdapter(ABC):
         pass
 
     @abstractmethod
-    async def ingress(self, req: ActivationRequest):
+    async def ingress(self):
         """Handle incoming data to the shard.
         Ingress = network -> adapter -> runtime.
         """
         pass
 
     @abstractmethod
-    async def egress(self, msg: ActivationMessage):
+    async def egress(self):
         """Handle outgoing data from the shard.
         Egress = runtime -> adapter -> network.
         """

@@ -34,7 +34,7 @@ class TransportConfig:
     """Transport configuration for a shard process."""
 
     wire_dtype: str = "fp16"
-    streaming: bool = False
+    streaming: bool = True
     stream_backoff_s: float = 0.5
     stream_idle_s: float = 2.0
     send_retries: int = 3

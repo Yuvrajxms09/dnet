@@ -36,6 +36,8 @@ from .....core.communication.activation_serializer import ActivationSerializer
 from dnet.utils.serialization import dtype_map, mlx_dtype_map
 from dnet.compression import decompress_tensor_from_protobuf_data
 from .....protos import dnet_ring_pb2 as pb2
+from ..codec import ActivationCodec
+
 
 class RingAdapter(TopologyAdapter):
     def __init__(
@@ -49,6 +51,7 @@ class RingAdapter(TopologyAdapter):
         self.transport_config: TransportConfig = (
             transport_config if transport_config else TransportConfig()
         )
+        self.codec = ActivationCodec(runtime)
 
         self.running = False
         self._active_nonce: Optional[str] = None
@@ -103,11 +106,11 @@ class RingAdapter(TopologyAdapter):
     def activation_token_queue(self) -> asyncio.Queue:
         return self.token_tx_q
 
-    async def ingress(self, request: ActivationRequest):
-        await self.admit_frame(request)
+    async def ingress(self):
+        pass
 
-    async def egress(self, msg: ActivationMessage):
-        await self.ring_tx_q.put(msg)
+    async def egress(self):
+        pass
 
     async def configure_topology(self, req: ShardLoadModelRequest):
         self.next_node = req.next_node
@@ -130,6 +133,8 @@ class RingAdapter(TopologyAdapter):
 
     async def _ingress_worker(self):
         """Drains ingress queue and processes frames with heavy work offloaded."""
+        loop = asyncio.get_running_loop()
+
         while self.running:
             try:
                 req = await self.ingress_q.get()
@@ -149,37 +154,23 @@ class RingAdapter(TopologyAdapter):
 
                 if target_layer in self.runtime._assigned_set:
                     # Heavy prep in executor (alloc/copy/decompress)
-                    loop = asyncio.get_running_loop()
                     try:
                         activation_msg = await loop.run_in_executor(
                             self.runtime.executor,
-                            self._prepare_activation_message_blocking,
+                            self.codec.deserialize,
                             req,
                         )
                     except Exception as e:
                         logger.error(
-                            "Activation prepare failed for nonce %s: %s", req.nonce, e
+                            "Codec deserialize failed for nonce %s: %s", req.nonce, e
                         )
                         continue
-                    if activation_msg is None:
-                        continue
 
-                    # Enqueue for compute (cancellable back-off)
-                    try:
+                    if activation_msg:
                         await loop.run_in_executor(
                             None, self.runtime.activation_recv_queue.put_nowait, activation_msg
                         )
-                    except Exception as e:
-                        logger.error("Failed to queue activation %s: %s", activation_msg.nonce, e)
-                        if self.runtime.input_pool:
-                            self.runtime.input_pool.release(activation_msg.pool_id)
                 else:
-                    # Forward to next node (not our layer)
-                    logger.debug(
-                        "Forwarding activation (layer %s) to next node, nonce: %s",
-                        target_layer,
-                        req.nonce,
-                    )
                     await self._forward_activation(req)
 
             except Exception as e:
@@ -217,72 +208,6 @@ class RingAdapter(TopologyAdapter):
         while self.running:
             await self._streams.cleanup_idle_streams()
             await asyncio.sleep(1.0)
-
-    def _prepare_activation_message_blocking(
-        self, request: ActivationRequest
-    ) -> Optional[ActivationMessage]:
-        if self.runtime.input_pool is None:
-            logger.error("Shard %s: input pool not initialized", self.runtime.shard_id)
-            return None
-        activation = request.activation
-        if "|" in activation.dtype:
-            deq = decompress_tensor_from_protobuf_data(
-                tensor_data=activation.data,
-                shape=list(activation.shape),
-                dtype_with_metadata=activation.dtype,
-            )
-            pool_id = self.runtime.input_pool.allocate_for_layer(
-                layer_id=activation.layer_id,
-                dtype=deq.dtype,
-                shape=tuple(deq.shape),
-            )
-            if pool_id is None:
-                return None
-            buffer = self.runtime.input_pool.get_buffer(pool_id)
-            flat = deq.reshape(-1)
-            buffer[: flat.size] = flat
-            msg = ActivationMessage.from_proto(request, pool_id)
-            msg.dtype = str(deq.dtype)
-            msg.shape = tuple(deq.shape)
-            return msg
-        if activation.dtype == "tokens":
-            tokens = np.frombuffer(activation.data, dtype=np.int32)
-            shp = (int(len(tokens)),)
-            pool_id = self.runtime.input_pool.allocate_for_layer(
-                layer_id=activation.layer_id, dtype=mx.int32, shape=shp
-            )
-            if pool_id is None:
-                return None
-            buffer = self.runtime.input_pool.get_buffer(pool_id)
-            buffer[: len(tokens)] = tokens
-            msg = ActivationMessage.from_proto(request, pool_id)
-            msg.dtype = "tokens"
-            msg.shape = shp
-            return msg
-        expected = (
-            int(np.prod(activation.shape))
-            * np.dtype(dtype_map[activation.dtype]).itemsize
-        )
-        actual = len(activation.data)
-        if expected != actual:
-            logger.error(
-                "Payload size mismatch for nonce=%s: expected=%d actual=%d",
-                request.nonce,
-                expected,
-                actual,
-            )
-            return None
-        pool_id = self.runtime.input_pool.allocate_for_layer(
-            layer_id=activation.layer_id,
-            dtype=mlx_dtype_map[activation.dtype],
-            shape=tuple(activation.shape),
-        )
-        if pool_id is None:
-            return None
-        buffer = self.runtime.input_pool.get_buffer(pool_id)
-        input_data = np.frombuffer(activation.data, dtype=dtype_map[activation.dtype])
-        buffer[: len(input_data)] = input_data
-        return ActivationMessage.from_proto(request, pool_id)
 
     async def _forward_activation(self, request: ActivationRequest):
         if not (self._streaming_enabled and self.next_node_stub):
@@ -426,7 +351,7 @@ class RingAdapter(TopologyAdapter):
                     resp.message,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "[TX-TOKEN] shard=%s nonce=%s token=%s rpc_ms=%.2f",
                     self.runtime.shard_id,
                     msg.nonce,
