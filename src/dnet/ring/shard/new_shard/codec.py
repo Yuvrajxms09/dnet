@@ -32,7 +32,7 @@ class ActivationCodec:
         pool_id = None
 
         try:
-            # Case 1: Compressed Tensors
+            # Compressed Tensors
             if "|" in activation.dtype:
                 deq = decompress_tensor_from_protobuf_data(
                     tensor_data=activation.data,
@@ -53,7 +53,7 @@ class ActivationCodec:
                     msg.shape = tuple(deq.shape)
                     return msg
 
-            # Case 2: Tokens (Integer sequences)
+            # Tokens (Integer sequences)
             elif activation.dtype == "tokens":
                 tokens = np.frombuffer(activation.data, dtype=np.int32)
                 shp = (int(len(tokens)),)
@@ -68,7 +68,7 @@ class ActivationCodec:
                     msg.shape = shp
                     return msg
 
-            # Case 3: Standard Raw Tensors
+            # Standard Raw Tensors
             else:
                 # Validation
                 expected = int(np.prod(activation.shape)) * np.dtype(dtype_map[activation.dtype]).itemsize

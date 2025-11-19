@@ -10,9 +10,7 @@ import queue
 from typing import Optional, Any
 import asyncio
 import time
-import numpy as np
 from dnet.ring.shard.models import ShardLoadModelRequest
-import mlx.core as mx
 from dnet_p2p import (
     AsyncDnetP2P,
     DnetDeviceProperties,
@@ -32,9 +30,6 @@ from ....data_types import ActivationMessage
 from .....utils.logger import logger
 from ..stream_manager import StreamManager
 from ..config import TransportConfig
-from .....core.communication.activation_serializer import ActivationSerializer
-from dnet.utils.serialization import dtype_map, mlx_dtype_map
-from dnet.compression import decompress_tensor_from_protobuf_data
 from .....protos import dnet_ring_pb2 as pb2
 from ..codec import ActivationCodec
 
@@ -232,22 +227,11 @@ class RingAdapter(TopologyAdapter):
         if not (self._streaming_enabled and self.next_node_stub):
             logger.error("Streaming disabled or next node not connected; cannot send")
             return
-        shaped = msg.tensor
-        if shaped is None:
-            if self.runtime.output_pool is None:
-                logger.error("No output pool and no tensor to serialize")
-                return
-            output_buffer = self.runtime.output_pool.get_buffer(msg.pool_id)
-            data_size = int(np.prod(msg.shape))
-            shaped = output_buffer[:data_size].reshape(msg.shape)
-
-        data, _, _ = ActivationSerializer.to_bytes(
-            shaped,
-            wire_dtype_str=self.runtime._wire_dtype_str,
-            wire_mx_dtype=self.runtime._wire_mx_dtype,
-            compress=self.transport_config.compress,
-            compress_min_bytes=self.transport_config.compress_min_bytes,
-        )
+        try:
+            data, _ = self.codec.serialize(msg, self.transport_config)
+        except Exception as e:
+            logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
+            return
         msg.dtype = self.runtime._wire_dtype_str
         request = msg.to_proto(data)
         request.timestamp = int(time.time() * 1000)
