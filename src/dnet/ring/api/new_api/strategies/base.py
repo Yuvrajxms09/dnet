@@ -1,8 +1,15 @@
+from typing import Dict, Any, Optional
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from dataclasses import dataclass, field
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 from distilp.common import DeviceProfile
 from dnet.core.types.topology import TopologyInfo
+
+@dataclass
+class TokenResult:
+    token_id: int
+    logprob: float = 0.0
+    top_logprobs: Dict[int, float] = field(default_factory=dict)
 
 class ApiAdapterBase(ABC):
     """Abstract base class for API-Shard communication adapters."""
@@ -23,13 +30,20 @@ class ApiAdapterBase(ABC):
     async def reset_cache(self) -> None: ...
 
     @abstractmethod
-    async def send_tokens(self, nonce: str, tokens: bytes, callback_addr: str) -> None: ...
+    async def send_tokens(
+        self, 
+        nonce: str, 
+        tokens: bytes, 
+        callback_addr: str,
+        logprobs: bool = False,
+        top_logprobs: int = 0
+    ) -> None: ...
 
     @abstractmethod
-    async def await_token(self, nonce: str, timeout_s: float) -> int: ...
+    async def await_token(self, nonce: str, timeout_s: float) -> TokenResult: ...
 
     @abstractmethod
-    def resolve_token(self, nonce: str, token_id: int) -> None: ...
+    def resolve_token(self, nonce: str, result: TokenResult) -> None: ...
 
 
 class TopologySolver(ABC):

@@ -317,10 +317,15 @@ class RingAdapter(TopologyAdapter):
         t_rpc = time.perf_counter()
         try:
             token_id = int(getattr(msg, "token_id", -1))
+            logprob = float(getattr(msg, "logprob", 0.0))
+            top_logprobs = getattr(msg, "top_logprobs", {}) or {}
+            
             req = shard_api_comm_pb2.TokenRequest(
                 nonce=msg.nonce,
                 token_id=token_id,
                 timestamp=utc_epoch_now(),
+                logprob=logprob,
+                top_logprobs=top_logprobs,
             )
             resp = await self.api_stub.SendToken(req, timeout=3.0)  # type: ignore[arg-type]
             rpc_ms = (time.perf_counter() - t_rpc) * 1000.0

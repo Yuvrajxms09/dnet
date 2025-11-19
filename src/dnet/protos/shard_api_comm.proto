@@ -35,6 +35,8 @@ message TokenRequest {
     string nonce = 1;   
     int32 token_id = 2; 
     int64 timestamp = 3;
+    float logprob = 4;
+    map<int32, float> top_logprobs = 5;
 }
 
 // Response for token reception

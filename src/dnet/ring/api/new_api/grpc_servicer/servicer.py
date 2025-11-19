@@ -4,6 +4,8 @@ from dnet.protos import shard_api_comm_pb2_grpc as pb2_grpc
 from dnet.utils.logger import logger
 from ..inference import InferenceManager
 
+from ..strategies.base import TokenResult
+
 class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
     """gRPC servicer for shard -> API callbacks."""
 
@@ -16,7 +18,16 @@ class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
         try:
             nonce = request.nonce
             token_id = int(request.token_id)
-            self.inference_manager.resolve_request(nonce, token_id)
+            logprob = float(request.logprob)
+            top_logprobs = dict(request.top_logprobs)
+            
+            result = TokenResult(
+                token_id=token_id,
+                logprob=logprob,
+                top_logprobs=top_logprobs
+            )
+            
+            self.inference_manager.resolve_request(nonce, result)
             return pb2.TokenResponse(success=True, message="Token received")
         
         except Exception as e:

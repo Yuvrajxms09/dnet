@@ -3,7 +3,7 @@ import time
 import uuid
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Dict
 
 from ..models import (
     ChatRequestModel, 
@@ -87,6 +87,7 @@ class InferenceManager:
         t_first_token: Optional[float] = None
         tokens: List[int] = []
         token_logprobs: List[float] = []
+        top_logprobs_list: List[Dict[int, float]] = []
         
         detokenizer = tokenizer.detokenizer
         detokenizer.reset()
@@ -99,9 +100,22 @@ class InferenceManager:
         for _ in range(req.max_tokens):
             tok_np = y.astype(mx.int32).tolist() if hasattr(y, "tolist") else list(map(int, y))
             tok_bytes = np.array(tok_np, dtype=np.int32).tobytes(order="C")
-            await self.adapter.send_tokens(nonce, tok_bytes, self._api_callback_addr)
-            token = int(await self.adapter.await_token(nonce, timeout_s=300.0))
-
+            
+            await self.adapter.send_tokens(
+                nonce, 
+                tok_bytes, 
+                self._api_callback_addr,
+                logprobs=req.logprobs,
+                top_logprobs=req.top_logprobs
+            )
+            result = await self.adapter.await_token(nonce, timeout_s=300.0)
+            token = int(result.token_id)
+            
+            # Accumulate logprobs
+            if req.logprobs:
+                token_logprobs.append(result.logprob)
+                top_logprobs_list.append(result.top_logprobs)
+            
             if t_first_token is None:
                 t_first_token = time.perf_counter()
 
@@ -141,7 +155,7 @@ class InferenceManager:
                     message=ChatMessage(role="assistant", content=text),
                     logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs,
-                        top_logprobs=[],
+                        top_logprobs=top_logprobs_list,
                         tokens=tokens,
                     ),
                 )
@@ -157,4 +171,4 @@ class InferenceManager:
         )
 
     def resolve_request(self, nonce: str, result: Any):
-        self.adapter.resolve_token(nonce, int(result))
+        self.adapter.resolve_token(nonce, result)

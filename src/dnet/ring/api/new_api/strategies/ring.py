@@ -1,8 +1,7 @@
 from __future__ import annotations
 import asyncio
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any
 from grpc import aio as aio_grpc
-import numpy as np
 
 from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 from distilp.common import DeviceProfile
@@ -10,15 +9,17 @@ from distilp.solver import halda_solve, HALDAResult
 
 from .....utils.logger import logger
 from .....core.stream_manager import StreamManager
+from .....utils.time import utc_epoch_now
+from dnet.core.types.messages import ActivationMessage
 from dnet.protos import dnet_ring_pb2 as pb2
 from dnet.protos.dnet_ring_pb2_grpc import DnetRingServiceStub
 from dnet.core.types.topology import TopologyInfo
 from ...utils import (
     optimize_device_ordering,
     compute_layer_assignments,
-    postprocess_single_round,
+    postprocess_single_round
 )
-from .base import Strategy, TopologySolver, ApiAdapterBase
+from .base import Strategy, TopologySolver, ApiAdapterBase, TokenResult
 
 
 class RingTopologySolver(TopologySolver):
@@ -98,7 +99,7 @@ class RingApiAdapter(ApiAdapterBase):
         self.channel: Optional[aio_grpc.Channel] = None
         self.stub: Optional[DnetRingServiceStub] = None
         self._streams = StreamManager(idle_timeout_s=5.0, backoff_s=0.2)
-        self._pending: Dict[str, asyncio.Future[int]] = {}
+        self._pending: Dict[str, asyncio.Future[TokenResult]] = {}
 
     async def start(self) -> None:
         self.running = True
@@ -139,52 +140,62 @@ class RingApiAdapter(ApiAdapterBase):
         except Exception as e:
             logger.warning("ResetCache RPC failed: %s", e)
 
-    async def send_tokens(self, nonce: str, tokens: bytes, callback_addr: str) -> None:
+    async def send_tokens(
+        self, 
+        nonce: str, 
+        tokens: bytes, 
+        callback_addr: str,
+        logprobs: bool = False,
+        top_logprobs: int = 0
+    ) -> None:
         if not self.stub:
-            raise RuntimeError("API adapter not connected to a shard")
+            raise RuntimeError("Ring adapter not connected to first shard")
 
-        # Build activation request carrying tokens
-        n_tokens = int(len(tokens) // np.dtype(np.int32).itemsize)
-        act = pb2.Activation(
+        msg = ActivationMessage(
+            nonce=nonce,
+            pool_id=-1,
             batch_size=1,
-            shape=[n_tokens],
+            shape=(1,),  # dummy shape for tokens
             dtype="tokens",
             layer_id=-1,
-            data=tokens,
-        )
-        req = pb2.ActivationRequest(
-            nonce=nonce,
+            timestamp=utc_epoch_now(),
             node_origin="api",
-            timestamp=0,
-            activation=act,
             callback_url=f"grpc://{callback_addr}",
+            req_logprobs=logprobs,
+            req_top_logprobs=top_logprobs,
         )
-
-        # Stream via StreamActivations to mirror shard behavior
+        req = msg.to_proto(tokens)
+        
+        # We use StreamActivations even for the first hop
+        # But here we just fire and forget via a stream or unary if we had one.
+        # The current implementation uses StreamActivations for everything.
+        # We need to get a stream context.
+        
         ctx = await self._streams.get_or_create_stream(
             nonce,
             lambda it: self.stub.StreamActivations(it),  # type: ignore[attr-defined]
         )
-        if not ctx or not ctx.open or ctx.disabled:
-            raise RuntimeError("API stream not available for nonce %s" % nonce)
+        if not ctx or not ctx.open:
+            raise RuntimeError(f"Failed to create stream for nonce {nonce}")
+
         ctx.last_seq += 1
         await ctx.queue.put(
             pb2.ActivationFrame(request=req, seq=ctx.last_seq, end_of_request=False)
         )
         ctx.last_activity_t = asyncio.get_running_loop().time()
 
-    async def await_token(self, nonce: str, timeout_s: float) -> int:
+    async def await_token(self, nonce: str, timeout_s: float) -> TokenResult:
         fut = asyncio.get_running_loop().create_future()
         self._pending[nonce] = fut
         try:
-            return int(await asyncio.wait_for(fut, timeout=timeout_s))
+            return await asyncio.wait_for(fut, timeout=timeout_s)
         finally:
             self._pending.pop(nonce, None)
 
-    def resolve_token(self, nonce: str, token_id: int) -> None:
+    def resolve_token(self, nonce: str, result: TokenResult) -> None:
         fut = self._pending.get(nonce)
         if fut and not fut.done():
-            fut.set_result(int(token_id))
+            fut.set_result(result)
 
 
 class RingStrategy(Strategy):

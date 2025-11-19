@@ -138,8 +138,37 @@ class FitInMemoryPolicy(ComputePolicy):
                             logits_2d = y[-1:, :]
                         else:
                             logits_2d = y.reshape(1, -1)
-                        tok = mx.argmax(logits_2d, axis=-1)
-                        token_id = int(tok.item())
+                        
+                        # Compute logprobs if requested
+                        token_logprob = 0.0
+                        top_logprobs = {}
+                        
+                        if msg.req_logprobs or msg.req_top_logprobs > 0:
+                            logprobs = logits_2d - mx.logsumexp(logits_2d, axis=-1, keepdims=True)
+
+                            # Sample token
+                            tok = mx.argmax(logits_2d, axis=-1)
+                            token_id = int(tok.item())
+                            
+                            if msg.req_logprobs:
+                                token_logprob = float(logprobs[0, token_id].item())
+                            
+                            # Top-k logprobs
+                            k = msg.req_top_logprobs
+                            if k > 0:
+                                top_k_indices = mx.argpartition(logits_2d, -k, axis=-1)[:, -k:]
+                                top_k_vals = logits_2d[0, top_k_indices[0]]
+                                sorted_indices_local = mx.argsort(top_k_vals, axis=-1)
+                                sorted_indices_local = sorted_indices_local[::-1]
+                                sorted_indices = top_k_indices[0, sorted_indices_local]
+                                
+                                for idx in sorted_indices.tolist():
+                                    top_logprobs[int(idx)] = float(logprobs[0, idx].item())
+                        else:
+                            # Just sample
+                            tok = mx.argmax(logits_2d, axis=-1)
+                            token_id = int(tok.item())
+
                     except Exception as e:
                         logger.error("End‑shard sampling failed: %s", e)
                         self.runtime.input_pool.release(msg.pool_id)
@@ -157,6 +186,8 @@ class FitInMemoryPolicy(ComputePolicy):
                         callback_url=msg.callback_url,
                         is_final=True,
                         token_id=token_id,
+                        logprob=token_logprob,
+                        top_logprobs=top_logprobs,
                     )
                 else:
                     output_msg = ActivationMessage(

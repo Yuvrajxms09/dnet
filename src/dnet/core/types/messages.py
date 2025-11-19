@@ -34,6 +34,12 @@ class ActivationMessage:
     # Final token path (end-shard sampling)
     is_final: bool = False
     token_id: int = -1
+    logprob: float = 0.0
+    top_logprobs: Optional[dict[int, float]] = None
+    
+    # Request control
+    req_logprobs: bool = False
+    req_top_logprobs: int = 0
 
     @classmethod
     def from_proto(cls, proto_msg: ActivationRequest, pool_id: int = 0):
@@ -48,6 +54,8 @@ class ActivationMessage:
             timestamp=proto_msg.timestamp,
             node_origin=proto_msg.node_origin,
             callback_url=proto_msg.callback_url,
+            req_logprobs=proto_msg.logprobs,
+            req_top_logprobs=proto_msg.top_logprobs,
         )
 
     def to_proto(self, data: bytes) -> ActivationRequest:
@@ -64,6 +72,8 @@ class ActivationMessage:
             timestamp=self.timestamp,
             node_origin=self.node_origin,
             callback_url=self.callback_url,
+            logprobs=self.req_logprobs,
+            top_logprobs=self.req_top_logprobs,
         )
 
 

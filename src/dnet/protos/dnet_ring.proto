@@ -34,6 +34,8 @@ message ActivationRequest {
     int64 timestamp = 3;
     string node_origin = 4;
     string callback_url = 5;
+    bool logprobs = 6;
+    int32 top_logprobs = 7;
 }
 
 // Response message for activation sending
