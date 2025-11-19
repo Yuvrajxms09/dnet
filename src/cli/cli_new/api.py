@@ -12,7 +12,7 @@ from dnet.ring.api.new_api.cluster import ClusterManager
 from dnet.ring.api.new_api.model_manager import ModelManager
 from dnet.ring.api.new_api.inference import InferenceManager
 from dnet.ring.api.new_api.http_api import HTTPServer as ApiHTTPServer
-from dnet.ring.api.new_api.grpc_server import GrpcServer as ApiGrpcServer
+from dnet.ring.api.new_api.grpc_servicer import GrpcServer as ApiGrpcServer
 
 
 async def serve(http_port: int, grpc_port: int) -> None:

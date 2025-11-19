@@ -5,7 +5,6 @@ import mlx.core as mx
 import numpy as np
 from typing import Optional, Any, List
 
-from ....utils.logger import logger
 from ..models import (
     ChatRequestModel, 
     ChatResponseModel, 

@@ -1,6 +1,5 @@
 import httpx
 from typing import Optional, Dict, List, Any
-from fastapi import HTTPException, status
 from mlx_lm.tokenizer_utils import load_tokenizer
 
 from dnet_p2p import DnetDeviceProperties
@@ -16,8 +15,7 @@ from ..models import (
 )
 from ...shard.models import (
     ShardLoadModelRequest, 
-    ShardLoadModelResponse,
-    ShardUnloadModelResponse
+    ShardLoadModelResponse
 )
 
 class ModelManager:
@@ -27,8 +25,7 @@ class ModelManager:
         self.tokenizer: Optional[Any] = None
         
     async def load_model(
-        self, 
-        req: APILoadModelRequest, 
+        self,
         topology: TopologyInfo,
         api_properties: DnetDeviceProperties,
         grpc_port: int

@@ -3,13 +3,13 @@ import asyncio
 from typing import Dict, Optional, List, Any, Tuple
 from dnet_p2p import AsyncDnetP2P, DnetDeviceProperties, ThunderboltConnection, discover_all_thunderbolt_connections
 from distilp.common import DeviceProfile
-from distilp.solver import HALDAResult, halda_solve
+from distilp.solver import halda_solve, HALDAResult
 from ..utils import (
     optimize_device_ordering,
     compute_layer_assignments,
     postprocess_single_round,
 )
-from ...common import TopologyInfo, LayerAssignment
+from ...common import TopologyInfo
 from ....utils.logger import logger
 from ....utils.latency import LatencyResults, calculate_median_latency_seconds
 from ...shard.models import (
@@ -262,7 +262,7 @@ class ClusterManager:
         logger.info("Running solver with %d shard profiles", len(sorted_shard_profiles))
 
         # 3. Run solver
-        solution = halda_solve(
+        solution: HALDAResult = halda_solve(
             devs=sorted_shard_profiles,
             model=model_profile,
             mip_gap=1e-4,

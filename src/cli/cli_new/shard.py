@@ -5,10 +5,9 @@ from secrets import token_hex
 from dnet_p2p import AsyncDnetP2P
 from dnet.ring.shard.new_shard.adapters.ring import RingAdapter
 from dnet.ring.shard.new_shard.runtime import ShardRuntime
-from dnet.ring.shard.new_shard.config import TransportConfig
 from dnet.ring.shard.new_shard.shard import Shard
-from dnet.ring.shard.new_shard.http_api import HTTPServer
-from dnet.ring.shard.new_shard.grpc_servicer import GrpcServer
+from dnet.ring.shard.new_shard.http_api import HTTPServer as ShardHTTPServer
+from dnet.ring.shard.new_shard.grpc_servicer import GrpcServer as ShardGrpcServer
 from dnet.utils.logger import logger
 from argparse import ArgumentParser
 
@@ -24,8 +23,8 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
     shard   = Shard(shard_id=shard_id, adapter=adapter)
 
     # Servers
-    grpc_server = GrpcServer(shard=shard, grpc_port=grpc_port)
-    http_server = HTTPServer(shard=shard, http_port=http_port, grpc_port=grpc_port, discovery=discovery)
+    grpc_server = ShardGrpcServer(shard=shard, grpc_port=grpc_port)
+    http_server = ShardHTTPServer(shard=shard, http_port=http_port, grpc_port=grpc_port, discovery=discovery)
 
     stop_event = asyncio.Event()
 

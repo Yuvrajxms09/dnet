@@ -1,8 +1,8 @@
 import grpc
-from ....protos import shard_api_comm_pb2 as pb2
-from ....protos import shard_api_comm_pb2_grpc as pb2_grpc
-from ....utils.logger import logger
-from .inference import InferenceManager
+from dnet.protos import shard_api_comm_pb2 as pb2
+from dnet.protos import shard_api_comm_pb2_grpc as pb2_grpc
+from dnet.utils.logger import logger
+from ..inference import InferenceManager
 
 class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
     """gRPC servicer for shard -> API callbacks."""

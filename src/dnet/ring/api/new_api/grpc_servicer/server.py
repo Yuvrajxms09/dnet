@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Optional
 from grpc import aio as aio_grpc
 
-from ....utils.logger import logger
-from .grpc_servicer import ShardApiServicer
-from .inference import InferenceManager
-from ....protos.shard_api_comm_pb2_grpc import add_ShardApiServiceServicer_to_server
+from dnet.utils.logger import logger
+from .servicer import ShardApiServicer
+from ..inference import InferenceManager
+from dnet.protos.shard_api_comm_pb2_grpc import add_ShardApiServiceServicer_to_server
 
 
 class GrpcServer:

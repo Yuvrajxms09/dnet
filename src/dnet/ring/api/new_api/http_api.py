@@ -2,9 +2,9 @@ from typing import Optional, Any, List
 import asyncio
 from hypercorn import Config
 import hypercorn.asyncio as aio_hypercorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from ....utils.model import get_model_config_json, ModelMetadata
+from ....utils.model import get_model_config_json
 from distilp.profiler import profile_model
 from ....utils.logger import logger
 from ..models import (
@@ -141,7 +141,7 @@ class HTTPServer:
 
             api_props = await self.cluster_manager.discovery.async_get_own_properties()
             response = await self.model_manager.load_model(
-                req, topology, api_props, self.inference_manager.grpc_port
+                topology, api_props, self.inference_manager.grpc_port
             )
             if response.success:
                 first_shard = topology.devices[0]
