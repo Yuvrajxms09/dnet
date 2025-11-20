@@ -6,6 +6,7 @@ from ..inference import InferenceManager
 
 from ..strategies.base import TokenResult
 
+
 class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
     """gRPC servicer for shard -> API callbacks."""
 
@@ -20,16 +21,14 @@ class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
             token_id = int(request.token_id)
             logprob = float(request.logprob)
             top_logprobs = dict(request.top_logprobs)
-            
+
             result = TokenResult(
-                token_id=token_id,
-                logprob=logprob,
-                top_logprobs=top_logprobs
+                token_id=token_id, logprob=logprob, top_logprobs=top_logprobs
             )
-            
+
             self.inference_manager.resolve_request(nonce, result)
             return pb2.TokenResponse(success=True, message="Token received")
-        
+
         except Exception as e:
             logger.exception("Error handling SendToken: %s", e)
             return pb2.TokenResponse(success=False, message=str(e))

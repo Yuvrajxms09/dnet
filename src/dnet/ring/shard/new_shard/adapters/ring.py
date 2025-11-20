@@ -5,6 +5,7 @@ RingAdapter: ring transport + topology glue around a topology‑agnostic runtime
 - Egress: read ActivationMessage from runtime and stream to next node or API
 - Streaming only: no unary fallback to keep logic simple and consistent
 """
+
 from __future__ import annotations
 import queue
 from typing import Optional, Any
@@ -64,9 +65,15 @@ class RingAdapter(TopologyAdapter):
 
         # Implement the required queues
         self.queue_size = runtime.max_queue_size
-        self._ingress_q: asyncio.Queue[ActivationRequest] = asyncio.Queue(maxsize=self.queue_size)
-        self.ring_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue(maxsize=self.queue_size)
-        self.token_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue(maxsize=self.queue_size)
+        self._ingress_q: asyncio.Queue[ActivationRequest] = asyncio.Queue(
+            maxsize=self.queue_size
+        )
+        self.ring_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue(
+            maxsize=self.queue_size
+        )
+        self.token_tx_q: asyncio.Queue[ActivationMessage] = asyncio.Queue(
+            maxsize=self.queue_size
+        )
 
         # API callback gRPC
         self.api_channel: Optional[aio_grpc.Channel] = None
@@ -122,7 +129,7 @@ class RingAdapter(TopologyAdapter):
         self.next_node = None
         self.total_layers = 0
         self.api_callback_address = None
-        
+
         if self.next_node_channel:
             try:
                 await self.next_node_channel.close()
@@ -186,7 +193,9 @@ class RingAdapter(TopologyAdapter):
 
                     if activation_msg:
                         await loop.run_in_executor(
-                            None, self.runtime.activation_recv_queue.put_nowait, activation_msg
+                            None,
+                            self.runtime.activation_recv_queue.put_nowait,
+                            activation_msg,
                         )
                 else:
                     await self._forward_activation(req)
@@ -342,7 +351,7 @@ class RingAdapter(TopologyAdapter):
             token_id = int(getattr(msg, "token_id", -1))
             logprob = float(getattr(msg, "logprob", 0.0))
             top_logprobs = getattr(msg, "top_logprobs", {}) or {}
-            
+
             req = shard_api_comm_pb2.TokenRequest(
                 nonce=msg.nonce,
                 token_id=token_id,

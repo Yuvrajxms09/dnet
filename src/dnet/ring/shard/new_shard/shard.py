@@ -16,6 +16,7 @@ from ....protos.dnet_ring_pb2 import ActivationRequest
 from ....utils.banner import print_startup_banner
 from .models import ShardLoadModelResponse, ShardUnloadModelResponse
 
+
 class Shard:
     def __init__(self, shard_id, adapter: TopologyAdapter):
         self.node_id = shard_id
@@ -50,8 +51,8 @@ class Shard:
         return ShardLoadModelResponse(
             success=True,
             message="Model loaded successfully",
-            layers_loaded = self.runtime.assigned_layers,
-            load_time_ms=100
+            layers_loaded=self.runtime.assigned_layers,
+            load_time_ms=100,
         )
 
     async def unload_model(self) -> ShardUnloadModelResponse:

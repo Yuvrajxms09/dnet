@@ -7,39 +7,39 @@ from ....utils.logger import logger
 from ....utils.model import resolve_tokenizer_dir
 from dnet.core.types.topology import TopologyInfo
 from .models import (
-    APILoadModelResponse, 
+    APILoadModelResponse,
     ShardLoadStatus,
     UnloadModelResponse,
-    ShardUnloadStatus
+    ShardUnloadStatus,
 )
-from ...shard.models import (
-    ShardLoadModelRequest, 
-    ShardLoadModelResponse
-)
+from ...shard.models import ShardLoadModelRequest, ShardLoadModelResponse
+
 
 class ModelManager:
     def __init__(self):
         self.current_model_id: Optional[str] = None
         self.model_config: Optional[Dict[str, Any]] = None
         self.tokenizer: Optional[Any] = None
-        
+
     async def load_model(
         self,
         topology: TopologyInfo,
         api_properties: DnetDeviceProperties,
-        grpc_port: int
+        grpc_port: int,
     ) -> APILoadModelResponse:
         """
         Orchestrates model loading across the cluster based on topology.
         """
         model_to_load = topology.model
-        logger.info(f"Loading model {model_to_load} across {len(topology.assignments)} shards")
-        
+        logger.info(
+            f"Loading model {model_to_load} across {len(topology.assignments)} shards"
+        )
+
         assignments_to_use = topology.assignments
         shards = {dev.instance: dev for dev in topology.devices}
-        
+
         shard_statuses: List[ShardLoadStatus] = []
-        
+
         async with httpx.AsyncClient() as http_client:
             for assignment in assignments_to_use:
                 instance = assignment.instance
@@ -83,7 +83,7 @@ class ModelManager:
 
                     # Call load_model via HTTP (window_size unified)
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/load_model"
-                    
+
                     payload = ShardLoadModelRequest(
                         model_path=model_to_load,
                         layers=layers,
@@ -132,7 +132,7 @@ class ModelManager:
                 tok_dir = resolve_tokenizer_dir(model_to_load)
                 self.tokenizer = load_tokenizer(tok_dir, {})
                 self.current_model_id = model_to_load
-                
+
                 logger.info("API-side model loaded successfully for %s", model_to_load)
                 return APILoadModelResponse(
                     model=model_to_load,
@@ -155,40 +155,58 @@ class ModelManager:
                 message="One or more shards failed to load model",
             )
 
-    async def unload_model(self, shards: Dict[str, DnetDeviceProperties]) -> UnloadModelResponse:
+    async def unload_model(
+        self, shards: Dict[str, DnetDeviceProperties]
+    ) -> UnloadModelResponse:
         """
         Unloads model from all shards.
         """
         if not self.current_model_id:
-            return UnloadModelResponse(success=True, message="No model loaded", shard_statuses=[])
-            
+            return UnloadModelResponse(
+                success=True, message="No model loaded", shard_statuses=[]
+            )
+
         logger.info(f"Unloading model {self.current_model_id}")
-        
+
         shard_statuses: List[ShardUnloadStatus] = []
-        
+
         async with httpx.AsyncClient() as client:
             for shard_name, shard_props in shards.items():
                 if shard_props.is_manager:
                     continue
-                    
+
                 try:
                     url = f"http://{shard_props.local_ip}:{shard_props.server_port}/unload_model"
                     response = await client.post(url, timeout=10.0)
-                    
+
                     if response.status_code == 200:
-                        shard_statuses.append(ShardUnloadStatus(instance=shard_name, success=True, message="Unloaded"))
+                        shard_statuses.append(
+                            ShardUnloadStatus(
+                                instance=shard_name, success=True, message="Unloaded"
+                            )
+                        )
                     else:
-                        shard_statuses.append(ShardUnloadStatus(instance=shard_name, success=False, message=f"Status {response.status_code}"))
-                        
+                        shard_statuses.append(
+                            ShardUnloadStatus(
+                                instance=shard_name,
+                                success=False,
+                                message=f"Status {response.status_code}",
+                            )
+                        )
+
                 except Exception as e:
                     logger.error(f"Failed to unload model on {shard_name}: {e}")
-                    shard_statuses.append(ShardUnloadStatus(instance=shard_name, success=False, message=str(e)))
-        
+                    shard_statuses.append(
+                        ShardUnloadStatus(
+                            instance=shard_name, success=False, message=str(e)
+                        )
+                    )
+
         self.current_model_id = None
         self.tokenizer = None
-        
+
         return UnloadModelResponse(
             success=all(s.success for s in shard_statuses),
             message="Model unloaded",
-            shard_statuses=shard_statuses
+            shard_statuses=shard_statuses,
         )

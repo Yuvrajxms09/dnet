@@ -69,10 +69,18 @@ class ActivationCodec:
             # Standard Raw Tensors
             else:
                 # Validation
-                expected = int(np.prod(activation.shape)) * np.dtype(dtype_map[activation.dtype]).itemsize
+                expected = (
+                    int(np.prod(activation.shape))
+                    * np.dtype(dtype_map[activation.dtype]).itemsize
+                )
                 actual = len(activation.data)
                 if expected != actual:
-                    logger.error("Payload mismatch nonce=%s: exp=%d act=%d", request.nonce, expected, actual)
+                    logger.error(
+                        "Payload mismatch nonce=%s: exp=%d act=%d",
+                        request.nonce,
+                        expected,
+                        actual,
+                    )
                     return None
 
                 pool_id = self.runtime.input_pool.allocate_for_layer(
@@ -82,7 +90,9 @@ class ActivationCodec:
                 )
                 if pool_id is not None:
                     buffer = self.runtime.input_pool.get_buffer(pool_id)
-                    input_data = np.frombuffer(activation.data, dtype=dtype_map[activation.dtype])
+                    input_data = np.frombuffer(
+                        activation.data, dtype=dtype_map[activation.dtype]
+                    )
                     buffer[: len(input_data)] = input_data
                     return ActivationMessage.from_proto(request, pool_id)
 
@@ -121,12 +131,12 @@ class ActivationCodec:
 
     @staticmethod
     def to_bytes(
-            tensor: mx.array | np.ndarray,
-            *,
-            wire_dtype_str: str,
-            wire_mx_dtype: mx.Dtype,
-            compress: bool = False,
-            compress_min_bytes: int = 65536,
+        tensor: mx.array | np.ndarray,
+        *,
+        wire_dtype_str: str,
+        wire_mx_dtype: mx.Dtype,
+        compress: bool = False,
+        compress_min_bytes: int = 65536,
     ) -> bytes:
         """Serialize an MLX/Numpy tensor to bytes with the given wire dtype.
 

@@ -36,19 +36,19 @@ async def serve(http_port: int, grpc_port: int) -> None:
 
     # Components
     from dnet.ring.api.new_api.strategies.ring import RingStrategy
-    strategy = RingStrategy() # ContextParallelStrategy()
-    
+
+    strategy = RingStrategy()  # ContextParallelStrategy()
+
     cluster_manager = ClusterManager(discovery, solver=strategy.solver)
     model_manager = ModelManager()
     inference_manager = InferenceManager(
-        cluster_manager, 
-        model_manager, 
-        grpc_port, 
-        adapter=strategy.adapter
+        cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
     )
 
     # Servers
-    grpc_server = ApiGrpcServer(grpc_port=grpc_port, inference_manager=inference_manager)
+    grpc_server = ApiGrpcServer(
+        grpc_port=grpc_port, inference_manager=inference_manager
+    )
     http_server = ApiHTTPServer(
         http_port=http_port,
         cluster_manager=cluster_manager,
@@ -74,8 +74,12 @@ async def serve(http_port: int, grpc_port: int) -> None:
 
 def main() -> None:
     ap = ArgumentParser(description="dnet ring API server (new architecture)")
-    ap.add_argument("-p", "--http-port", type=int, required=True, help="HTTP server port")
-    ap.add_argument("-g", "--grpc-port", type=int, required=True, help="gRPC callback port")
+    ap.add_argument(
+        "-p", "--http-port", type=int, required=True, help="HTTP server port"
+    )
+    ap.add_argument(
+        "-g", "--grpc-port", type=int, required=True, help="gRPC callback port"
+    )
     args = ap.parse_args()
 
     logger.info(

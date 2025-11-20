@@ -5,15 +5,17 @@ from dnet_p2p import DnetDeviceProperties, ThunderboltConnection
 from distilp.common import DeviceProfile
 from dnet.core.types.topology import TopologyInfo
 
+
 @dataclass
 class TokenResult:
     token_id: int
     logprob: float = 0.0
     top_logprobs: Dict[int, float] = field(default_factory=dict)
 
+
 class ApiAdapterBase(ABC):
     """Abstract base class for API-Shard communication adapters."""
-    
+
     def __init__(self) -> None:
         self.running = False
 
@@ -31,12 +33,12 @@ class ApiAdapterBase(ABC):
 
     @abstractmethod
     async def send_tokens(
-        self, 
-        nonce: str, 
-        tokens: bytes, 
+        self,
+        nonce: str,
+        tokens: bytes,
         callback_addr: str,
         logprobs: bool = False,
-        top_logprobs: int = 0
+        top_logprobs: int = 0,
     ) -> None: ...
 
     @abstractmethod
@@ -70,6 +72,7 @@ class Strategy(ABC):
     """
     Bundles a TopologySolver and an ApiAdapterBase for a specific execution strategy.
     """
+
     @property
     @abstractmethod
     def solver(self) -> TopologySolver: ...

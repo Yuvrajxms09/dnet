@@ -1,5 +1,4 @@
-"""Core message DTOs.
-"""
+"""Core message DTOs."""
 
 from __future__ import annotations
 
@@ -36,7 +35,7 @@ class ActivationMessage:
     token_id: int = -1
     logprob: float = 0.0
     top_logprobs: Optional[dict[int, float]] = None
-    
+
     # Request control
     req_logprobs: bool = False
     req_top_logprobs: int = 0
@@ -96,4 +95,3 @@ class StopCondition(NamedTuple):
 
 
 __all__ = ["ActivationMessage", "WeightRequest", "PoolStatus", "StopCondition"]
-

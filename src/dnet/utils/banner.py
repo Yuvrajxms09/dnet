@@ -1,4 +1,5 @@
 """Startup banner utilities."""
+
 from typing import Optional
 from pathlib import Path
 from .logger import logger

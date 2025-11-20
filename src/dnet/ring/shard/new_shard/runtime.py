@@ -3,6 +3,7 @@ ShardRuntime: owns model, KV cache, pools, windowing, weight cache, _process_act
 No ring, no gRPC, no discovery. Just: submit(ActivationIn) -> ActivationOut.
  Only knows: ingress queue in, egress queue out￼
 """
+
 import gc
 import queue
 from queue import Queue
@@ -116,7 +117,6 @@ class ShardRuntime:
     def emit_result(self, msg: ActivationMessage) -> None:
         self.activation_send_queue.put_nowait(msg)
 
-
     def shutdown(self) -> None:
         # stop compute loop
         self.running = False
@@ -161,7 +161,7 @@ class ShardRuntime:
             n_residency,
             plan.window_size,
             plan.resident_windows,
-            plan.is_sliding
+            plan.is_sliding,
         )
 
         # KV cache config from API
@@ -369,7 +369,6 @@ class ShardRuntime:
             self._kv_by_nonce[nonce] = kv
         self._kv_last_seen[nonce] = time.perf_counter()
         return kv
-
 
     def start(self):
         self.running = True

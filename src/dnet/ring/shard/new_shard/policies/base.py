@@ -17,9 +17,7 @@ def register_policy(mode: str):
     return deco
 
 
-def make_policy(
-    mode: str, runtime, resident_windows: int
-) -> "ComputePolicy":
+def make_policy(mode: str, runtime, resident_windows: int) -> "ComputePolicy":
     m = (mode or "fit").strip().lower()
     cls = POLICY_REGISTRY.get(m)
     if cls is None:

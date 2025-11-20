@@ -13,7 +13,7 @@ from ..models import (
     APILoadModelResponse,
     PrepareTopologyRequest,
     PrepareTopologyManualRequest,
-    UnloadModelResponse
+    UnloadModelResponse,
 )
 from dnet.core.types.topology import TopologyInfo, LayerAssignment
 from ...shard.models import HealthResponse
@@ -22,14 +22,15 @@ from .inference import InferenceManager
 from .model_manager import ModelManager
 from dnet_p2p import DnetDeviceProperties
 
+
 class HTTPServer:
     def __init__(
-        self, 
-        http_port: int, 
+        self,
+        http_port: int,
         cluster_manager: ClusterManager,
         inference_manager: InferenceManager,
         model_manager: ModelManager,
-        node_id: str
+        node_id: str,
     ):
         self.http_port = http_port
         self.cluster_manager = cluster_manager
@@ -38,20 +39,18 @@ class HTTPServer:
         self.node_id = node_id
         self.app = FastAPI()
         self.http_server: Optional[asyncio.Task] = None
-        
+
     async def start(self, shutdown_trigger: Any = lambda: asyncio.Future()) -> None:
         await self._setup_routes()
-        
+
         config = Config.from_mapping(
-            bind=f"0.0.0.0:{self.http_port}",
-            log_level="info",
-            use_reloader=False
+            bind=f"0.0.0.0:{self.http_port}", log_level="info", use_reloader=False
         )
-        
+
         self.http_server = asyncio.create_task(
-            aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger) # type: ignore
+            aio_hypercorn.serve(self.app, config, shutdown_trigger=shutdown_trigger)  # type: ignore
         )
-        
+
     async def shutdown(self) -> None:
         if self.http_server and not self.http_server.done():
             self.http_server.cancel()
@@ -59,7 +58,7 @@ class HTTPServer:
                 await self.http_server
             except asyncio.CancelledError:
                 pass
-    
+
     async def wait_closed(self, timeout: float = 5.0) -> bool:
         if not self.http_server:
             return True
@@ -68,16 +67,24 @@ class HTTPServer:
             return True
         except asyncio.TimeoutError:
             return False
-                
+
     async def _setup_routes(self) -> None:
         self.app.add_api_route("/health", self.health, methods=["GET"])
-        self.app.add_api_route("/v1/chat/completions", self.chat_completions, methods=["POST"])
+        self.app.add_api_route(
+            "/v1/chat/completions", self.chat_completions, methods=["POST"]
+        )
         self.app.add_api_route("/v1/load_model", self.load_model, methods=["POST"])
         self.app.add_api_route("/v1/unload_model", self.unload_model, methods=["POST"])
         # Topology endpoints
         self.app.add_api_route("/v1/topology", self.get_topology, methods=["GET"])
-        self.app.add_api_route("/v1/prepare_topology", self.prepare_topology, methods=["POST"])
-        self.app.add_api_route("/v1/prepare_topology_manual", self.prepare_topology_manual, methods=["POST"])
+        self.app.add_api_route(
+            "/v1/prepare_topology", self.prepare_topology, methods=["POST"]
+        )
+        self.app.add_api_route(
+            "/v1/prepare_topology_manual",
+            self.prepare_topology_manual,
+            methods=["POST"],
+        )
         self.app.add_api_route("/v1/devices", self.get_devices, methods=["GET"])
 
     async def health(self) -> HealthResponse:
@@ -91,18 +98,20 @@ class HTTPServer:
             queue_size=0,
             grpc_port=0,
             http_port=self.http_port,
-            instance=self.node_id
+            instance=self.node_id,
         )
-        
+
     async def chat_completions(self, req: ChatRequestModel):
         if not self.model_manager.current_model_id:
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No model loaded. Please load a model via /v1/load_model first."
+                detail="No model loaded. Please load a model via /v1/load_model first.",
             )
 
         if req.stream:
+
             async def stream_generator():
                 async for chunk in self.inference_manager.generate_stream(req):
                     # Use model_dump_json with exclude_none to omit empty fields like 'message' in chunks
@@ -113,7 +122,7 @@ class HTTPServer:
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
             return await self.inference_manager.chat_completions(req)
-        
+
     async def load_model(self, req: APILoadModelRequest) -> APILoadModelResponse:
         try:
             topology = self.cluster_manager.current_topology
@@ -147,7 +156,9 @@ class HTTPServer:
                     )
 
                 model_profile_split = profile_model(
-                    repo_id=req.model, batch_sizes=batch_sizes, sequence_length=req.seq_len
+                    repo_id=req.model,
+                    batch_sizes=batch_sizes,
+                    sequence_length=req.seq_len,
                 )
                 model_profile = model_profile_split.to_model_profile()
                 topology = await self.cluster_manager.solve_topology(
@@ -183,7 +194,6 @@ class HTTPServer:
             self.cluster_manager.current_topology = None
         return response
 
-
     async def get_devices(self) -> JSONResponse:
         devices = await self.cluster_manager.discovery.async_get_properties()
         devices_dict = {
@@ -196,6 +206,7 @@ class HTTPServer:
         topo = self.cluster_manager.current_topology
         if topo is None:
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No topology configured. Call /v1/prepare_topology first.",
@@ -219,6 +230,7 @@ class HTTPServer:
             )
             if not profiles:
                 from fastapi import HTTPException, status
+
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="No profiles collected from shards",
@@ -239,6 +251,7 @@ class HTTPServer:
         except Exception as e:
             logger.exception("Error in prepare_topology: %s", e)
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=str(e),
@@ -252,6 +265,7 @@ class HTTPServer:
             names = [d.instance for d in req.devices]
             if len(names) != len(set(names)):
                 from fastapi import HTTPException, status
+
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Device names must be unique in manual topology",
@@ -263,6 +277,7 @@ class HTTPServer:
             for a in req.assignments:
                 if a.instance not in name_set:
                     from fastapi import HTTPException, status
+
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"Assignment references unknown device: {a.instance}",
@@ -304,6 +319,7 @@ class HTTPServer:
                 flat = [layer for aa in norm for rr in aa.layers for layer in rr]
                 if not flat:
                     from fastapi import HTTPException, status
+
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="No layers provided in assignments",
@@ -335,6 +351,7 @@ class HTTPServer:
         except Exception as e:
             logger.exception("Error in prepare_topology_manual: %s", e)
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=str(e),

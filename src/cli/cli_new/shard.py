@@ -11,6 +11,7 @@ from dnet.ring.shard.new_shard.grpc_servicer import GrpcServer as ShardGrpcServe
 from dnet.utils.logger import logger
 from argparse import ArgumentParser
 
+
 async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
     shard_id = 1  # In real usage, this would be set via CLI or config
     hostname = gethostname()
@@ -20,11 +21,13 @@ async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
     # Core
     runtime = ShardRuntime(shard_id=hostname, queue_size=queue_size)
     adapter = RingAdapter(runtime=runtime, discovery=discovery)
-    shard   = Shard(shard_id=shard_id, adapter=adapter)
+    shard = Shard(shard_id=shard_id, adapter=adapter)
 
     # Servers
     grpc_server = ShardGrpcServer(shard=shard, grpc_port=grpc_port)
-    http_server = ShardHTTPServer(shard=shard, http_port=http_port, grpc_port=grpc_port, discovery=discovery)
+    http_server = ShardHTTPServer(
+        shard=shard, http_port=http_port, grpc_port=grpc_port, discovery=discovery
+    )
 
     stop_event = asyncio.Event()
 

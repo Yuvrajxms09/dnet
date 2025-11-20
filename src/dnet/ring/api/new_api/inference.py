@@ -6,22 +6,24 @@ import numpy as np
 from typing import Optional, Any, List
 
 from ..models import (
-    ChatRequestModel, 
-    ChatResponseModel, 
-    ChatChoice, 
-    ChatMessage, 
+    ChatRequestModel,
+    ChatResponseModel,
+    ChatChoice,
+    ChatMessage,
     ChatUsage,
     ChatCompletionReason,
-    ChatLogProbs
+    ChatLogProbs,
 )
 from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
 
+
 async def arange(count: int):
     """Async range generator."""
     for i in range(count):
         yield i
+
 
 async def azip(*async_iterables):
     """Async zip."""
@@ -33,22 +35,25 @@ async def azip(*async_iterables):
         except StopAsyncIteration:
             break
 
+
 class InferenceManager:
     def __init__(
-        self, 
-        cluster_manager: ClusterManager, 
+        self,
+        cluster_manager: ClusterManager,
         model_manager: ModelManager,
         grpc_port: int,
-        adapter: ApiAdapterBase
+        adapter: ApiAdapterBase,
     ):
         self.cluster_manager = cluster_manager
         self.model_manager = model_manager
         self.grpc_port = grpc_port
         self.adapter = adapter
-        
+
         self._api_callback_addr: str = ""
 
-    async def connect_to_ring(self, first_shard_ip: str, first_shard_port: int, api_ip: str):
+    async def connect_to_ring(
+        self, first_shard_ip: str, first_shard_port: int, api_ip: str
+    ):
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = f"{api_ip}:{self.grpc_port}"
 
@@ -57,40 +62,51 @@ class InferenceManager:
         Generator for chat completion chunks.
         """
         if not self.model_manager.tokenizer:
-            raise RuntimeError("Inference manager not ready (ring not connected or tokenizer not loaded)")
+            raise RuntimeError(
+                "Inference manager not ready (ring not connected or tokenizer not loaded)"
+            )
 
         tokenizer = self.model_manager.tokenizer
 
         try:
-            if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
-                message_dicts = [{"role": m.role, "content": m.content} for m in req.messages]
+            if (
+                hasattr(tokenizer, "chat_template")
+                and tokenizer.chat_template is not None
+            ):
+                message_dicts = [
+                    {"role": m.role, "content": m.content} for m in req.messages
+                ]
                 prompt_text = tokenizer.apply_chat_template(  # type: ignore[attr-defined]
                     message_dicts,
                     add_generation_prompt=True,
                     tokenize=False,
                 )
             else:
-                prompt_text = "\n".join(m.content for m in req.messages) + "\nAssistant:"
+                prompt_text = (
+                    "\n".join(m.content for m in req.messages) + "\nAssistant:"
+                )
         except Exception:
             prompt_text = "\n".join(m.content for m in req.messages) + "\nAssistant:"
 
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
-        
+
         stop_id_sequences = []
         if req.stop:
             for stop_word in req.stop:
-                stop_id_sequences.append(tokenizer.encode(stop_word, add_special_tokens=False))
+                stop_id_sequences.append(
+                    tokenizer.encode(stop_word, add_special_tokens=False)
+                )
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
         t_first_token: Optional[float] = None
         tokens: List[int] = []
-        
+
         detokenizer = tokenizer.detokenizer
         detokenizer.reset()
         last_text_len = 0
-        
+
         completion_reason = ChatCompletionReason.LENGTH
 
         await self.adapter.reset_cache()
@@ -102,7 +118,7 @@ class InferenceManager:
                 ChatChoice(
                     index=0,
                     delta=ChatMessage(role="assistant", content=""),
-                    finish_reason=None
+                    finish_reason=None,
                 )
             ],
             created=int(time.time()),
@@ -111,35 +127,37 @@ class InferenceManager:
 
         y = prompt_array
         for _ in range(req.max_tokens):
-            tok_np = y.astype(mx.int32).tolist() if hasattr(y, "tolist") else list(map(int, y))
+            tok_np = (
+                y.astype(mx.int32).tolist()
+                if hasattr(y, "tolist")
+                else list(map(int, y))
+            )
             tok_bytes = np.array(tok_np, dtype=np.int32).tobytes(order="C")
-            
+
             await self.adapter.send_tokens(
-                nonce, 
-                tok_bytes, 
+                nonce,
+                tok_bytes,
                 self._api_callback_addr,
                 logprobs=req.logprobs,
-                top_logprobs=req.top_logprobs
+                top_logprobs=req.top_logprobs,
             )
             result = await self.adapter.await_token(nonce, timeout_s=300.0)
             token = int(result.token_id)
-            
+
             # Accumulate logprobs
             token_logprobs = []
             top_logprobs_list = []
             if req.logprobs:
                 token_logprobs.append(result.logprob)
                 top_logprobs_list.append(result.top_logprobs)
-            
+
             if t_first_token is None:
                 t_first_token = time.perf_counter()
 
             detokenizer.add_token(token)
             tokens.append(token)
-            
-            # Get delta text
+
             # mlx_lm detokenizer usually updates .text property
-            # We can also use last_segment if available, but let's rely on diff
             full_text = detokenizer.text
             delta_text = full_text[last_text_len:]
             last_text_len = len(full_text)
@@ -154,9 +172,11 @@ class InferenceManager:
                         logprobs=ChatLogProbs(
                             token_logprobs=token_logprobs,
                             top_logprobs=top_logprobs_list,
-                            tokens=[token]
-                        ) if req.logprobs else None,
-                        finish_reason=None
+                            tokens=[token],
+                        )
+                        if req.logprobs
+                        else None,
+                        finish_reason=None,
                     )
                 ],
                 created=int(time.time()),
@@ -168,9 +188,9 @@ class InferenceManager:
                 completion_reason = ChatCompletionReason.STOP
                 break
             y = mx.array([token], dtype=mx.int32)
-                
+
         detokenizer.finalize()
-        
+
         metrics_dict = None
         t_end = time.perf_counter()
         if getattr(req, "profile", False):
@@ -182,8 +202,12 @@ class InferenceManager:
                 "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
                 "token_gen_ms": round(gen_s * 1000.0, 3),
                 "tokens_generated": tokens_generated,
-                "tps_overall": round((tokens_generated / total_s) if tokens_generated else 0.0, 4),
-                "tps_decoding": round((tokens_generated / gen_s) if tokens_generated else 0.0, 4),
+                "tps_overall": round(
+                    (tokens_generated / total_s) if tokens_generated else 0.0, 4
+                ),
+                "tps_decoding": round(
+                    (tokens_generated / gen_s) if tokens_generated else 0.0, 4
+                ),
             }
 
         # Final chunk with finish reason
@@ -193,7 +217,7 @@ class InferenceManager:
                 ChatChoice(
                     index=0,
                     delta=ChatMessage(role="assistant", content=""),
-                    finish_reason=completion_reason
+                    finish_reason=completion_reason,
                 )
             ],
             created=int(time.time()),
@@ -224,7 +248,7 @@ class InferenceManager:
             choice = chunk.choices[0]
             if choice.delta and choice.delta.content:
                 full_content += choice.delta.content
-            
+
             if choice.logprobs:
                 if choice.logprobs.token_logprobs:
                     token_logprobs.extend(choice.logprobs.token_logprobs)
@@ -232,13 +256,13 @@ class InferenceManager:
                     top_logprobs_list.extend(choice.logprobs.top_logprobs)
                 if choice.logprobs.tokens:
                     tokens.extend(choice.logprobs.tokens)
-            
+
             if choice.finish_reason:
                 completion_reason = choice.finish_reason
-            
+
             if chunk.metrics:
                 metrics_dict = chunk.metrics
-            
+
             if chunk.usage:
                 usage = chunk.usage
 
@@ -253,7 +277,9 @@ class InferenceManager:
                         token_logprobs=token_logprobs,
                         top_logprobs=top_logprobs_list,
                         tokens=tokens,
-                    ) if req.logprobs else None,
+                    )
+                    if req.logprobs
+                    else None,
                 )
             ],
             usage=usage,

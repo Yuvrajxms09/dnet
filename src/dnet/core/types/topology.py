@@ -49,4 +49,3 @@ class TopologyInfo(BaseModel):
 
 
 __all__ = ["TopologyInfo", "LayerAssignment"]
-

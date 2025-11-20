@@ -37,7 +37,9 @@ class HTTPServer:
     HTTP API server for shard node.
     """
 
-    def __init__(self, http_port: int, grpc_port: int, shard: Shard, discovery: AsyncDnetP2P) -> None:
+    def __init__(
+        self, http_port: int, grpc_port: int, shard: Shard, discovery: AsyncDnetP2P
+    ) -> None:
         self.shard = shard
         self.http_port: int = http_port
         self.grpc_port: int = grpc_port

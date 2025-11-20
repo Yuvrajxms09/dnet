@@ -13,6 +13,7 @@ from dnet.utils.model import get_model_metadata
 import time
 import asyncio
 
+
 @register_policy("offload")
 @register_policy("sliding_fit")
 class OffloadPolicy(ComputePolicy):
@@ -29,11 +30,15 @@ class OffloadPolicy(ComputePolicy):
         if n_residency < requested_w:
             self._mode = "sliding_fit"
             self.window_size = max(1, min(n_residency, local_count))
-            self._resident_windows = int(req.resident_windows) if req.resident_windows else 1
+            self._resident_windows = (
+                int(req.resident_windows) if req.resident_windows else 1
+            )
         else:
             self._mode = "offload"
             self.window_size = max(1, min(requested_w, local_count))
-            self._resident_windows = int(req.resident_windows) if req.resident_windows else 1
+            self._resident_windows = (
+                int(req.resident_windows) if req.resident_windows else 1
+            )
 
         # Repack for offload/sliding_fit
         try:
@@ -65,7 +70,7 @@ class OffloadPolicy(ComputePolicy):
         # and handle it explicitly or rely on blocking loads.
         # The old shard set prefetch_mode="off" for these modes.
         prefetch_mode = "off"
-        
+
         # Enable fastpath for these modes as per old shard
         use_fastpath = True
 
@@ -78,10 +83,12 @@ class OffloadPolicy(ComputePolicy):
             use_mxload_fastpath=use_fastpath,
             prefetch_mode=prefetch_mode,
         )
-        
+
         logger.info(
             "OffloadPolicy configured: mode=%s window=%d resident=%d",
-            self._mode, self.window_size, self._resident_windows
+            self._mode,
+            self.window_size,
+            self._resident_windows,
         )
 
     def _prepare_window_blocking(self, window_layers: list[int]) -> None:
@@ -124,7 +131,7 @@ class OffloadPolicy(ComputePolicy):
             # 3) prepare x
             input_size = int(np.prod(msg.shape))
             reshaped_data = input_buffer[:input_size].reshape(msg.shape)
-            
+
             if msg.dtype == "tokens":
                 # Token path: convert to int32, embed, and ensure correct dtype
                 toks = mx.array(np.array(reshaped_data, dtype=np.int32), dtype=mx.int32)
@@ -139,7 +146,7 @@ class OffloadPolicy(ComputePolicy):
                 x = x.astype(target_dtype)
 
             current_layer = msg.layer_id + 1
-            
+
             while True:
                 did_early_swap = False
 
@@ -176,9 +183,7 @@ class OffloadPolicy(ComputePolicy):
                             resident = self.weight_cache.get_resident_layers()
                         except Exception:
                             resident = []
-                        evicted_cnt = self._delta_swap_eviction(
-                            window_layers, resident
-                        )
+                        evicted_cnt = self._delta_swap_eviction(window_layers, resident)
                         if evicted_cnt > 0:
                             did_early_swap = True
                     except Exception:
@@ -187,7 +192,7 @@ class OffloadPolicy(ComputePolicy):
                 # Bind weights
                 to_bind = self._bind_layer_weights(window_layers, msg)
                 if to_bind is None:
-                    return                
+                    return
                 if to_bind:
                     self.runtime._compute_busy.set()
                     try:
@@ -211,7 +216,7 @@ class OffloadPolicy(ComputePolicy):
                                 pass
                 finally:
                     self.runtime._compute_busy.clear()
-                
+
                 last_layer = window_layers[-1]
                 try:
                     mx.eval(x)
@@ -228,11 +233,11 @@ class OffloadPolicy(ComputePolicy):
                             if did_early_swap:
                                 pass
                             elif not self._recent_windows:
-                                 self._recent_windows.append(list(window_layers))
+                                self._recent_windows.append(list(window_layers))
                             else:
                                 prev = self._recent_windows.pop(0)
                                 self._delta_swap_eviction(window_layers, prev)
-                                
+
                                 budget = max(1, int(self.window_size or 1))
                                 curr = list(window_layers)
                                 prev_only = [x for x in prev if x not in curr]
@@ -262,7 +267,9 @@ class OffloadPolicy(ComputePolicy):
                                 pass
                         else:
                             if not self._defer_unload:
-                                while len(self._recent_windows) > max(1, int(self._resident_windows)):
+                                while len(self._recent_windows) > max(
+                                    1, int(self._resident_windows)
+                                ):
                                     old = self._recent_windows.pop(0)
                                     try:
                                         self.weight_cache.evict_layers(old)
@@ -303,32 +310,38 @@ class OffloadPolicy(ComputePolicy):
                             logits_2d = y[-1:, :]
                         else:
                             logits_2d = y.reshape(1, -1)
-                        
+
                         # Compute logprobs if requested
                         token_logprob = 0.0
                         top_logprobs = {}
-                        
+
                         if msg.req_logprobs or msg.req_top_logprobs > 0:
-                            logprobs = logits_2d - mx.logsumexp(logits_2d, axis=-1, keepdims=True)
+                            logprobs = logits_2d - mx.logsumexp(
+                                logits_2d, axis=-1, keepdims=True
+                            )
 
                             # Sample token
                             tok = mx.argmax(logits_2d, axis=-1)
                             token_id = int(tok.item())
-                            
+
                             if msg.req_logprobs:
                                 token_logprob = float(logprobs[0, token_id].item())
-                            
+
                             # Top-k logprobs
                             k = msg.req_top_logprobs
                             if k > 0:
-                                top_k_indices = mx.argpartition(logits_2d, -k, axis=-1)[:, -k:]
+                                top_k_indices = mx.argpartition(logits_2d, -k, axis=-1)[
+                                    :, -k:
+                                ]
                                 top_k_vals = logits_2d[0, top_k_indices[0]]
                                 sorted_indices_local = mx.argsort(top_k_vals, axis=-1)
                                 sorted_indices_local = sorted_indices_local[::-1]
                                 sorted_indices = top_k_indices[0, sorted_indices_local]
-                                
+
                                 for idx in sorted_indices.tolist():
-                                    top_logprobs[int(idx)] = float(logprobs[0, idx].item())
+                                    top_logprobs[int(idx)] = float(
+                                        logprobs[0, idx].item()
+                                    )
                         else:
                             # Just sample
                             tok = mx.argmax(logits_2d, axis=-1)
@@ -370,7 +383,7 @@ class OffloadPolicy(ComputePolicy):
 
                 self.runtime.emit_result(output_msg)
                 self.runtime.input_pool.release(msg.pool_id)
-                
+
                 # Schedule prefetch for next local window if in offload mode
                 if self._mode == "offload":
                     next_window = self._next_local_layers(
@@ -379,10 +392,12 @@ class OffloadPolicy(ComputePolicy):
                     if next_window:
                         loop = asyncio.get_running_loop()
                         fut = loop.run_in_executor(
-                            self.runtime.executor, self._prepare_window_blocking, next_window
+                            self.runtime.executor,
+                            self._prepare_window_blocking,
+                            next_window,
                         )
                         self._prepared_by_nonce[msg.nonce] = (next_window, fut)
-                
+
                 return
 
         except Exception as e:

@@ -8,6 +8,7 @@ import asyncio
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
 from dnet.core.types.messages import ActivationMessage
 
+
 class TopologyAdapter(ABC):
     """
     Base class for topology adapters.

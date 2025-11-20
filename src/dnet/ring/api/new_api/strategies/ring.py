@@ -17,7 +17,7 @@ from dnet.core.types.topology import TopologyInfo
 from ...utils import (
     optimize_device_ordering,
     compute_layer_assignments,
-    postprocess_single_round
+    postprocess_single_round,
 )
 from .base import Strategy, TopologySolver, ApiAdapterBase, TokenResult
 
@@ -39,7 +39,7 @@ class RingTopologySolver(TopologySolver):
     ) -> TopologyInfo:
         # 1. Optimize ordering (specific to ring topology)
         ordered_instances = optimize_device_ordering(profiles, thunderbolts)
-        
+
         # 2. Prepare profiles for solver
         sorted_shard_profiles = [
             profiles[name] for name in ordered_instances if name in profiles
@@ -61,7 +61,7 @@ class RingTopologySolver(TopologySolver):
             plot=False,
             kv_bits=kv_bits,
         )
-        
+
         logger.info(
             "Solver completed: k=%d, objective=%d", solution.k, solution.obj_value
         )
@@ -81,7 +81,7 @@ class RingTopologySolver(TopologySolver):
         )
 
         shards_list = [shards[name] for name in ordered_instances]
-        
+
         # 6. Create TopologyInfo
         return TopologyInfo(
             model=model_name,
@@ -141,12 +141,12 @@ class RingApiAdapter(ApiAdapterBase):
             logger.warning("ResetCache RPC failed: %s", e)
 
     async def send_tokens(
-        self, 
-        nonce: str, 
-        tokens: bytes, 
+        self,
+        nonce: str,
+        tokens: bytes,
         callback_addr: str,
         logprobs: bool = False,
-        top_logprobs: int = 0
+        top_logprobs: int = 0,
     ) -> None:
         if not self.stub:
             raise RuntimeError("Ring adapter not connected to first shard")
@@ -165,12 +165,12 @@ class RingApiAdapter(ApiAdapterBase):
             req_top_logprobs=top_logprobs,
         )
         req = msg.to_proto(tokens)
-        
+
         # We use StreamActivations even for the first hop
         # But here we just fire and forget via a stream or unary if we had one.
         # The current implementation uses StreamActivations for everything.
         # We need to get a stream context.
-        
+
         ctx = await self._streams.get_or_create_stream(
             nonce,
             lambda it: self.stub.StreamActivations(it),  # type: ignore[attr-defined]

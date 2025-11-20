@@ -1,7 +1,12 @@
 import httpx
 import asyncio
 from typing import Dict, Optional, List, Any, Tuple
-from dnet_p2p import AsyncDnetP2P, DnetDeviceProperties, ThunderboltConnection, discover_all_thunderbolt_connections
+from dnet_p2p import (
+    AsyncDnetP2P,
+    DnetDeviceProperties,
+    ThunderboltConnection,
+    discover_all_thunderbolt_connections,
+)
 from distilp.common import DeviceProfile
 from .strategies.base import TopologySolver
 from dnet.core.types.topology import TopologyInfo
@@ -14,12 +19,9 @@ from ...shard.models import (
     ShardProfileResponse,
 )
 
+
 class ClusterManager:
-    def __init__(
-        self, 
-        discovery: AsyncDnetP2P,
-        solver: TopologySolver
-    ):
+    def __init__(self, discovery: AsyncDnetP2P, solver: TopologySolver):
         self.discovery = discovery
         self.solver = solver
         self.current_topology: Optional[TopologyInfo] = None
@@ -34,11 +36,11 @@ class ClusterManager:
         return self.shards
 
     async def profile_cluster(
-        self, 
-        model_id: str, 
+        self,
+        model_id: str,
         embedding_size: int,
         max_batch_exp: int,
-        batch_sizes: List[int]
+        batch_sizes: List[int],
     ) -> Dict[str, DeviceProfile]:
         """Orchestrates the /profile calls to devices and aggregates results."""
         shards = self.shards
@@ -71,10 +73,12 @@ class ClusterManager:
 
                 shard_list.append((shard_name, shard_props))
                 health_tasks.append(
-                    asyncio.create_task(client.get(
-                        f"http://{shard_props.local_ip}:{shard_props.server_port}/health",
-                        timeout=5.0,
-                    ))
+                    asyncio.create_task(
+                        client.get(
+                            f"http://{shard_props.local_ip}:{shard_props.server_port}/health",
+                            timeout=5.0,
+                        )
+                    )
                 )
 
             health_results = await asyncio.gather(*health_tasks, return_exceptions=True)
@@ -116,9 +120,13 @@ class ClusterManager:
                     payload_sizes=payload_sizes,
                 )
                 latency_tasks.append(
-                    asyncio.create_task(client.post(
-                        latency_url, json=latency_request.model_dump(), timeout=1000.0
-                    ))
+                    asyncio.create_task(
+                        client.post(
+                            latency_url,
+                            json=latency_request.model_dump(),
+                            timeout=1000.0,
+                        )
+                    )
                 )
             latency_results = await asyncio.gather(
                 *latency_tasks, return_exceptions=True
@@ -233,18 +241,18 @@ class ClusterManager:
                         self.device_profiles[shard_name] = profile
 
         logger.info("Collected profiles from %d shards", len(self.device_profiles))
-        return self.device_profiles 
+        return self.device_profiles
 
     async def solve_topology(
-        self, 
-        profiles: Dict[str, DeviceProfile], 
-        model_profile: Any, # ModelProfile
+        self,
+        profiles: Dict[str, DeviceProfile],
+        model_profile: Any,  # ModelProfile
         model_name: str,
         num_layers: int,
         kv_bits: str,
     ) -> TopologyInfo:
         """Delegates to the configured solver."""
-        
+
         self.current_topology = await self.solver.solve(
             profiles=profiles,
             model_profile=model_profile,
@@ -252,7 +260,7 @@ class ClusterManager:
             num_layers=num_layers,
             kv_bits=kv_bits,
             shards=self.shards,
-            thunderbolts=self.thunderbolts
+            thunderbolts=self.thunderbolts,
         )
         return self.current_topology
 

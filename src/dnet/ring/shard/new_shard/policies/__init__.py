@@ -6,6 +6,7 @@ from ..config import TopologyConfig
 from dataclasses import dataclass
 from typing import Type
 
+
 @dataclass
 class PolicyPlan:
     mode: str
@@ -35,7 +36,9 @@ def plan_policy(
         if requested_w >= local_count:
             mode = "fit"
             sliding = False
-            resident_windows = 9999  # TODO: not sure of how resident windows are assigned
+            resident_windows = (
+                9999  # TODO: not sure of how resident windows are assigned
+            )
             window_size = local_count
         else:
             mode = "offload"
@@ -53,7 +56,7 @@ def plan_policy(
         window_size=window_size,
         resident_windows=resident_windows,
         policy_cls=policy_cls,
-        is_sliding=sliding
+        is_sliding=sliding,
     )
 
 
