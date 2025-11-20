@@ -55,6 +55,7 @@ class Shard:
         )
 
     async def unload_model(self) -> ShardUnloadModelResponse:
+        await self.adapter.reset_topology()
         return self.runtime.unload_model_core()
 
     def queue_size(self) -> int:

@@ -117,6 +117,29 @@ class RingAdapter(TopologyAdapter):
         else:
             logger.warning("Node %s: No next node configured", self.runtime.shard_id)
 
+    async def reset_topology(self):
+        """Reset topology state."""
+        self.next_node = None
+        self.total_layers = 0
+        self.api_callback_address = None
+        
+        if self.next_node_channel:
+            try:
+                await self.next_node_channel.close()
+            except Exception:
+                pass
+            self.next_node_channel = None
+            self.next_node_stub = None
+
+        if self.api_channel:
+            try:
+                await self.api_channel.close()
+            except Exception:
+                pass
+            self.api_channel = None
+            self.api_stub = None
+            self.api_address = None
+
     async def admit_frame(self, request: ActivationRequest) -> None:
         while self.running:
             try:

@@ -95,6 +95,13 @@ class HTTPServer:
         )
         
     async def chat_completions(self, req: ChatRequestModel):
+        if not self.model_manager.current_model_id:
+            from fastapi import HTTPException, status
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No model loaded. Please load a model via /v1/load_model first."
+            )
+
         if req.stream:
             async def stream_generator():
                 async for chunk in self.inference_manager.generate_stream(req):
@@ -171,7 +178,10 @@ class HTTPServer:
     async def unload_model(self) -> UnloadModelResponse:
         await self.cluster_manager.scan_devices()
         shards = self.cluster_manager.shards
-        return await self.model_manager.unload_model(shards)
+        response = await self.model_manager.unload_model(shards)
+        if response.success:
+            self.cluster_manager.current_topology = None
+        return response
 
 
     async def get_devices(self) -> JSONResponse:

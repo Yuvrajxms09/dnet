@@ -59,6 +59,11 @@ class TopologyAdapter(ABC):
         pass
 
     @abstractmethod
+    async def reset_topology(self):
+        """Reset topology configuration (e.g. on unload)."""
+        pass
+
+    @abstractmethod
     async def shutdown(self) -> None:
         """Shutdown the adapter and any background tasks."""
         pass
