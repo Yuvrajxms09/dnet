@@ -57,4 +57,11 @@ def plan_policy(
     )
 
 
-__all__ = ["make_policy", "ComputePolicy", "plan_policy", "PolicyPlan"]
+__all__ = [
+    "make_policy",
+    "ComputePolicy",
+    "plan_policy",
+    "PolicyPlan",
+    "fit_in_memory",
+    "offload",
+]

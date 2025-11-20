@@ -14,7 +14,6 @@ from typing import Dict, Iterable, List, Tuple
 import mlx.core as mx
 
 from .model import ModelMetadata, get_model_metadata, load_weight, MappedFile
-from .logger import logger
 import json
 import time
 
@@ -91,7 +90,6 @@ def repack_per_layer(
 
     mapped_files: Dict[str, MappedFile] = {}
     written = 0
-    t0 = time.perf_counter()
     try:
         for lid in sorted(set(int(i) for i in assigned_layers)):
             layer_info = md.weight_info.get(int(lid), {})

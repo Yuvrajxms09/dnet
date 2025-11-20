@@ -1,7 +1,6 @@
 import numpy as np
 import mlx.core as mx
-import time
-from typing import Optional, Tuple
+from typing import Optional
 from dnet.utils.serialization import dtype_map, mlx_dtype_map, tensor_to_bytes
 from dnet.compression import decompress_tensor_from_protobuf_data
 from dnet.core.types.messages import ActivationMessage
