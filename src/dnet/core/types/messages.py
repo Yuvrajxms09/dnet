@@ -39,6 +39,13 @@ class ActivationMessage:
     # Request control
     req_logprobs: bool = False
     req_top_logprobs: int = 0
+    # Decoding parameters
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = -1
+    repetition_penalty: float = 1.0
+    min_p: float = 0.0
+    min_tokens_to_keep: int = 1
 
     @classmethod
     def from_proto(cls, proto_msg: ActivationRequest, pool_id: int = 0):
@@ -55,6 +62,18 @@ class ActivationMessage:
             callback_url=proto_msg.callback_url,
             req_logprobs=proto_msg.logprobs,
             req_top_logprobs=proto_msg.top_logprobs,
+            temperature=proto_msg.temperature
+            if proto_msg.HasField("temperature")
+            else 1.0,
+            top_p=proto_msg.top_p if proto_msg.HasField("top_p") else 1.0,
+            top_k=proto_msg.top_k if proto_msg.HasField("top_k") else -1,
+            repetition_penalty=proto_msg.repetition_penalty
+            if proto_msg.HasField("repetition_penalty")
+            else 1.0,
+            min_p=proto_msg.min_p if proto_msg.HasField("min_p") else 0.0,
+            min_tokens_to_keep=proto_msg.min_tokens_to_keep
+            if proto_msg.HasField("min_tokens_to_keep")
+            else 1,
         )
 
     def to_proto(self, data: bytes) -> ActivationRequest:
@@ -73,6 +92,12 @@ class ActivationMessage:
             callback_url=self.callback_url,
             logprobs=self.req_logprobs,
             top_logprobs=self.req_top_logprobs,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            repetition_penalty=self.repetition_penalty,
+            min_p=self.min_p,
+            min_tokens_to_keep=self.min_tokens_to_keep,
         )
 
 
