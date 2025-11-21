@@ -32,168 +32,171 @@ class FitInMemoryPolicy(ComputePolicy):
         )
 
     def process(self, msg: ActivationMessage) -> None:
-        if (
-            not self.runtime.model
-            or not self.runtime.model_metadata
-            or not self.weight_cache
-            or not self.runtime.input_pool
-            or not self.runtime.output_pool
-        ):
-            logger.error(
-                "Runtime %s: cannot process activation - model not loaded",
-                self.runtime.shard_id,
-            )
-            return
-
         try:
-            # 1) per-nonce KV
-            kv = self.runtime.get_or_make_kv(msg.nonce)
-
-            # 2) get input tensor from pool
-            input_buffer = self.runtime.input_pool.get_buffer(msg.pool_id)
-            if input_buffer is None:
-                logger.error("Failed to get input buffer %s", msg.pool_id)
-                return
-
-            # 3) prepare x
-            input_size = int(np.prod(msg.shape))
-            reshaped_data = input_buffer[:input_size].reshape(msg.shape)
-            if msg.dtype == "tokens":
-                # Token path: convert to int32, embed, and ensure correct dtype
-                toks = mx.array(np.array(reshaped_data, dtype=np.int32), dtype=mx.int32)
-                x = self.runtime.model.embed(toks[None])
-                target_dtype = self.runtime._wire_mx_dtype
-            else:
-                # Non-token path: use data as-is, convert dtype if needed
-                x = reshaped_data
-                target_dtype = mlx_dtype_map[msg.dtype]
-
-            if target_dtype and x.dtype != target_dtype:
-                x = x.astype(target_dtype)
-
-            current_layer = msg.layer_id + 1
-            while True:
-                # build contiguous window inside our shard
-                window_layers: list[int] = []
-                for i in range(self.window_size):
-                    layer = current_layer + i
-                    if layer not in self.runtime._assigned_set:
-                        break
-                    window_layers.append(layer)
-
-                to_bind = self._bind_layer_weights(window_layers, msg)
-                if to_bind is None:
+            with self.runtime._model_lock:
+                if (
+                    not self.runtime.model
+                    or not self.runtime.model_metadata
+                    or not self.weight_cache
+                    or not self.runtime.input_pool
+                    or not self.runtime.output_pool
+                ):
+                    logger.error(
+                        "Runtime %s: cannot process activation - model not loaded",
+                        self.runtime.shard_id,
+                    )
                     return
-                if to_bind:
-                    self.runtime._compute_busy.set()
-                    with self.runtime._mlx_lock:
-                        self.runtime.model.load_weights(
-                            list(to_bind.items()), strict=False
-                        )
 
-                # compute window
-                try:
-                    self.runtime._compute_busy.set()
-                except Exception:
-                    pass
-                for lyr in window_layers:
-                    with self.runtime._mlx_lock:
-                        x = self.runtime.model.apply_single_layer(lyr, x, cache=kv)
-                        try:
-                            if str(x.dtype) != str(self.runtime._wire_mx_dtype):
-                                x = x.astype(self.runtime._wire_mx_dtype)
-                        except Exception:
-                            pass
+                # 1) per-nonce KV
+                kv = self.runtime.get_or_make_kv(msg.nonce)
 
-                last_layer = window_layers[-1]
-                try:
-                    mx.eval(x)
-                except Exception:
-                    pass
+                # 2) get input tensor from pool
+                input_buffer = self.runtime.input_pool.get_buffer(msg.pool_id)
+                if input_buffer is None:
+                    logger.error("Failed to get input buffer %s", msg.pool_id)
+                    return
 
-                for lid in window_layers:
-                    self.weight_cache.decrease_reference(lid)
-
-                # continue if next is still local
-                nxt = last_layer + 1
-                if nxt in self.runtime._assigned_set:
-                    current_layer = nxt
-                    continue
-
-                # boundary reached
-                x_cast = (
-                    x
-                    if x.dtype == self.runtime._wire_mx_dtype
-                    else x.astype(self.runtime._wire_mx_dtype)
-                )
-
-                # build output ActivationMessage
-                if nxt >= self.runtime.model_metadata.num_layers:
-                    # end-shard sampling
-                    try:
-                        with self.runtime._mlx_lock:
-                            y = self.runtime.model.normalize(x_cast)
-                            y = self.runtime.model.lm_project(y)
-
-                        # Sampling
-                        decoding_config = DecodingConfig(
-                            temperature=msg.temperature,
-                            top_p=msg.top_p,
-                            top_k=msg.top_k,
-                            repetition_penalty=msg.repetition_penalty,
-                            min_p=msg.min_p,
-                            min_tokens_to_keep=msg.min_tokens_to_keep,
-                        )
-
-                        sampler = Sampler()
-                        result = sampler.sample(
-                            logits=y,
-                            config=decoding_config,
-                            req_logprobs=msg.req_logprobs,
-                            req_top_logprobs=msg.req_top_logprobs,
-                        )
-
-                        token_id = result.token_id
-                        token_logprob = result.logprob
-                        top_logprobs = result.top_logprobs
-
-                    except Exception as e:
-                        logger.error("End-shard sampling failed: %s", e)
-                        self.runtime.input_pool.release(msg.pool_id)
-                        return
-
-                    output_msg = ActivationMessage(
-                        nonce=msg.nonce,
-                        layer_id=last_layer,
-                        pool_id=-1,
-                        shape=cast(tuple[int, ...], x.shape),
-                        batch_size=msg.batch_size,
-                        timestamp=utc_epoch_now(),
-                        node_origin=f"shard_{self.runtime.shard_id}",
-                        dtype=str(self.runtime._wire_mx_dtype),
-                        callback_url=msg.callback_url,
-                        is_final=True,
-                        token_id=token_id,
-                        logprob=token_logprob,
-                        top_logprobs=top_logprobs,
+                # 3) prepare x
+                input_size = int(np.prod(msg.shape))
+                reshaped_data = input_buffer[:input_size].reshape(msg.shape)
+                if msg.dtype == "tokens":
+                    # Token path: convert to int32, embed, and ensure correct dtype
+                    toks = mx.array(
+                        np.array(reshaped_data, dtype=np.int32), dtype=mx.int32
                     )
+                    x = self.runtime.model.embed(toks[None])
+                    target_dtype = self.runtime._wire_mx_dtype
                 else:
-                    output_msg = ActivationMessage(
-                        nonce=msg.nonce,
-                        layer_id=last_layer,
-                        pool_id=-1,
-                        shape=cast(tuple[int, ...], x.shape),
-                        batch_size=msg.batch_size,
-                        timestamp=utc_epoch_now(),
-                        node_origin=f"shard_{self.runtime.shard_id}",
-                        dtype=str(self.runtime._wire_mx_dtype),
-                        callback_url=msg.callback_url,
-                        tensor=x_cast,
+                    # Non-token path: use data as-is, convert dtype if needed
+                    x = reshaped_data
+                    target_dtype = mlx_dtype_map[msg.dtype]
+
+                if target_dtype and x.dtype != target_dtype:
+                    x = x.astype(target_dtype)
+
+                current_layer = msg.layer_id + 1
+                while True:
+                    # build contiguous window inside our shard
+                    window_layers: list[int] = []
+                    for i in range(self.window_size):
+                        layer = current_layer + i
+                        if layer not in self.runtime._assigned_set:
+                            break
+                        window_layers.append(layer)
+
+                    to_bind = self._bind_layer_weights(window_layers, msg)
+                    if to_bind is None:
+                        return
+                    if to_bind:
+                        self.runtime._compute_busy.set()
+                        with self.runtime._mlx_lock:
+                            self.runtime.model.load_weights(
+                                list(to_bind.items()), strict=False
+                            )
+
+                    # compute window
+                    try:
+                        self.runtime._compute_busy.set()
+                    except Exception:
+                        pass
+                    for lyr in window_layers:
+                        with self.runtime._mlx_lock:
+                            x = self.runtime.model.apply_single_layer(lyr, x, cache=kv)
+                            try:
+                                if str(x.dtype) != str(self.runtime._wire_mx_dtype):
+                                    x = x.astype(self.runtime._wire_mx_dtype)
+                            except Exception:
+                                pass
+
+                    last_layer = window_layers[-1]
+                    try:
+                        mx.eval(x)
+                    except Exception:
+                        pass
+
+                    for lid in window_layers:
+                        self.weight_cache.decrease_reference(lid)
+
+                    # continue if next is still local
+                    nxt = last_layer + 1
+                    if nxt in self.runtime._assigned_set:
+                        current_layer = nxt
+                        continue
+
+                    # boundary reached
+                    x_cast = (
+                        x
+                        if x.dtype == self.runtime._wire_mx_dtype
+                        else x.astype(self.runtime._wire_mx_dtype)
                     )
 
-                self.runtime.emit_result(output_msg)
-                self.runtime.input_pool.release(msg.pool_id)
-                return
+                    # build output ActivationMessage
+                    if nxt >= self.runtime.model_metadata.num_layers:
+                        # end-shard sampling
+                        try:
+                            with self.runtime._mlx_lock:
+                                y = self.runtime.model.normalize(x_cast)
+                                y = self.runtime.model.lm_project(y)
+
+                            # Sampling
+                            decoding_config = DecodingConfig(
+                                temperature=msg.temperature,
+                                top_p=msg.top_p,
+                                top_k=msg.top_k,
+                                repetition_penalty=msg.repetition_penalty,
+                                min_p=msg.min_p,
+                                min_tokens_to_keep=msg.min_tokens_to_keep,
+                            )
+
+                            sampler = Sampler()
+                            result = sampler.sample(
+                                logits=y,
+                                config=decoding_config,
+                                req_logprobs=msg.req_logprobs,
+                                req_top_logprobs=msg.req_top_logprobs,
+                            )
+
+                            token_id = result.token_id
+                            token_logprob = result.logprob
+                            top_logprobs = result.top_logprobs
+
+                        except Exception as e:
+                            logger.error("End-shard sampling failed: %s", e)
+                            self.runtime.input_pool.release(msg.pool_id)
+                            return
+
+                        output_msg = ActivationMessage(
+                            nonce=msg.nonce,
+                            layer_id=last_layer,
+                            pool_id=-1,
+                            shape=cast(tuple[int, ...], x.shape),
+                            batch_size=msg.batch_size,
+                            timestamp=utc_epoch_now(),
+                            node_origin=f"shard_{self.runtime.shard_id}",
+                            dtype=str(self.runtime._wire_mx_dtype),
+                            callback_url=msg.callback_url,
+                            is_final=True,
+                            token_id=token_id,
+                            logprob=token_logprob,
+                            top_logprobs=top_logprobs,
+                        )
+                    else:
+                        output_msg = ActivationMessage(
+                            nonce=msg.nonce,
+                            layer_id=last_layer,
+                            pool_id=-1,
+                            shape=cast(tuple[int, ...], x.shape),
+                            batch_size=msg.batch_size,
+                            timestamp=utc_epoch_now(),
+                            node_origin=f"shard_{self.runtime.shard_id}",
+                            dtype=str(self.runtime._wire_mx_dtype),
+                            callback_url=msg.callback_url,
+                            tensor=x_cast,
+                        )
+
+                    self.runtime.emit_result(output_msg)
+                    self.runtime.input_pool.release(msg.pool_id)
+                    return
 
         except Exception as e:
             logger.exception("Error in fit policy process: %s", e)

@@ -101,6 +101,7 @@ class ShardRuntime:
         # Compute serialization and MLX lock
         self._compute_busy = threading.Event()
         self._mlx_lock = threading.Lock()
+        self._model_lock = threading.Lock()
 
         self._kv_by_nonce: Dict[str, list] = {}
         self._kv_last_seen: Dict[str, float] = {}
@@ -254,33 +255,41 @@ class ShardRuntime:
         unload model
         """
         try:
-            if self.model is None:
-                logger.info("Node %s: No model to unload", self.shard_id)
-                return ShardUnloadModelResponse(
-                    success=True,
-                    message="No model loaded",
-                )
+            with self._model_lock:
+                if self.model is None:
+                    logger.info("Node %s: No model to unload", self.shard_id)
+                    return ShardUnloadModelResponse(
+                        success=True,
+                        message="No model loaded",
+                    )
 
-            logger.info("Node %s: Unloading model", self.shard_id)
+                logger.info("Node %s: Unloading model", self.shard_id)
 
-            # Clear model and cache
-            self.model = None
-            self.cache = None
-            self.model_metadata = None
-            self.assigned_layers = []
-            self.model_path = None
-            self._assigned_sorted = []
-            self._assigned_set = set()
+                # Drain queue
+                while not self.activation_recv_queue.empty():
+                    try:
+                        self.activation_recv_queue.get_nowait()
+                    except queue.Empty:
+                        break
 
-            self.policy.clear()
-            self.policy = NoopPolicy(runtime=self, resident_windows=1)
-            self.input_pool = None
-            self.output_pool = None
+                # Clear model and cache
+                self.model = None
+                self.cache = None
+                self.model_metadata = None
+                self.assigned_layers = []
+                self.model_path = None
+                self._assigned_sorted = []
+                self._assigned_set = set()
 
-            # Run garbage collection to free memory
-            gc.collect()
-            mx.clear_cache()
-            logger.info("Node %s: Model unloaded successfully", self.shard_id)
+                self.policy.clear()
+                self.policy = NoopPolicy(runtime=self, resident_windows=1)
+                self.input_pool = None
+                self.output_pool = None
+
+                # Run garbage collection to free memory
+                gc.collect()
+                mx.clear_cache()
+                logger.info("Node %s: Model unloaded successfully", self.shard_id)
 
             return ShardUnloadModelResponse(
                 success=True,
