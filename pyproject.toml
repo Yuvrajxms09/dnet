@@ -59,3 +59,24 @@ log_cli = true
 [tool.ruff]
 exclude = [".git", ".venv", "__pycache__", "build", "dist", "lib"]
 line-length = 88                                                   # black
+
+[tool.mypy]
+python_version = "3.12"
+show_error_codes = true
+pretty = true
+color_output = true
+warn_unused_ignores = true
+exclude = ["^lib/", "^tests/",  "^src/dnet/compression(/|$)", "^src/dnet/proto"]
+explicit_package_bases = true
+mypy_path = ["src"]
+
+[[tool.mypy.overrides]]
+ module = [
+  "distilp", "distilp.*",
+  "dnet_p2p", "dnet_p2p.",
+  "grpc", "grpc.*",
+  "grpc_tools", "grpc_tools.",
+  "huggingface_hub", "huggingface_hub.*",
+  "requests",
+  ]
+ignore_missing_imports = true

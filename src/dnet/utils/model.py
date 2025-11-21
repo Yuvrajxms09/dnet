@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, IO
 
 import mlx.core as mx
 import numpy as np
@@ -20,7 +20,7 @@ from mlx_lm.models import cache
 from mlx_lm.models.cache import RotatingKVCache
 
 from .serialization import safetensor_dtype_map
-from ..ring.model.base import BaseRingModel
+from dnet.core.models.base import BaseRingModel
 from .logger import logger
 
 # REGEX associated with LLM
@@ -224,7 +224,7 @@ class MappedFile:
         # Prefer private copy-on-write mapping so the buffer is writable from
         # Python's perspective (needed for ctypes.from_buffer) without touching disk
         if access == mmap.ACCESS_COPY:
-            self.file = open(file_path, "rb")
+            self.file: IO[bytes] = open(file_path, "rb")
         else:
             # Fallback path
             self.file = open(file_path, "r+b")
@@ -233,10 +233,8 @@ class MappedFile:
         try:
             self.mmap = mmap.mmap(self.file.fileno(), 0, access=access)
         except Exception:
-            # Fallback to copy-on-write if requested access fails
             self.mmap = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_COPY)
 
-        # Get memory address for madvise
         # from_buffer requires a writable view; ACCESS_COPY satisfies this
         self.base_addr = ctypes.addressof(ctypes.c_char.from_buffer(self.mmap))
 
@@ -420,7 +418,7 @@ def get_safetensor_details(path) -> Dict[str, TensorInfo]:
 
 
 def get_model_metadata(model_path) -> ModelMetadata:
-    path = get_model_path(model_path)
+    path, repo_id = get_model_path(model_path)
 
     # Handle case where get_model_path returns a tuple (mlx-lm version compatibility)
     if isinstance(path, tuple):
@@ -481,7 +479,7 @@ def make_cache(
     # RotatingKVCache for sliding-attention layers). Fallback to mlx-lm default.
     try:
         if hasattr(model, "make_cache"):
-            caches = model.make_cache()  # type: ignore[attr-defined]
+            caches = model.make_cache()
         else:
             caches = cache.make_prompt_cache(model)
     except Exception:

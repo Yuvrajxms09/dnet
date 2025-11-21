@@ -1,36 +1,34 @@
-"""CLI entry point for dnet ring shard server."""
-
 import asyncio
-import random
 import signal
+from socket import gethostname
+from secrets import token_hex
+from dnet_p2p import AsyncDnetP2P
+from dnet.shard.adapters.ring import RingAdapter
+from dnet.shard.runtime import ShardRuntime
+from dnet.shard.shard import Shard
+from dnet.shard.http_api import HTTPServer as ShardHTTPServer
+from dnet.shard.grpc_servicer import GrpcServer as ShardGrpcServer
+from dnet.utils.logger import logger
 from argparse import ArgumentParser
 
-from dnet.utils.logger import logger
-from dnet.ring.shard import RingShardNode
 
+async def serve(grpc_port: int, http_port: int, queue_size: int = 128) -> None:
+    shard_id = 1  # In real usage, this would be set via CLI or config
+    hostname = gethostname()
 
-async def serve(
-    grpc_port: int,
-    http_port: int,
-    queue_size: int = 128,
-) -> None:
-    """Serve the shard node.
+    loop = asyncio.get_running_loop()
+    discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
+    # Core
+    runtime = ShardRuntime(shard_id=hostname, queue_size=queue_size)
+    adapter = RingAdapter(runtime=runtime, discovery=discovery)
+    shard = Shard(shard_id=shard_id, adapter=adapter)
 
-    Args:
-        grpc_port: gRPC server port
-        http_port: HTTP server port
-        queue_size: Activation queue size
-    """
-    node_id = random.randint(0, 1000)
-    shard_node = RingShardNode(
-        node_id=node_id,
-        grpc_port=grpc_port,
-        http_port=http_port,
-        queue_size=queue_size,
+    # Servers
+    grpc_server = ShardGrpcServer(shard=shard, grpc_port=grpc_port)
+    http_server = ShardHTTPServer(
+        shard=shard, http_port=http_port, grpc_port=grpc_port, discovery=discovery
     )
 
-    # Handle shutdown signals gracefully
-    loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
     def _signal_handler(*_: object) -> None:
@@ -40,9 +38,35 @@ async def serve(
     loop.add_signal_handler(signal.SIGINT, _signal_handler)
     loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
-    await shard_node.start(shutdown_trigger=stop_event.wait)
+    # Start servers first
+    await grpc_server.start()
+    await http_server.start(stop_event.wait)
+
+    # Start discovery
+    # TODO: optionally take shard name from CLI
+    instance = f"shard-{token_hex(4)}-{hostname}"
+    discovery.create_instance(
+        instance,
+        http_port,
+        grpc_port,
+        is_manager=False,  # shard is never a manager
+    )
+    await discovery.async_start()
+
+    # Finally start shard
+    await shard.start(loop)
     await stop_event.wait()
-    await shard_node.shutdown()
+    await shard.shutdown()
+    if discovery.is_running():
+        await discovery.async_stop()
+        await discovery.async_free_instance()
+        logger.info(f"Stopped discovery service for node {shard_id}")
+    else:
+        logger.warning(f"Discovery service for node {shard_id} was not running")
+    closed = await http_server.wait_closed(timeout=5.0)
+    if not closed:
+        await http_server.shutdown()
+    await grpc_server.shutdown()
 
 
 def main() -> None:

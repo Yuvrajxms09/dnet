@@ -14,7 +14,6 @@ from typing import Dict, Iterable, List, Tuple
 import mlx.core as mx
 
 from .model import ModelMetadata, get_model_metadata, load_weight, MappedFile
-from .logger import logger
 import json
 import time
 
@@ -79,7 +78,7 @@ def repack_per_layer(
     model_path: str,
     assigned_layers: List[int],
     out_root: Path,
-) -> Path:
+) -> None:
     """Repack only the assigned layers into per-layer safetensors under out_root.
 
     Returns the directory containing repacked files (out_root).
@@ -91,7 +90,6 @@ def repack_per_layer(
 
     mapped_files: Dict[str, MappedFile] = {}
     written = 0
-    t0 = time.perf_counter()
     try:
         for lid in sorted(set(int(i) for i in assigned_layers)):
             layer_info = md.weight_info.get(int(lid), {})
@@ -151,22 +149,6 @@ def repack_per_layer(
                 mf.file.close()
             except Exception:
                 pass
-    try:
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-        logger.info(
-            "[REPACK] model=%s layers=%s..%s count=%s out=%s ms=%.1f",
-            model_path,
-            int(min(assigned_layers)) if assigned_layers else -1,
-            int(max(assigned_layers)) if assigned_layers else -1,
-            int(len(set(assigned_layers))),
-            str(out_root),
-            dt_ms,
-        )
-    except Exception:
-        pass
-    if written:
-        print(f"[repack] Wrote {written} per-layer file(s) under {out_root}")
-    return out_root
 
 
 def ensure_repacked_for_layers(
@@ -178,7 +160,7 @@ def ensure_repacked_for_layers(
     """
     safe = _sanitize_model_id(model_id)
     layer_hash = _hash_layers(assigned_layers)
-    base_dir = Path(os.getenv("DNET_REPACK_DIR", "repacked_models"))
+    base_dir = Path(os.getenv("DNET_REPACK_DIR", "~/.dria/dnet/repacked_layers"))
     out_root = base_dir / safe / layer_hash
     # Quick existence check: if at least one expected file exists, assume done
     expected = (
@@ -235,7 +217,7 @@ def delete_repacked_layers(
     import shutil
 
     if base_dir is None:
-        base_dir = os.getenv("DNET_REPACK_DIR", "repacked_models")
+        base_dir = os.getenv("DNET_REPACK_DIR", "~/.dria/dnet/repacked_layers")
     base = Path(base_dir)
     removed: list[str] = []
 

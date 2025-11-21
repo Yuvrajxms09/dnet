@@ -1,23 +1,22 @@
-"""CLI entry point for dnet ring API server."""
+"""CLI entry point for dnet ring API server (new architecture, decoupled)."""
 
 import asyncio
 import signal
 from argparse import ArgumentParser
+from secrets import token_hex
+from socket import gethostname
 
 from dnet.utils.logger import logger
-from dnet.ring.api import RingApiNode
+from dnet_p2p import AsyncDnetP2P
+from dnet.api.cluster import ClusterManager
+from dnet.api.model_manager import ModelManager
+from dnet.api.inference import InferenceManager
+from dnet.api.http_api import HTTPServer as ApiHTTPServer
+from dnet.api.grpc_servicer import GrpcServer as ApiGrpcServer
+from dnet.utils.banner import print_startup_banner
 
 
 async def serve(http_port: int, grpc_port: int) -> None:
-    """Serve the API node.
-
-    Args:
-        http_port: HTTP server port
-        grpc_port: gRPC callback port
-    """
-    api_node = RingApiNode(http_port=http_port, grpc_port=grpc_port)
-
-    # Handle shutdown signals gracefully
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
@@ -28,37 +27,64 @@ async def serve(http_port: int, grpc_port: int) -> None:
     loop.add_signal_handler(signal.SIGINT, _signal_handler)
     loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
-    await api_node.start(shutdown_trigger=stop_event.wait)
+    print_startup_banner(tag="api")
+    # Discovery
+    discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
+    node_id = f"api-{token_hex(4)}-{gethostname()}"
+    discovery.create_instance(node_id, http_port, grpc_port, is_manager=True)
+    await discovery.async_start()
+
+    # Components
+    from dnet.api.strategies.ring import RingStrategy
+
+    strategy = RingStrategy()  # ContextParallelStrategy()
+
+    cluster_manager = ClusterManager(discovery, solver=strategy.solver)
+    model_manager = ModelManager()
+    inference_manager = InferenceManager(
+        cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
+    )
+
+    # Servers
+    grpc_server = ApiGrpcServer(
+        grpc_port=grpc_port, inference_manager=inference_manager
+    )
+    http_server = ApiHTTPServer(
+        http_port=http_port,
+        cluster_manager=cluster_manager,
+        inference_manager=inference_manager,
+        model_manager=model_manager,
+        node_id=node_id,
+    )
+
+    await grpc_server.start()
+    await http_server.start(shutdown_trigger=stop_event.wait)
+
     await stop_event.wait()
-    await api_node.shutdown()
+
+    # Shutdown
+    closed = await http_server.wait_closed(timeout=5.0)
+    if not closed:
+        await http_server.shutdown()
+    await grpc_server.shutdown()
+    if discovery.is_running():
+        await discovery.async_stop()
+        await discovery.async_free_instance()
 
 
 def main() -> None:
-    """Run dnet ring API server.
-
-    The API server runs without a preloaded model. Use the following endpoints:
-    - POST /v1/prepare_topology - Discover devices and solve for layer distribution
-    - POST /v1/load_model - Load model on shards with prepared topology
-    - POST /v1/chat/completions - Generate chat completions
-    """
-    ap = ArgumentParser(description="dnet ring API server")
+    ap = ArgumentParser(description="dnet ring API server (new architecture)")
     ap.add_argument(
-        "-p",
-        "--http-port",
-        type=int,
-        required=True,
-        help="HTTP server port",
+        "-p", "--http-port", type=int, required=True, help="HTTP server port"
     )
     ap.add_argument(
-        "-g",
-        "--grpc-port",
-        type=int,
-        required=True,
-        help="gRPC callback port",
+        "-g", "--grpc-port", type=int, required=True, help="gRPC callback port"
     )
     args = ap.parse_args()
 
-    logger.info(f"Starting API server on HTTP port {args.http_port}")
+    logger.info(
+        f"Starting API server on HTTP port {args.http_port}, gRPC port {args.grpc_port}"
+    )
     asyncio.run(serve(args.http_port, args.grpc_port))
 
 

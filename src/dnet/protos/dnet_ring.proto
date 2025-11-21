@@ -34,6 +34,16 @@ message ActivationRequest {
     int64 timestamp = 3;
     string node_origin = 4;
     string callback_url = 5;
+    bool logprobs = 6;
+    int32 top_logprobs = 7;
+
+    // Decoding parameters
+    optional float temperature = 8;
+    optional float top_p = 9;
+    optional int32 top_k = 10;
+    optional float repetition_penalty = 11;
+    optional float min_p = 12;
+    optional int32 min_tokens_to_keep = 13;
 }
 
 // Response message for activation sending
