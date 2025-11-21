@@ -329,7 +329,6 @@ class HTTPServer:
                 removed = delete_repacked_layers(
                     model_id=model_id,
                     all_flag=all_flag,
-                    base_dir=os.getenv("DNET_REPACK_DIR", "repacked_models"),
                     current_model_path=self.shard.runtime.model_path,
                 )
                 return JSONResponse(content={"removed": list(removed)})

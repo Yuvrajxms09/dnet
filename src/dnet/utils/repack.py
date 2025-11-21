@@ -160,7 +160,7 @@ def ensure_repacked_for_layers(
     """
     safe = _sanitize_model_id(model_id)
     layer_hash = _hash_layers(assigned_layers)
-    base_dir = Path(os.getenv("DNET_REPACK_DIR", "repacked_models"))
+    base_dir = Path(os.getenv("DNET_REPACK_DIR", "~/.dria/dnet/repacked_layers"))
     out_root = base_dir / safe / layer_hash
     # Quick existence check: if at least one expected file exists, assume done
     expected = (
@@ -217,8 +217,7 @@ def delete_repacked_layers(
     import shutil
 
     if base_dir is None:
-        # TODO: change this to ~/.dria/dnet/
-        base_dir = os.getenv("DNET_REPACK_DIR", "repacked_models")
+        base_dir = os.getenv("DNET_REPACK_DIR", "~/.dria/dnet/repacked_layers")
     base = Path(base_dir)
     removed: list[str] = []
 

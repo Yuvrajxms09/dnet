@@ -65,7 +65,6 @@ class Shard:
         response = self.runtime.unload_model_core()
         if response.success and model_path:
             delete_repacked_layers(
-                base_dir=os.getenv("DNET_REPACK_DIR", "repacked_models"),
                 current_model_path=model_path,
             )
         return response
