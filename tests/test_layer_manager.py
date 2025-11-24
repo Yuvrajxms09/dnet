@@ -1,5 +1,6 @@
 """Tests: LayerManager file I/O, load to GPU, release, and config flags."""
 
+# ruff: noqa: E402
 import os
 import pytest
 import numpy as np

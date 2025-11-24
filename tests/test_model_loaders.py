@@ -1,5 +1,6 @@
 """Tests: model loader helpers reading real bytes (embeddings, norm, lm_head)."""
 
+# ruff: noqa: E402
 import numpy as np
 import pytest
 

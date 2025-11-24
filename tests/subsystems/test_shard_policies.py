@@ -1,5 +1,6 @@
 """Tests: Shard policy registry, make_policy, plan_policy, and helpers."""
 
+# ruff: noqa: E402
 import pytest
 
 mx = pytest.importorskip("mlx.core")

@@ -1,5 +1,6 @@
 """Tests: FitInMemoryPolicy and OffloadPolicy configure/process behaviors."""
 
+# ruff: noqa: E402
 import asyncio
 import pytest
 
@@ -125,7 +126,6 @@ def test_fit_process_end_shard_sampling(monkeypatch):
 
 def test_offload_config_sets_mode_and_patches_repack(monkeypatch):
     rt = FakeRuntimeForPolicy(assigned_layers=[1, 2, 3])
-    called = {"repack": None, "meta": None}
 
     monkeypatch.setattr(
         "dnet.shard.policies.offload.ensure_repacked_for_layers",

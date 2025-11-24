@@ -1,5 +1,6 @@
 """Tests: tensor helpers to_bytes and bytes_to_tensor roundtrips/casting."""
 
+# ruff: noqa: E402
 import pytest
 import numpy as np
 

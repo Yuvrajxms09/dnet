@@ -1,8 +1,10 @@
 """Tests: LayerAwareMemoryPool per-layer alloc/stats, views, and input validation."""
 
+# ruff: noqa: E402
 import pytest
 
 mx = pytest.importorskip("mlx.core")
+
 from dnet.core.memory.memory_pool import LayerAwareMemoryPool
 
 pytestmark = [pytest.mark.core]

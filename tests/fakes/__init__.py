@@ -52,8 +52,58 @@ from .streams import FakeStreamAck, FakeStreamCall
 from .solver import FakeSolver, FakeBadSolver
 from .mp import FakeMPConn, FakeMPProc, FakeMPContext
 
+# explicit __all__ so ruff recognizes intentional re-exports
+__all__ = [
+    "FakeProps",
+    "FakeDiscovery",
+    "FakeTBConn",
+    "FakeClient",
+    "FakeResponse",
+    "FakeLatencyRequest",
+    "FakeProfileRequest",
+    "FakeLatencyResponse",
+    "FakeProfileResponse",
+    "FakeTokenizer",
+    "FakeTokenizerWithTemplate",
+    "FakeDetokenizer",
+    "FakeTokenResult",
+    "FakeStrategyAdapter",
+    "FakeModelManager",
+    "FakeInferenceManager",
+    "FakeModelProfile",
+    "FakeClusterManager",
+    "FakeGrpcServer",
+    "FakeChannel",
+    "FakeRingStub",
+    "FakeApiStub",
+    "FakeWeightSize",
+    "FakeModelMetadata",
+    "FakeRingModel",
+    "FakeLayerManagerForCache",
+    "patch_layer_manager_for_cache",
+    "FakeWeightCache",
+    "FakeRuntimeMinimal",
+    "FakeRuntimeForAdapter",
+    "FakeRuntimeForPolicy",
+    "FakeAdapter",
+    "FakeShard",
+    "FakePolicyPlan",
+    "FakePolicy",
+    "FakeSampler",
+    "FakeComputeModel",
+    "FakeStreamAck",
+    "FakeStreamCall",
+    "FakeSolver",
+    "FakeBadSolver",
+    "FakeMPConn",
+    "FakeMPProc",
+    "FakeMPContext",
+]
+
+""" ruff can't detect this
 __all__ = [
     name
     for name in globals().keys()
     if name.startswith("Fake") or name.endswith("layer_manager_for_cache")
 ]
+"""

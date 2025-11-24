@@ -1,5 +1,6 @@
 """Tests: DynamicMemoryPool allocation, release, and stats behavior."""
 
+# ruff: noqa: E402
 import time
 import pytest
 
@@ -73,7 +74,7 @@ def test_multi_buffer_eviction_failure():
     assert b1 is not None and b2 is not None
     p.release(b1)
     p.release(b2)
-    used_before = p.used_memory
+    # used_before = p.used_memory
     next_id_before = p.next_buffer_id
     res = p.allocate(900 * 1024, mx.float32)
     assert res is None
@@ -95,13 +96,11 @@ def test_evicts_oldest_free_buffer():
     b1 = pool.allocate(200 * 1024, mx.float32)
     assert b1 is not None
     pool.release(b1)
-    s1 = pool.buffer_info[b1].size
     time.sleep(0.01)
     b2 = pool.allocate(400 * 1024, mx.float32)
     assert b2 is not None
     pool.release(b2)
-    s2 = pool.buffer_info[b2].size
-    used_before = pool.used_memory
+    # used_before = pool.used_memory
     big = pool.allocate(500 * 1024, mx.float32)
     assert big is not None
     s_big = pool.buffer_info[big].size
@@ -142,7 +141,7 @@ def test_allocate_invalid_arguments():
     assert p.get_buffer(0) is None
     b = p.allocate(128, mx.float32)  # type: ignore
     with pytest.raises(Exception):
-        v = p.get_buffer_view(b, (2, "x"))  # type: ignore
+        _ = p.get_buffer_view(b, (2, "x"))  # type: ignore
 
 
 def test_post_release_access_denied_and_last_used_updates():

@@ -1,5 +1,6 @@
 """Tests: ActivationCodec serialize/deserialize for tokens/raw/compressed and errors."""
 
+# ruff: noqa: E402
 import pytest
 import numpy as np
 

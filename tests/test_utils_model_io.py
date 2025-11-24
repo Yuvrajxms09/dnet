@@ -1,5 +1,6 @@
 """Tests: utils.model I/O helpers that touch the filesystem and mmap."""
 
+# ruff: noqa: E402
 import json
 import numpy as np
 import pytest

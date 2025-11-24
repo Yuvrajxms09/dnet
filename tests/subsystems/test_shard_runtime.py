@@ -1,5 +1,6 @@
 """Tests: ShardRuntime init, load/unload core, KV cache, compute staging, reset."""
 
+# ruff: noqa: E402
 import time as _time
 import pytest
 

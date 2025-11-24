@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from pydantic import ValidationError
 
-mx = pytest.importorskip("mlx.core")
+pytest.importorskip("mlx.core")
 
 from dnet.api.inference import InferenceManager
 from dnet.api.models import ChatRequestModel, ChatMessage

@@ -1,5 +1,6 @@
 """Tests: WeightCache capacity, hit/miss, eviction, ref-counts, and release."""
 
+# ruff: noqa: E402
 import threading
 import pytest
 import time
