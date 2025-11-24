@@ -44,7 +44,11 @@ cuda = ["mlx[cuda]"]
 dnet-api = "cli.api:main"
 dnet-shard = "cli.shard:main"
 
-[dependency-groups]
+
+[project.optional-dependencies]
+mac = ["mlx"]
+cpu = ["mlx[cpu]"]
+cuda = ["mlx[cuda]"]
 dev = [
   "openai>=2.6.0", # for OpenAI compatibility tests
   "pytest>=8.4.2",
