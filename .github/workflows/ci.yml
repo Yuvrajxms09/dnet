@@ -46,7 +46,11 @@ jobs:
 
       - name: Sync dev dependencies
         run: |
-          uv sync --all-extras
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            uv sync --extra mac --extra dev
+          else
+            uv sync --extra cpu --extra dev
+          fi
 
       - name: Generate protobuf stubs
         run: |

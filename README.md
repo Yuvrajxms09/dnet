@@ -21,7 +21,7 @@
     <a href="https://discord.com/invite/XwxZFkpFuQ" target="_blank">
         <img alt="License: Apache-2.0" src="https://img.shields.io/badge/discord-Dria-5865F2.svg?logo=discord">
     </a>
-    
+
 </p>
 
 ## Installation
@@ -38,10 +38,34 @@ git clone --recurse-submodules https://github.com/firstbatchxyz/dnet.git
 uv --version
 ```
 
-After cloning the repository, simply run the following to setup everything:
+### Platform-specific MLX installation
+
+**dnet** supports MLX on multiple platforms, but MLX is never installed by default. You must select the correct MLX variant for your system:
+
+- **macOS (Apple Silicon):**
+
+  ```sh
+  uv sync --extra mac
+  ```
+
+- **CPU-only (Linux/Windows):**
+
+  ```sh
+  uv sync --extra cpu
+  ```
+
+- **CUDA (Linux with NVIDIA GPU):**
+
+  ```sh
+  uv sync --extra cuda
+  ```
+
+If you run just `uv sync`, MLX will NOT be installed. Always use the appropriate `--extra` flag for your platform.
+
+After syncing dependencies, generate protos:
 
 ```sh
-uv sync
+uv run ./scripts/generate_protos.py
 ```
 
 Finally, generate protos:
