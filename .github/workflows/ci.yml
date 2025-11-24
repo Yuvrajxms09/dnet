@@ -109,7 +109,7 @@ jobs:
 
       - name: Sync dev dependencies
         run: |
-          uv sync --group dev
+          uv sync --extra dev
 
       - name: Ensure compatible gRPC/protobuf versions
         run: |
