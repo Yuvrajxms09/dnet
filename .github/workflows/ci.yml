@@ -2,7 +2,7 @@ name: CI
 
 # NOTE: This workflow requires an SSH key to access private submodules.
 # Generate an SSH key and add it as a deploy key to each submodule repository,
-# then add the private key as a secret named 'SUBMODULE_SSH_KEY'.
+# then add the private key as a secret named 'CI_SSH_KEY'.
 
 on:
   push:
@@ -11,15 +11,19 @@ on:
     branches: [ main, master ]
 
 jobs:
-  checks:
-    runs-on: ubuntu-latest
+  matrix-checks:
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     env:
       PYTHONPATH: src
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup SSH for submodules
+      - name: Setup SSH agent for submodules
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.CI_SSH_KEY }}" > ~/.ssh/dnet_id_ed25519
@@ -53,7 +57,7 @@ jobs:
           uvx ruff check .
 
       - name: Run tests (pytest) via uv
-        if: runner.os == 'macOS'
+        if: matrix.os == 'macos-latest'
         run: |
           # currently, there are no tests, so we ignore exit code 5 (no tests collected)
           uv run pytest || ([ $? -eq 5 ] && echo "No tests collected, continuing..." && exit 0 || exit $?)
