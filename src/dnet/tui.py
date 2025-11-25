@@ -13,7 +13,6 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.spinner import Spinner
 from rich.table import Table
-from rich.align import Align
 
 from dnet.utils.banner import get_banner_text
 from dnet.utils.logger import logger as dnet_logger
@@ -45,8 +44,6 @@ class TUILogHandler(logging.Handler):
             self.log_queue.append(f"{style}{msg}[/]")
         except Exception:
             self.handleError(record)
-
-
 
 
 class DnetTUI:
@@ -91,23 +88,24 @@ class DnetTUI:
         )
 
     def _generate_logs(self) -> Panel:
-
         header_height = self.layout["header"].size or 3
         model_info_height = self.layout["model_info"].size or 3
         footer_height = self.layout["footer"].size or 3
-        
+
         total_height = self.console.size.height
-        body_layout_height = total_height - (header_height + model_info_height + footer_height)
-        
+        body_layout_height = total_height - (
+            header_height + model_info_height + footer_height
+        )
+
         available_lines = max(1, body_layout_height - 4)
-        
+
         visible_logs = list(self.log_queue)[-available_lines:]
         log_text = "\n".join(visible_logs)
-        
+
         text = Text.from_markup(log_text)
         text.no_wrap = True
         text.overflow = "ellipsis"
-        
+
         return Panel(
             text,
             title="Logs",
