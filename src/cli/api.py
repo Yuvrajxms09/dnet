@@ -27,40 +27,58 @@ async def serve(http_port: int, grpc_port: int) -> None:
     loop.add_signal_handler(signal.SIGINT, _signal_handler)
     loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
-    print_startup_banner(tag="api")
-    # Discovery
-    discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
-    node_id = f"api-{token_hex(4)}-{gethostname()}"
-    discovery.create_instance(node_id, http_port, grpc_port, is_manager=True)
-    await discovery.async_start()
+    #print_startup_banner(tag="api")
+    
+    # TUI Setup
+    from dnet.tui import DnetTUI
+    tui = DnetTUI(title="DNET API Server")
+    tui_task = asyncio.create_task(tui.run(stop_event))
 
-    # Components
-    from dnet.api.strategies.ring import RingStrategy
+    try:
+        tui.update_status("Initializing Discovery...")
+        # Discovery
+        discovery = AsyncDnetP2P("lib/dnet-p2p/lib")
+        node_id = f"api-{token_hex(4)}-{gethostname()}"
+        discovery.create_instance(node_id, http_port, grpc_port, is_manager=True)
+        await discovery.async_start()
 
-    strategy = RingStrategy()  # ContextParallelStrategy()
+        # Components
+        from dnet.api.strategies.ring import RingStrategy
 
-    cluster_manager = ClusterManager(discovery, solver=strategy.solver)
-    model_manager = ModelManager()
-    inference_manager = InferenceManager(
-        cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
-    )
+        strategy = RingStrategy()  # ContextParallelStrategy()
 
-    # Servers
-    grpc_server = ApiGrpcServer(
-        grpc_port=grpc_port, inference_manager=inference_manager
-    )
-    http_server = ApiHTTPServer(
-        http_port=http_port,
-        cluster_manager=cluster_manager,
-        inference_manager=inference_manager,
-        model_manager=model_manager,
-        node_id=node_id,
-    )
+        cluster_manager = ClusterManager(discovery, solver=strategy.solver)
+        model_manager = ModelManager()
+        inference_manager = InferenceManager(
+            cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
+        )
 
-    await grpc_server.start()
-    await http_server.start(shutdown_trigger=stop_event.wait)
+        # Servers
+        grpc_server = ApiGrpcServer(
+            grpc_port=grpc_port, inference_manager=inference_manager
+        )
+        http_server = ApiHTTPServer(
+            http_port=http_port,
+            cluster_manager=cluster_manager,
+            inference_manager=inference_manager,
+            model_manager=model_manager,
+            node_id=node_id,
+        )
 
-    await stop_event.wait()
+        tui.update_status("Starting Servers...")
+        await grpc_server.start()
+        await http_server.start(shutdown_trigger=stop_event.wait)
+
+        tui.update_status(f"Running on HTTP:{http_port} gRPC:{grpc_port}")
+        await stop_event.wait()
+    finally:
+        # Ensure TUI task is cancelled or finished if we exit early
+        if not tui_task.done():
+            tui_task.cancel()
+            try:
+                await tui_task
+            except asyncio.CancelledError:
+                pass
 
     # Shutdown
     closed = await http_server.wait_closed(timeout=5.0)

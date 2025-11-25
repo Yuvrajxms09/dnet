@@ -13,7 +13,6 @@ import asyncio
 from .runtime import ShardRuntime
 from .adapters.base import TopologyAdapter
 from dnet.protos.dnet_ring_pb2 import ActivationRequest
-from dnet.utils.banner import print_startup_banner
 from .models import ShardLoadModelResponse, ShardUnloadModelResponse
 
 
@@ -25,7 +24,6 @@ class Shard:
         self.node_id = shard_id
         self.adapter = adapter
         self.runtime: ShardRuntime = adapter.runtime
-        print_startup_banner(tag="shard")
 
     async def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.runtime.attach_loop(loop)
