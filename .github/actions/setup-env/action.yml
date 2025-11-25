@@ -6,9 +6,6 @@ inputs:
     description: 'Python version to use for uv.'
     required: false
     default: '3.12'
-  ci_ssh_key:
-    description: 'SSH private key for submodules'
-    required: true
 
 runs:
   using: 'composite'
@@ -18,8 +15,6 @@ runs:
 
     - name: Setup SSH for Submodules
       uses: ./.github/actions/setup-ssh
-      with:
-        ci_ssh_key: ${{ inputs.ci_ssh_key }}
 
     - name: Install uv
       uses: astral-sh/setup-uv@v5
