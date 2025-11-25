@@ -29,7 +29,7 @@ def client():
     )
 
 
-def test_openai_completions(client):
+def test_openai_completions(client: OpenAI):
     """https://platform.openai.com/docs/api-reference/completions/create"""
     completion = client.completions.create(
         model=MODEL,
@@ -40,7 +40,7 @@ def test_openai_completions(client):
     print(completion)
 
 
-def test_openai_chat_completions(client):
+def test_openai_chat_completions(client: OpenAI):
     """https://platform.openai.com/docs/api-reference/chat/create"""
     chat_completion = client.chat.completions.create(
         messages=[
@@ -55,7 +55,7 @@ def test_openai_chat_completions(client):
     print(chat_completion)
 
 
-def test_openai_chat_completions_streaming(client):
+def test_openai_chat_completions_streaming(client: OpenAI):
     """https://platform.openai.com/docs/api-reference/chat/create (with streaming: true)"""
     chat_completion = client.chat.completions.create(
         messages=[
@@ -71,8 +71,7 @@ def test_openai_chat_completions_streaming(client):
     print(chat_completion)
 
 
-@pytest.mark.skip(reason="models endpoint not yet added")
-def test_openai_models(client):
+def test_openai_models(client: OpenAI):
     """https://platform.openai.com/docs/api-reference/models/list"""
     list_completion = client.models.list()
 
@@ -81,7 +80,7 @@ def test_openai_models(client):
 
 
 @pytest.mark.skip(reason="embeddings endpoint not yet added")
-def test_openai_embeddings(client):
+def test_openai_embeddings(client: OpenAI):
     """https://platform.openai.com/docs/api-reference/embeddings/create"""
     response = client.embeddings.create(
         model="text-embedding-ada-002",
