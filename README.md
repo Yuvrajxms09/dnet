@@ -193,7 +193,7 @@ PROFILE=0
 # Add other environment variables as needed
 ```
 
-The `.env` file is automatically loaded when running via `uv run` or using the provided Makefile targets. This ensures consistent configuration in both local development and CI environments.
+Please see `.env.example` for a complete example. The `.env` file is automatically loaded when running via `uv run` or using the provided Makefile targets. This ensures consistent configuration in both local development and CI environments.
 
 For more details, see the relevant sections in the Makefile and CI workflow.
 
