@@ -47,6 +47,26 @@ class TUILogHandler(logging.Handler):
             self.handleError(record)
 
 
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.segment import Segment
+
+class LogRenderer:
+    def __init__(self, log_queue: Deque[str]):
+        self.log_queue = log_queue
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        log_text = "\n".join(self.log_queue)
+        text = Text.from_markup(log_text)
+        lines = list(console.render_lines(text, options))
+        
+        height = options.height or options.max_height
+        if height and len(lines) > height:
+            lines = lines[-height:]
+            
+        for line in lines:
+            yield from line
+            yield Segment.line()
+
 class DnetTUI:
     """Manages the Rich TUI layout and updates."""
 
@@ -89,10 +109,8 @@ class DnetTUI:
         )
 
     def _generate_logs(self) -> Panel:
-        log_text = "\n".join(self.log_queue)
-        # Use Align(..., vertical="bottom") to ensure the latest logs are visible at the bottom
         return Panel(
-            Align(Text.from_markup(log_text), vertical="bottom"),
+            LogRenderer(self.log_queue),
             title="Logs",
             border_style="cyan",
             padding=(0, 1),
