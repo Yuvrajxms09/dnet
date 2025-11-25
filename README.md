@@ -68,15 +68,9 @@ After syncing dependencies, generate protos:
 uv run ./scripts/generate_protos.py
 ```
 
-Finally, generate protos:
-
-```sh
-uv run ./scripts/generate_protos.py
-```
-
 ## Usage
 
-**dnet** uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally.
+**dnet** uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally using [distilp](https://github.com/firstbatchxyz/distilp).
 
 1. [**Start Shards**](#running-a-shard): Launch shard nodes on each device.
 2. [**Start API**](#running-an-api): Launch the API node, one of the shards SHOULD reside in the same device.
@@ -84,11 +78,8 @@ uv run ./scripts/generate_protos.py
 4. [**Load Model**](#load-model): API instructs shards to load their assigned layers.
 5. [**Inference**](#chat-completions): Use `/v1/chat/completions` endpoint for generation.
 
-Supported models are given below:
+See [catalog](https://raw.githubusercontent.com/firstbatchxyz/dnet/refs/heads/master/src/dnet/api/catalog.py?token=GHSAT0AAAAAADJ5TKOCRPUKW5MZ6Z7Y5W4Q2JFSUQQ) for supported models.
 
-- Qwen3
-- DeepSeek V2
-- MLX formats: `fp16`, `bf16`, 4-bit, 8-bit quantized
 
 ### Running a Shard
 
