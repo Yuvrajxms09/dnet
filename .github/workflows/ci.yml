@@ -13,10 +13,12 @@ on:
 jobs:
   matrix-checks:
     uses: ./.github/workflows/matrix-checks.yml
+    secrets: inherit
     with:
       python_version: '3.12'
 
   tests-macos:
     uses: ./.github/workflows/tests-macos.yml
+    secrets: inherit
     with:
       python_version: '3.12'
