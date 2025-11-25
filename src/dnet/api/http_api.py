@@ -106,9 +106,13 @@ class HTTPServer:
         )
 
     async def get_models(self) -> ListModelsResponseModel:
-        return [
-            ModelObject(**m.model_dump()) for m in self.model_manager.available_models
-        ]
+        return ListModelsResponseModel(
+            object="list",
+            data=[
+                ModelObject(**m.model_dump())
+                for m in self.model_manager.available_models
+            ],
+        )
 
     async def chat_completions(self, req: ChatRequestModel):
         if not self.model_manager.current_model_id:
