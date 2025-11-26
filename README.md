@@ -24,6 +24,27 @@
 
 </p>
 
+## Features
+
+- **Execution**
+  - **Pipelined-ring strategy**: Run models larger than total cluster memory through compute/I/O overlap
+  - **UMA specific**: Designed for Apple Silicon's unified memory for efficient layer swapping
+  - **OpenAI-Compatible**: Drop-in `/v1/chat/completions` endpoint
+
+- **Cluster Management**
+  - **Automatic Discovery**: Nodes find each other; no manual topology configuration
+  - **Thunderbolt Detection**: Automatically utilizes Thunderbolt for high-bandwidth inter-device communication
+
+- **Intelligent Distribution**
+  - **Device Profiling**: Measures FLOPs, memory, and inter-device latency per node
+  - **Model Profiling**: Analyzes compute and memory requirements per layer
+  - **Heterogeneity-Aware Solver**: Topology aware assignment that accounts for device capability, network speed, KV cache size, and disk speed
+
+- **Planned**
+  - 🚧 Context parallelism for long sequences
+  - 🚧 Tensor parallelism for throughput
+  - 🚧 Unified backend for NVIDIA, AMD and Apple Silicon
+
 ## Installation
 
 **dnet** requires several submodules, which can all be cloned with the following command:
@@ -38,35 +59,18 @@ git clone --recurse-submodules https://github.com/firstbatchxyz/dnet.git
 uv --version
 ```
 
-### Platform-specific MLX installation
+**dnet** currently only supports MLX on Apple Silicon. To install, run:
 
-**dnet** supports MLX on multiple platforms, but MLX is never installed by default. You must select the correct MLX variant for your system:
-
-- **macOS (Apple Silicon):**
-
-  ```sh
-  uv sync --extra mac
-  ```
-
-- **CPU-only (Linux/Windows):**
-
-  ```sh
-  uv sync --extra cpu
-  ```
-
-- **CUDA (Linux with NVIDIA GPU):**
-
-  ```sh
-  uv sync --extra cuda
-  ```
-
-If you run just `uv sync`, MLX will NOT be installed. Always use the appropriate `--extra` flag for your platform.
+```sh
+uv sync --extra mac
+```
 
 After syncing dependencies, generate protos:
 
 ```sh
 uv run ./scripts/generate_protos.py
 ```
+**dnet** supports make commands, run `make protos` to generate protos.
 
 ## Usage
 
@@ -78,7 +82,28 @@ uv run ./scripts/generate_protos.py
 4. [**Load Model**](#load-model): API instructs shards to load their assigned layers.
 5. [**Inference**](#chat-completions): Use `/v1/chat/completions` endpoint for generation.
 
-See [catalog](https://raw.githubusercontent.com/firstbatchxyz/dnet/refs/heads/master/src/dnet/api/catalog.py?token=GHSAT0AAAAAADJ5TKOCRPUKW5MZ6Z7Y5W4Q2JFSUQQ) for supported models.
+See [catalog](https://github.com/firstbatchxyz/dnet/blob/master/src/dnet/api/catalog.py) for supported models.
+
+![image](https://github.com/firstbatchxyz/dnet/blob/8a1457f907f0d38555500d3d060efbe3f5438453/dnet-tui-ss.png?raw=true)
+
+### Viewing dnet TUI
+
+dnet comes with a [TUI](https://github.com/firstbatchxyz/dnet-tui) built in Rust, providing a neat interface for you to load models, view the topology and chat with the loaded models.
+
+Install the TUI with:
+
+```sh
+cargo install https://github.com/firstbatchxyz/dnet-tui.git
+```
+
+Then simply run with:
+
+```sh
+dnet-tui
+```
+
+For more details, check out the [repository](https://github.com/firstbatchxyz/dnet-tui).
+
 
 
 ### Running a Shard
@@ -87,6 +112,12 @@ Start a shard node with gRPC and HTTP ports:
 
 ```sh
 uv run dnet-shard --http-port 8081 --grpc-port 58081
+```
+
+Each shard should be started on a different device and with a different port (try increment by one for each shard), like the following:
+
+```sh
+uv run dnet-shard --http-port 8082 --grpc-port 58082
 ```
 
 ### Running an API
@@ -170,6 +201,11 @@ curl http://localhost:8080/v1/devices \
 
 ## Testing
 
+Before testing make sure to install dev path
+```
+uv sync --extra dev --extra mac
+```
+
 You can run Pytest tests via:
 
 ```sh
@@ -184,6 +220,9 @@ uvx ruff check
 
 # format
 uvx ruff format --diff
+
+# typecheck
+uv run mypy .
 ```
 
 > [!TIP]
