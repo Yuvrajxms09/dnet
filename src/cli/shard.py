@@ -19,12 +19,12 @@ async def serve(
     shard_name: str | None = None,
 ) -> None:
     shard_id = 1  # In real usage, this would be set via CLI or config
-    hostname = gethostname()
 
     # Resolve instance name: use provided shard_name or fall back to auto-generated
     if shard_name:
         instance_name = shard_name
     else:
+        hostname = gethostname()
         instance_name = f"shard-{token_hex(4)}-{hostname}"
 
     loop = asyncio.get_running_loop()
