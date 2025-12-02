@@ -1,6 +1,6 @@
 UV_RUN = uv run --env-file .env
 
-.PHONY: run #         | Run
+.PHONY: run #          | Run
 run:
 	$(UV_RUN)
 
@@ -49,6 +49,7 @@ reset-sync:
 
 .PHONY: init #         | One-time setup: install hooks and generate protos
 init:
+		$(MAKE) ensure-env
 		$(MAKE) hooks-install
 		$(MAKE) protos
 
@@ -63,6 +64,15 @@ hooks-run:
 .PHONY: hooks-update # | Update hook versions
 hooks-update:
 		uv run pre-commit autoupdate
+
+.PHONY: ensure-env #   | Ensure .env exists
+ensure-env:
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo 'Copied .env.example to .env'; \
+	else \
+		echo '.env already exists'; \
+	fi
 
 .PHONY: help #         | List targets
 help:
