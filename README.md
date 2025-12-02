@@ -7,7 +7,7 @@
     dnet
   </h1>
   <p align="center">
-    <i>Distributed LLM inference on MLX using ring topology.</i>
+    <i>Distributed LLM Inference for Apple Silicon Clusters</i>
   </p>
 </p>
 
@@ -24,6 +24,34 @@
 
 </p>
 
+**RUN BIG MODELS | RUN LONG CONTEXT | MAXIMIZE UTILIZATION**
+
+**dnet** runs LLMs across Apple Silicon devices. Modular execution strategies, automatic device profiling, drop-in OpenAI API.
+
+## Features
+
+- **Execution**
+
+  - **No Memory Ceiling**: Run models that exceed total cluster memory—compute/I/O overlap keeps data flowing
+  - **UMA specific**: Designed for Apple Silicon's unified memory for efficient layer swapping
+  - **OpenAI-Compatible**: Drop-in `/v1/chat/completions` endpoint
+
+- **Cluster Management**
+
+  - **Automatic Discovery**: Nodes find each other; no manual topology configuration
+  - **Thunderbolt Detection**: Automatically utilizes Thunderbolt for high-bandwidth inter-device communication
+
+- **Workload Assignment**
+
+  - **Device Profiling**: Measures FLOPs, memory, and inter-device latency per node
+  - **Model Profiling**: Analyzes compute and memory requirements per layer
+  - **Heterogeneity-Aware Solver**: Topology aware assignment that accounts for device capability, network speed, KV cache size, and disk speed
+
+- ✅ **[Pipelined-ring](https://arxiv.org/pdf/2504.08791)** - Run >32B 8-bit models across devices with insufficient total memory
+- 🚧 **Long context** - Make >128K context windows a reality for home clusters
+- 🚧 **High throughput** - Maximize throughput via tensor parallelism
+- 🚧 **Unified backend** - A single optimized backend for Apple Silicon, NVIDIA, and AMD (currently Apple Silicon only, via MLX)
+
 ## Installation
 
 **dnet** requires several submodules, which can all be cloned with the following command:
@@ -38,45 +66,51 @@ git clone --recurse-submodules https://github.com/firstbatchxyz/dnet.git
 uv --version
 ```
 
-### Platform-specific MLX installation
-
-**dnet** supports MLX on multiple platforms, but MLX is never installed by default. You must select the correct MLX variant for your system:
-
-- **macOS (Apple Silicon):**
-
-  ```sh
-  uv sync --extra mac
-  ```
-
-- **CPU-only (Linux/Windows):**
-
-  ```sh
-  uv sync --extra cpu
-  ```
-
-- **CUDA (Linux with NVIDIA GPU):**
-
-  ```sh
-  uv sync --extra cuda
-  ```
-
-If you run just `uv sync`, MLX will NOT be installed. Always use the appropriate `--extra` flag for your platform.
-
-After syncing dependencies, generate protos:
+**dnet** currently only supports MLX on Apple Silicon. To install, run:
 
 ```sh
-uv run ./scripts/generate_protos.py
+uv sync --extra mac
 ```
 
-Finally, generate protos:
+After syncing dependencies, run the one-time setup to install Git hooks and generate protos:
 
 ```sh
-uv run ./scripts/generate_protos.py
+make init
 ```
+
+This will:
+
+- Install pre-commit hooks for automatic code quality checks
+- Generate protobuf files
+
+The pre-commit hooks will automatically run ruff formatting, ruff linting, and mypy type checking before each commit.
+
+## Development
+
+### Git Hooks
+
+This project uses [pre-commit](https://pre-commit.com/) to ensure code quality. Hooks are installed automatically when you run `make init`, but you can also manage them manually:
+
+```sh
+# Install hooks
+make hooks-install
+
+# Run all hooks on all files
+make hooks-run
+
+# Update hook versions
+make hooks-update
+```
+
+The hooks will run automatically on `git commit`, checking:
+
+- Code formatting (ruff format)
+- Linting (ruff check)
+- Type checking (mypy)
 
 ## Usage
 
-**dnet** uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally.
+**dnet** uses a **dynamic topology** approach where nodes start without models, then the API discovers devices and distributes layers optimally using [distilp](https://github.com/firstbatchxyz/distilp).
 
 1. [**Start Shards**](#running-a-shard): Launch shard nodes on each device.
 2. [**Start API**](#running-an-api): Launch the API node, one of the shards SHOULD reside in the same device.
@@ -84,11 +118,27 @@ uv run ./scripts/generate_protos.py
 4. [**Load Model**](#load-model): API instructs shards to load their assigned layers.
 5. [**Inference**](#chat-completions): Use `/v1/chat/completions` endpoint for generation.
 
-Supported models are given below:
+See [catalog](https://github.com/firstbatchxyz/dnet/blob/master/src/dnet/api/catalog.py) for supported models.
 
-- Qwen3
-- DeepSeek V2
-- MLX formats: `fp16`, `bf16`, 4-bit, 8-bit quantized
+![image of dnet TUI](./misc/dnet-tui-ss.png)
+
+### Viewing dnet TUI
+
+dnet comes with a [TUI](https://github.com/firstbatchxyz/dnet-tui) built in Rust, providing a neat interface for you to load models, view the topology and chat with the loaded models.
+
+Install the TUI with:
+
+```sh
+cargo install --git https://github.com/firstbatchxyz/dnet-tui.git
+```
+
+Then simply run with:
+
+```sh
+dnet-tui
+```
+
+For more details, check out the [repository](https://github.com/firstbatchxyz/dnet-tui).
 
 ### Running a Shard
 
@@ -97,6 +147,22 @@ Start a shard node with gRPC and HTTP ports:
 ```sh
 uv run dnet-shard --http-port 8081 --grpc-port 58081
 ```
+
+Each shard should be started on a different device and with a different port (try increment by one for each shard), like the following:
+
+```sh
+uv run dnet-shard --http-port 8082 --grpc-port 58082
+```
+
+You can optionally specify a custom shard name for better identification in discovery, TUI, and logs:
+
+```sh
+uv run dnet-shard --http-port 8081 --grpc-port 58081 --shard-name my-shard-1
+```
+
+> [!WARNING]
+>
+> Each shard name must be unique within the same network. Using duplicate shard names will cause discovery conflicts and connectivity issues.
 
 ### Running an API
 
@@ -152,6 +218,8 @@ curl -X POST http://localhost:8080/v1/load_model \
   -d $OUTPUT_FROM_PREPARE_TOPOLOGY
 ```
 
+![a shard with a loaded model](./misc/dnet-shard-ss.png)
+
 #### Chat Completions
 
 Generate text using the loaded model:
@@ -199,26 +267,38 @@ For more details, see the relevant sections in the Makefile and CI workflow.
 
 ## Testing
 
+Before testing make sure to install dev path
+
+```
+uv sync --extra dev --extra mac
+```
+
 You can run Pytest tests via:
 
 ```sh
 uv run pytest -v
 ```
 
-You can check linting and formatting via Ruff:
-
-```sh
-# lint
-uvx ruff check
-
-# format
-uvx ruff format --diff
-```
+For code quality checks (linting, formatting, type checking), see the [Development](#development) section above.
 
 > [!TIP]
 >
 > If you are using VsCode, we have prepared [tasks](./.vscode/tasks.json) that you can run easily from the <kbd> Command Palette > Tasks: Run Task </kbd>.
 
+## Acknowledgements
+
+**dnet** is built on top of [MLX](https://github.com/ml-explore/mlx) and inspired by pioneering work in distributed inference:
+
+**PRIMA.CPP**: [Prima.cpp: Fast 30-70B LLM Inference on Heterogeneous and Low-Resource Home Clusters](https://arxiv.org/abs/2504.08791)
+
+**Exo**: [Run your own AI cluster at home with everyday devices](https://github.com/exo-explore/exo)
+
+**Petals**: [Collaborative Inference for Large Language Models](https://github.com/bigscience-workshop/petals)
+
 ## License
 
 You can find the license [here](./LICENSE).
+
+## Cite
+
+If you have used this work please feel free to [cite](./CITATION.cff) us!

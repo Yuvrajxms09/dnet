@@ -291,7 +291,13 @@ class ModelObjectExtended(ModelObject):
     quantization: str  # quantization format
 
 
-type ListModelsResponseModel = list[ModelObject]
+class ListModelsResponseModel(BaseModel):
+    """Response model for listing available models."""
+
+    object: Literal["list"] = "list"
+    data: List[ModelObject]
+
+
 type RetrieveModelResponseModel = ModelObject
 
 
