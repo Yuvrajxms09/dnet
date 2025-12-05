@@ -44,6 +44,6 @@ jobs:
         run: make lint
 
       - name: Run tests (pytest)
-        if: ${{ matrix.os == 'macthese2.metal' }}
+        if: ${{ matrix.os == 'mac2.metal' }}
         run: |
           make test || ([ $? -eq 5 ] && echo "No tests collected, continuing..." && exit 0 || exit $?)
