@@ -41,15 +41,19 @@ jobs:
 
       - name: Start shard server
         run: |
-          uv run dnet-shard --http-port 8081 --grpc-port 58081 &
-          echo "SHARD_PID=$!" >> $GITHUB_ENV
+          uv run dnet-shard --http-port 8081 --grpc-port 58081 > shard.log 2>&1 &
           sleep 5
+          SHARD_PID=$(lsof -ti:8081)
+          echo "SHARD_PID=$SHARD_PID" >> $GITHUB_ENV
+          echo "Shard started with PID $SHARD_PID"
 
       - name: Start API server
         run: |
-          uv run dnet-api --http-port 8080 --grpc-port 58080 &
-          echo "API_PID=$!" >> $GITHUB_ENV
+          uv run dnet-api --http-port 8080 --grpc-port 58080 > api.log 2>&1 &
           sleep 5
+          API_PID=$(lsof -ti:8080)
+          echo "API_PID=$API_PID" >> $GITHUB_ENV
+          echo "API started with PID $API_PID"
 
       - name: Wait for servers to be healthy
         run: |

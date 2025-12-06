@@ -8,6 +8,10 @@ Usage (with servers running):
 
 Usage (standalone - starts servers automatically):
     uv run pytest tests/integration/test_model_catalog.py -v -x --start-servers
+
+Usage (in CI - expects servers started externally):
+    # Servers started by workflow steps
+    uv run pytest tests/integration/test_model_catalog.py -m integration -v -x
 """
 
 import os
@@ -44,7 +48,7 @@ def wait_for_health(url: str, timeout: float = HEALTH_CHECK_TIMEOUT) -> bool:
             if resp.status_code == 200:
                 return True
         except requests.RequestException:
-            pass
+            pass  # Server not ready yet, keep waiting
         time.sleep(1)
     return False
 
@@ -72,8 +76,8 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
             shard_cmd,
             cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             env={**os.environ, "PYTHONPATH": "src"},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         procs.append(shard_proc)
         time.sleep(2)  # Give shard time to start
@@ -92,8 +96,8 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
             api_cmd,
             cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             env={**os.environ, "PYTHONPATH": "src"},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         procs.append(api_proc)
 
