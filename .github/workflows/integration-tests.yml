@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       model_filter:
-        description: 'Optional model alias filter (e.g., "qwen3-4b" or leave empty for all)'
+        description: 'Model filter for tests (e.g. "qwen")'
         required: false
         default: ''
+  pull_request:
 
 jobs:
   integration-tests:
