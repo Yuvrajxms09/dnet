@@ -14,17 +14,21 @@ Usage (in CI - expects servers started externally):
     uv run pytest tests/integration/test_model_catalog.py -m integration -v -x
 """
 
+import logging
 import os
 import signal
 import subprocess
 import sys
 import time
-from typing import Generator
+from typing import Generator, Any
 
 import pytest
 import requests
 
 from dnet.api.catalog import get_ci_test_models
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Server configuration
 API_HTTP_PORT = 8080
@@ -80,7 +84,17 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
             stderr=subprocess.DEVNULL,
         )
         procs.append(shard_proc)
-        time.sleep(2)  # Give shard time to start
+        procs.append(shard_proc)
+
+        # Wait for shard health
+        if not wait_for_health(f"http://localhost:{SHARD_HTTP_PORT}", timeout=30):
+            shard_proc.terminate()
+            try:
+                shard_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                shard_proc.kill()
+                shard_proc.wait()
+            pytest.skip(f"Shard server not healthy at port {SHARD_HTTP_PORT}")
 
         # Start API
         api_cmd = [
@@ -106,7 +120,11 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
         # Cleanup if we started servers
         for p in procs:
             p.terminate()
-            p.wait(timeout=5)
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
         pytest.skip(f"Server not healthy at {BASE_URL}/health")
 
     yield
@@ -141,11 +159,15 @@ def prepare_and_load_model(model_id: str) -> None:
 
 
 def unload_model() -> None:
-    """Unload the current model."""
+    """Unload the current model.
+
+    Logs a warning if unloading fails, as this is a best-effort cleanup.
+    """
     try:
-        requests.post(f"{BASE_URL}/v1/unload_model", timeout=30)
-    except requests.RequestException:
-        pass  # Best effort
+        resp = requests.post(f"{BASE_URL}/v1/unload_model", timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning(f"Failed to unload model (best effort): {e}")
 
 
 # Get CI-testable models from catalog
@@ -158,7 +180,7 @@ CI_TEST_MODELS = get_ci_test_models()
     CI_TEST_MODELS,
     ids=[m["alias"] for m in CI_TEST_MODELS],
 )
-def test_model_inference(servers, model: dict) -> None:
+def test_model_inference(servers, model: dict[str, Any]) -> None:
     """Test that a model can load and produce meaningful inference output.
 
     This test:
