@@ -6,9 +6,10 @@ on:
 
 jobs:
   test-hostfile:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: mac2.metal
+    timeout-minutes: 15
     env:
+      PROJECT_ROOT: ${{ github.workspace }}
       PYTHONPATH: src
 
     steps:
@@ -21,6 +22,17 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           python_version: '3.12'
+
+      - name: Ensure compatible gRPC/protobuf versions
+        run: |
+          uv pip install --upgrade "grpcio>=1.75.1" "protobuf>=6.31.1"
+
+      - name: Kill processes on required ports
+        run: |
+          for port in 8080 8081 58080 58081; do
+            lsof -ti:$port | xargs kill -9 2>/dev/null || true
+          done
+          sleep 2
 
       - name: Run unit tests
         run: uv run pytest tests/test_static_discovery.py -v
