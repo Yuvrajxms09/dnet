@@ -35,8 +35,8 @@ def _get_repack_base_dir() -> Path:
 
         return Path(get_settings().storage.repack_dir).expanduser()
     except Exception:
-        # Default fallback
-        return Path("~/.dria/dnet/repacked_layers").expanduser()
+        # Default fallback using Path.home() for cross-platform compat
+        return Path.home() / ".dria" / "dnet" / "repacked_layers"
 
 
 def _sanitize_model_id(model_id: str) -> str:

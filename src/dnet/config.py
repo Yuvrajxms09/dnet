@@ -168,7 +168,7 @@ class StorageSettings(BaseSettings):
         description="Repacked layers directory",
     )
     log_dir: str = Field(
-        default="~/.dria/dnet",
+        default="~/.dria/dnet/logs",
         description="Log files directory",
     )
 
