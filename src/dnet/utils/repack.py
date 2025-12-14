@@ -19,16 +19,24 @@ from .model import MappedFile, ModelMetadata, get_model_metadata, load_weight
 
 
 def _get_repack_base_dir() -> Path:
-    """Get the base directory for repacked layers from settings."""
+    """Get the base directory for repacked layers.
+
+    Priority: env var > settings > default.
+    Env var is checked first to allow test monkeypatching to work.
+    """
+    # Check env var first (allows tests to override via monkeypatch)
+    env_val = os.getenv("DNET_REPACK_DIR")
+    if env_val:
+        return Path(env_val).expanduser()
+
+    # Then try centralized settings
     try:
         from dnet.config import get_settings
 
         return Path(get_settings().storage.repack_dir).expanduser()
     except Exception:
-        # Fallback to env var or default
-        return Path(
-            os.getenv("DNET_REPACK_DIR", "~/.dria/dnet/repacked_layers")
-        ).expanduser()
+        # Default fallback
+        return Path("~/.dria/dnet/repacked_layers").expanduser()
 
 
 def _sanitize_model_id(model_id: str) -> str:

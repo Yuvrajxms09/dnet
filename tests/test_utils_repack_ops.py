@@ -45,7 +45,7 @@ def test_delete_repacked_layers_all_flag(tmp_path, monkeypatch):
     base = tmp_path / "repacked"
     target = base / "m"
     target.mkdir(parents=True)
-    # Use explicit base_dir instead of env var (more reliable for tests)
+    # Use explicit base_dir for reliability
     removed = delete_repacked_layers(all_flag=True, base_dir=str(base))
     assert str(base) in removed and not base.exists()
 
@@ -54,7 +54,7 @@ def test_delete_repacked_layers_model_id_bucket(tmp_path, monkeypatch):
     base = tmp_path / "repacked"
     target = base / "hf___m"
     target.mkdir(parents=True)
-    # Use explicit base_dir instead of env var
+    # Use explicit base_dir for reliability
     removed = delete_repacked_layers(model_id="hf://m", base_dir=str(base))
     assert str(target) in removed and not target.exists()
 
@@ -66,7 +66,7 @@ def test_delete_repacked_layers_current_path_manifest_case(tmp_path, monkeypatch
     pcur = tmp_path / "any_where"  # current path with a manifest pointing to model_id
     pcur.mkdir()
     (pcur / "repack-manifest.json").write_text(json.dumps({"model_id": "hf://z"}))
-    # Use explicit base_dir instead of env var
+    # Use explicit base_dir for reliability
     removed = delete_repacked_layers(current_model_path=str(pcur), base_dir=str(base))
     assert str(bucket) in removed and not bucket.exists()
 
@@ -76,7 +76,7 @@ def test_delete_repacked_layers_current_path_inside_base(tmp_path, monkeypatch):
     bucket = base / "safeid"
     inner = bucket / "x" / "y"
     inner.mkdir(parents=True)
-    # Use explicit base_dir instead of env var
+    # Use explicit base_dir for reliability
     removed = delete_repacked_layers(current_model_path=str(inner), base_dir=str(base))
     assert str(bucket) in removed and not bucket.exists()
 
@@ -87,7 +87,7 @@ def test_delete_repacked_layers_current_path_fallback_sanitization(
     base = tmp_path / "repacked"
     bucket = base / _sanitize_model_id("path/to/special")
     bucket.mkdir(parents=True)
-    # Use explicit base_dir instead of env var
+    # Use explicit base_dir for reliability
     removed = delete_repacked_layers(
         current_model_path="path/to/special", base_dir=str(base)
     )
@@ -97,6 +97,7 @@ def test_delete_repacked_layers_current_path_fallback_sanitization(
 def test_ensure_repacked_for_layers_creates_and_manifest(tmp_path, monkeypatch):
     # direct repack: monkeypatch repack_per_layer to drop a dummy layer file
     base = tmp_path / "repacked"
+    # Set env var - _get_repack_base_dir now checks env var first
     monkeypatch.setenv("DNET_REPACK_DIR", str(base))
 
     from dnet.utils import repack as _mod
@@ -134,6 +135,7 @@ def test_ensure_repacked_for_layers_recreates_when_expected_missing(
 ):
     # create a real repack once, then remove the expected first-layer file to force repack
     base = tmp_path / "repacked"
+    # Set env var - _get_repack_base_dir now checks env var first
     monkeypatch.setenv("DNET_REPACK_DIR", str(base))
 
     from dnet.utils import repack as _mod
