@@ -82,6 +82,10 @@ class ComputeSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="DNET_COMPUTE_")
 
+    prefetch_mode: str = Field(
+        default="off",
+        description="Prefetch mode for layer loading (off, sync, async)",
+    )
     mxload_fastpath: bool = Field(
         default=True,
         description="Use mlx fast load path",

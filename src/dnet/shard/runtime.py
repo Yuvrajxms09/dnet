@@ -20,7 +20,7 @@ from dnet.utils.model import ModelMetadata, get_model_metadata
 from dnet.utils.serialization import mlx_dtype_map
 from dnet.core.models import BaseRingModel as BaseShardModel, get_ring_model
 import asyncio
-from dnet.config import get_settings, KVCacheSettings
+from dnet.config import get_settings, KVCacheSettings, ComputeSettings
 from dnet.core.memory.memory_pool import LayerAwareMemoryPool
 from .policies import ComputePolicy, NoopPolicy, make_policy, plan_policy, PolicyPlan
 from dnet.utils.model import (
@@ -40,6 +40,17 @@ class RuntimeKVCacheConfig:
         self.bits: int = settings.bits
         self.group_size: int = settings.group_size
         self.kv_ttl_s: float = settings.ttl_s
+
+
+# Runtime-mutable compute config (initialized from settings)
+class RuntimeComputeConfig:
+    """Mutable compute config for runtime updates."""
+
+    def __init__(self, settings: ComputeSettings):
+        self.prefetch_mode: str = settings.prefetch_mode
+        self.mxload_fastpath: bool = settings.mxload_fastpath
+        self.input_pool_mb: int = settings.input_pool_mb
+        self.output_pool_mb: int = settings.output_pool_mb
 
 
 class ShardRuntime:
@@ -64,8 +75,9 @@ class ShardRuntime:
         self._transport_settings = settings.transport
         self._topology_settings = settings.topology
 
-        # Mutable runtime KV cache config (may be updated per-request)
+        # Mutable runtime configs (may be updated per-request or by policies)
         self.kv_cache_config = RuntimeKVCacheConfig(settings.kv_cache)
+        self._compute_config = RuntimeComputeConfig(settings.compute)
 
         self.policy: ComputePolicy = NoopPolicy(runtime=self, resident_windows=1)
 
@@ -119,8 +131,8 @@ class ShardRuntime:
     # Properties for backward compatibility
     @property
     def compute_config(self):
-        """Backward compat: returns compute settings."""
-        return self._compute_settings
+        """Mutable runtime compute config (for policy updates)."""
+        return self._compute_config
 
     @property
     def transport_config(self):
