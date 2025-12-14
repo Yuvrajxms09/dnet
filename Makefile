@@ -10,13 +10,13 @@ lint:
 
 .PHONY: lint-fix #     | Fix linting issues
 lint-fix:
-	   uv run ruff check --fix
+	$(UV_RUN) ruff check --fix
 
 .PHONY: format #       | Check formatting
 format:
 		$(UV_RUN) ruff format --diff
 
-.PHONEY: format-fix #   | Fix formatting issues
+.PHONY: format-fix #   | Fix formatting issues
 format-fix:
 		$(UV_RUN) ruff format .
 
