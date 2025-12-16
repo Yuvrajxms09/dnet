@@ -104,7 +104,10 @@ class Sampler:
                 bitmask = grammar_state.get_bitmask()
                 grammar_state.matcher.fill_next_token_bitmask(bitmask)
                 
-                v_torch = torch.tensor(v.tolist(), dtype=torch.float32).unsqueeze(0)
+                # Convert to float32 first (handles bfloat16 which NumPy doesn't support)
+                # Use buffer protocol instead of .tolist() for better performance
+                v_np = np.array(v.astype(mx.float32))
+                v_torch = torch.from_numpy(v_np).unsqueeze(0)
                 xgr.apply_token_bitmask_inplace(v_torch, bitmask.to(v_torch.device))
                 v = mx.array(v_torch.squeeze(0).numpy())
                 
