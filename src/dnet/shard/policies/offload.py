@@ -25,6 +25,8 @@ class OffloadPolicy(ComputePolicy):
     """
     
     # Cache grammar states by nonce to maintain state across token generations
+    # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
+    # See: _kv_by_nonce pattern in runtime.py
     _grammar_states: dict = {}
 
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
@@ -334,10 +336,7 @@ class OffloadPolicy(ComputePolicy):
                                 y = self.runtime.model.normalize(x_cast)
                                 y = self.runtime.model.lm_project(y)
 
-                            # Sampling
                             grammar_schema = getattr(msg, "grammar_json_schema", None)
-                            if grammar_schema:
-                                logger.info(f"[GRAMMAR] Received grammar_json_schema: {grammar_schema[:100]}...")
                             
                             decoding_config = DecodingConfig(
                                 temperature=msg.temperature,
@@ -353,24 +352,15 @@ class OffloadPolicy(ComputePolicy):
                             grammar_state = None
                             if grammar_schema:
                                 nonce = msg.nonce
-                                # Check cache first
                                 if nonce in OffloadPolicy._grammar_states:
                                     grammar_state = OffloadPolicy._grammar_states[nonce]
-                                    logger.debug(f"[GRAMMAR] Using cached grammar state for nonce {nonce[:16]}...")
                                 else:
-                                    # Create new grammar state
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
-                                    # Get actual vocab size from logits shape (may be larger than tokenizer's vocab_size)
                                     model_vocab_size = y.shape[-1] if hasattr(y, 'shape') else None
                                     if tokenizer:
                                         grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
                                         if grammar_state:
                                             OffloadPolicy._grammar_states[nonce] = grammar_state
-                                            logger.info(f"[GRAMMAR] Created and cached grammar state for nonce {nonce[:16]}...")
-                                        else:
-                                            logger.warning("[GRAMMAR] Failed to create grammar state")
-                                    else:
-                                        logger.warning("[GRAMMAR] No tokenizer available for grammar")
 
                             result = Sampler.sample(
                                 logits=y,

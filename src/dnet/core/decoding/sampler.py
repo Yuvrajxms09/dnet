@@ -46,33 +46,23 @@ class Sampler:
         try:
             import xgrammar as xgr
             
-            logger.info(f"[GRAMMAR] Creating grammar state for schema: {json_schema[:80]}...")
-            
-            # Get the actual vocab size - use model's vocab size if provided, 
-            # as it may be larger than tokenizer's vocab_size due to padding
             vocab_size = model_vocab_size or getattr(tokenizer, 'vocab_size', None)
             
-            # Create tokenizer info from HuggingFace tokenizer with correct vocab_size
             if vocab_size:
                 tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab_size)
             else:
                 tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
-            logger.info(f"[GRAMMAR] TokenizerInfo created, vocab_size={tokenizer_info.vocab_size}")
             
-            # Create grammar compiler
             grammar_compiler = xgr.GrammarCompiler(tokenizer_info)
-            
-            # Compile JSON schema to grammar
             compiled_grammar = grammar_compiler.compile_json_schema(json_schema)
-            logger.info("[GRAMMAR] JSON schema compiled successfully")
             
             return GrammarState(compiled_grammar, tokenizer_info)
             
         except ImportError as e:
-            logger.error(f"[GRAMMAR] xgrammar not installed: {e}")
+            logger.warning(f"xgrammar not installed: {e}")
             return None
         except Exception as e:
-            logger.error(f"[GRAMMAR] Failed to create grammar state: {e}")
+            logger.warning(f"Failed to create grammar state: {e}")
             return None
 
     @staticmethod
@@ -111,47 +101,25 @@ class Sampler:
                 import xgrammar as xgr
                 import torch
                 
-                logger.info("[GRAMMAR] Applying grammar constraints...")
                 bitmask = grammar_state.get_bitmask()
-                
-                # Fill the bitmask based on current grammar state
                 grammar_state.matcher.fill_next_token_bitmask(bitmask)
                 
-                # Convert MLX logits to PyTorch tensor with batch dimension
-                # xgrammar expects (batch_size, vocab_size) shape
                 v_torch = torch.tensor(v.tolist(), dtype=torch.float32).unsqueeze(0)
-                
-                # Log some stats before masking
-                orig_max_idx = int(v_torch.argmax().item())
-                logger.info(f"[GRAMMAR] Before mask: argmax token={orig_max_idx}, logits shape={v_torch.shape}")
-                
-                # Apply bitmask - this sets invalid tokens to -inf
                 xgr.apply_token_bitmask_inplace(v_torch, bitmask.to(v_torch.device))
-                
-                # Log after masking
-                new_max_idx = int(v_torch.argmax().item())
-                logger.info(f"[GRAMMAR] After mask: argmax token={new_max_idx}")
-                
-                # Remove batch dimension and convert back to MLX
                 v = mx.array(v_torch.squeeze(0).numpy())
-                logger.info("[GRAMMAR] Bitmask applied successfully")
                 
             except Exception as e:
-                logger.error(f"[GRAMMAR] Failed to apply grammar mask: {e}")
+                logger.warning(f"Failed to apply grammar mask: {e}")
 
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
-        
-        # CRITICAL: Always log the sampled token
-        logger.info(f"[SAMPLER] Sampled token_id={token_id}, grammar_active={grammar_state is not None}")
         
         # Update grammar state with accepted token
         if grammar_state is not None:
             try:
                 grammar_state.matcher.accept_token(token_id)
-                logger.info(f"[GRAMMAR] Accepted token {token_id}")
             except Exception as e:
-                logger.error(f"[GRAMMAR] Failed to accept token: {e}")
+                logger.warning(f"Failed to accept token in grammar: {e}")
 
         logprob = 0.0
         top_logprobs = {}

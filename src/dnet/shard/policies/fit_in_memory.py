@@ -17,6 +17,8 @@ class FitInMemoryPolicy(ComputePolicy):
     """Everything fits - no offloading needed"""
     
     # Cache grammar states by nonce to maintain state across token generations
+    # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
+    # See: _kv_by_nonce pattern in runtime.py
     _grammar_states: dict = {}
 
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
@@ -141,10 +143,7 @@ class FitInMemoryPolicy(ComputePolicy):
                                 y = self.runtime.model.normalize(x_cast)
                                 y = self.runtime.model.lm_project(y)
 
-                            # Sampling
-                            grammar_schema = getattr(msg, "grammar_json_schema", None)
-                            if grammar_schema:
-                                logger.info(f"[GRAMMAR] Received grammar_json_schema: {grammar_schema[:100]}...")
+                                grammar_schema = getattr(msg, "grammar_json_schema", None)
                             
                             decoding_config = DecodingConfig(
                                 temperature=msg.temperature,
@@ -160,32 +159,15 @@ class FitInMemoryPolicy(ComputePolicy):
                             grammar_state = None
                             if grammar_schema:
                                 nonce = msg.nonce
-                                logger.info(f"[GRAMMAR] Checking cache for nonce {nonce[:16]}...")
-                                # Check cache first
                                 if nonce in FitInMemoryPolicy._grammar_states:
                                     grammar_state = FitInMemoryPolicy._grammar_states[nonce]
-                                    logger.info(f"[GRAMMAR] Using cached grammar state for nonce {nonce[:16]}...")
                                 else:
-                                    # Create new grammar state
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
-                                    # Get actual vocab size from logits shape (may be larger than tokenizer's vocab_size)
                                     model_vocab_size = y.shape[-1] if hasattr(y, 'shape') else None
-                                    logger.info(f"[GRAMMAR] Tokenizer available: {tokenizer is not None}, model_vocab_size: {model_vocab_size}")
                                     if tokenizer:
-                                        try:
-                                            grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
-                                            if grammar_state:
-                                                FitInMemoryPolicy._grammar_states[nonce] = grammar_state
-                                                logger.info(f"[GRAMMAR] Created and cached grammar state for nonce {nonce[:16]}...")
-                                            else:
-                                                logger.warning("[GRAMMAR] Sampler.create_grammar_state returned None")
-                                        except Exception as e:
-                                            logger.error(f"[GRAMMAR] Exception creating grammar state: {e}")
-                                    else:
-                                        logger.warning("[GRAMMAR] No tokenizer available for grammar")
-
-                            # CRITICAL: Log whether grammar will be applied
-                            logger.info(f"[GRAMMAR] About to sample: grammar_state={grammar_state is not None}")
+                                        grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
+                                        if grammar_state:
+                                            FitInMemoryPolicy._grammar_states[nonce] = grammar_state
                             
                             result = Sampler.sample(
                                 logits=y,
@@ -194,8 +176,6 @@ class FitInMemoryPolicy(ComputePolicy):
                                 req_top_logprobs=msg.req_top_logprobs,
                                 grammar_state=grammar_state,
                             )
-                            
-                            logger.info(f"[GRAMMAR] Sampled token: {result.token_id}")
 
                             token_id = result.token_id
                             token_logprob = result.logprob

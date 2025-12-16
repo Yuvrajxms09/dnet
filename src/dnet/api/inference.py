@@ -111,14 +111,12 @@ class InferenceManager:
         grammar_json_schema = None
         if hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
             grammar_json_schema = req.grammar_json_schema
-            logger.debug("Using grammar JSON schema for structured output generation")
         elif hasattr(req, "response_format") and req.response_format:
             # Support OpenAI-style response_format with JSON schema
             if isinstance(req.response_format, dict):
                 if "schema" in req.response_format:
                     grammar_json_schema = json.dumps(req.response_format["schema"])
                 elif "type" in req.response_format and req.response_format["type"] == "json_object":
-                    # Default JSON object schema
                     grammar_json_schema = json.dumps({"type": "object"})
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
