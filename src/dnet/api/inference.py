@@ -90,7 +90,7 @@ You have access to the following tools. When you need to use a tool, respond wit
       "type": "function",
       "function": {{
         "name": "<function_name>",
-        "arguments": "<json_string_of_arguments>"
+        "arguments": "{{\\"param1\\": \\"value1\\", \\"param2\\": 123}}"
       }}
     }}
   ]
@@ -100,7 +100,9 @@ Available tools:
 {tools_description}
 
 Important:
-- The "arguments" field must be a valid JSON string
+- The "arguments" field MUST be a valid JSON string with double quotes (not single quotes)
+- Example: "arguments": "{{\\"location\\": \\"San Francisco\\"}}" (correct)
+- NOT: "arguments": "{{'location': 'San Francisco'}}" (wrong - single quotes)
 - Use the exact function names from the tools list above
 - Include all required parameters as specified in the tool's parameters schema
 """
