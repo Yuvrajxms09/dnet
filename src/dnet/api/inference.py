@@ -81,8 +81,14 @@ class InferenceManager:
 
         return f"""
 
-You have access to the following tools. When you need to use a tool, respond with a JSON object in this exact format:
+You have access to the following tools.
 
+CRITICAL INSTRUCTIONS:
+- ONLY use tools when the user's request SPECIFICALLY requires the tool's functionality
+- For greetings (hi, hello, how are you), casual chat, or general knowledge questions - respond with NORMAL TEXT, do NOT call any tools
+- For requests that clearly match a tool's purpose (e.g., "what's the weather" → use get_weather) - use the appropriate tool
+
+When you DO need to use a tool, respond with a JSON object in this exact format:
 {{
   "tool_calls": [
     {{
@@ -99,12 +105,11 @@ You have access to the following tools. When you need to use a tool, respond wit
 Available tools:
 {tools_description}
 
-Important:
-- The "arguments" field MUST be a valid JSON string with double quotes (not single quotes)
-- Example: "arguments": "{{\\"location\\": \\"San Francisco\\"}}" (correct)
-- NOT: "arguments": "{{'location': 'San Francisco'}}" (wrong - single quotes)
+Rules:
+- The "arguments" field MUST be a valid JSON string with double quotes
 - Use the exact function names from the tools list above
-- Include all required parameters as specified in the tool's parameters schema
+- Include all required parameters
+- If unsure whether to use a tool, respond with normal text instead
 """
 
     def _build_tool_call_schema(self, tools: List[Dict[str, Any]]) -> Optional[str]:
@@ -207,7 +212,17 @@ Important:
                 )
                 logger.debug("Created new system message with tool descriptions")
 
-            use_tool_grammar = True
+            # IMPORTANT: Only apply grammar constraint for "required"
+            # For "auto", let model decide freely whether to call tools or respond with text
+            # This is the production-standard approach used by vLLM, OpenAI, etc.
+            if req.tool_choice == "required":
+                use_tool_grammar = True
+                logger.debug("tool_choice='required': applying xgrammar constraint")
+            else:
+                # tool_choice is "auto" or specific function - don't force grammar
+                # Model can choose to call tools or respond with text
+                use_tool_grammar = False
+                logger.debug(f"tool_choice='{req.tool_choice}': grammar constraint disabled, model decides")
         elif req.tools and req.tool_choice == "none":
             logger.debug("Tools provided but tool_choice='none', skipping tool grammar")
 
@@ -402,10 +417,19 @@ Important:
         detokenizer.finalize()
         final_text = detokenizer.text
 
-        # Parse tool calls from generated text if we used tool grammar
+        # Parse tool calls from generated text
+        # - For tool_choice="required" with grammar: always parse
+        # - For tool_choice="auto" without grammar: attempt to parse if contains tool_calls JSON
         tool_calls = None
-        if use_tool_grammar and final_text:
-            logger.debug(f"Parsing tool call output (length={len(final_text)})")
+        
+        # For auto mode, check if output contains tool_calls JSON (may be after <think> tags)
+        has_tool_calls_json = '"tool_calls"' in final_text and "{" in final_text
+        should_attempt_parse = use_tool_grammar or (
+            req.tools and req.tool_choice == "auto" and has_tool_calls_json
+        )
+
+        if should_attempt_parse and final_text:
+            logger.debug(f"Attempting to parse tool call output (length={len(final_text)}, grammar={use_tool_grammar})")
             clean_text = final_text.strip()
 
             # Remove any trailing special tokens (safety fallback)
@@ -413,6 +437,12 @@ Important:
                 if eos_pattern in clean_text:
                     clean_text = clean_text.split(eos_pattern)[0].strip()
                     break
+            
+            # Handle Qwen3 <think> tags - extract content after </think>
+            if "</think>" in clean_text:
+                # Get content after the LAST </think> tag
+                clean_text = clean_text.split("</think>")[-1].strip()
+                logger.debug("Extracted content after </think> tags")
 
             try:
                 parsed = json.loads(clean_text)
@@ -429,15 +459,24 @@ Important:
                             f"Parsed {len(tool_calls)} tool call(s): {tool_names}"
                         )
                     else:
-                        logger.warning(f"tool_calls is empty or invalid: {tool_calls}")
+                        logger.debug(f"tool_calls is empty or invalid, treating as text response")
                         tool_calls = None
-                else:
+                elif use_tool_grammar:
+                    # Grammar was enforced but no tool_calls - this shouldn't happen
                     logger.warning(
-                        f"JSON missing 'tool_calls' key: {type(parsed)}"
+                        f"Grammar enforced but JSON missing 'tool_calls' key: {type(parsed)}"
                     )
+                else:
+                    # For auto mode, valid JSON without tool_calls is fine - just text response
+                    logger.debug("Model output JSON without tool_calls, treating as text response")
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse tool call JSON: {e}")
-                logger.debug(f"Raw output: {clean_text[:300]}...")
+                if use_tool_grammar:
+                    # Grammar was enforced, JSON parse failure is unexpected
+                    logger.error(f"Failed to parse tool call JSON (grammar was enforced): {e}")
+                    logger.debug(f"Raw output: {clean_text[:300]}...")
+                else:
+                    # For auto mode, non-JSON output is expected when model chooses not to use tools
+                    logger.debug("Model chose to respond with text instead of tool calls")
 
         metrics_dict = None
         t_end = time.perf_counter()
