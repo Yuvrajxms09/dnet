@@ -27,6 +27,7 @@ class ChatCompletionReason(str, Enum):
 
     LENGTH = "length"
     STOP = "stop"
+    TOOL_CALLS = "tool_calls"
 
 
 class RingInferenceError(BaseModel):
@@ -49,10 +50,22 @@ class RingInferenceError(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """A single message in a chat conversation."""
+    """A single message in a chat conversation.
+
+    Compatible with OpenAI format:
+    - For assistant messages with tool calls: content can be None, tool_calls contains the calls
+    - For tool role messages: name is required (function name), content is the result
+    """
 
     role: str  # "system" | "user" | "assistant" | "tool" | "developer" # TODO: use Literal?
-    content: str
+    content: Optional[str] = None  # Can be None when tool_calls is present
+    name: Optional[str] = Field(
+        default=None, description="Name of the function/tool (required for tool role)"
+    )
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="List of tool calls made by the assistant (OpenAI format: {id, type, function: {name, arguments}})",
+    )
 
 
 class ChatParams(BaseModel):
@@ -87,8 +100,16 @@ class ChatParams(BaseModel):
     stream: bool = Field(default=False)
     # stream_options:  # NOTE: unused
     temperature: float = Field(default=1.0, ge=0, le=2)
-    # tool_choice: # NOTE: unused, later with tool calling
-    # tools: # NOTE: unused, later with tool calling
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(
+        default=None,
+        description="Controls which (if any) tool is called. "
+        "Can be 'auto', 'none', 'required', or {'type': 'function', 'function': {'name': 'fn_name'}}",
+    )
+    tools: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="List of tools (functions) available to the model. "
+        "Each tool should have: type='function', function={name, description, parameters (JSON schema)}",
+    )
     top_logprobs: int = Field(default=0, ge=0, le=20)
     top_p: float = Field(default=1.0, ge=0, le=1)
     verbosity: Literal["low", "medium", "high"] = Field(default="medium")  # TODO: used?
