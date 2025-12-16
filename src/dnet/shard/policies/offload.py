@@ -360,8 +360,10 @@ class OffloadPolicy(ComputePolicy):
                                 else:
                                     # Create new grammar state
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
+                                    # Get actual vocab size from logits shape (may be larger than tokenizer's vocab_size)
+                                    model_vocab_size = y.shape[-1] if hasattr(y, 'shape') else None
                                     if tokenizer:
-                                        grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer)
+                                        grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
                                         if grammar_state:
                                             OffloadPolicy._grammar_states[nonce] = grammar_state
                                             logger.info(f"[GRAMMAR] Created and cached grammar state for nonce {nonce[:16]}...")
