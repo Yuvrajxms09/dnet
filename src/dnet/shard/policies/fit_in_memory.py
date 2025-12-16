@@ -146,7 +146,45 @@ class FitInMemoryPolicy(ComputePolicy):
                                 repetition_penalty=msg.repetition_penalty,
                                 min_p=msg.min_p,
                                 min_tokens_to_keep=msg.min_tokens_to_keep,
+                                grammar_json_schema=getattr(msg, "grammar_json_schema", None),
                             )
+
+                            # Create logits processor if grammar schema is provided
+                            logits_processor = None
+                            input_ids_for_grammar = None
+                            if decoding_config.grammar_json_schema:
+                                try:
+                                    # Get tokenizer from runtime if available
+                                    tokenizer = getattr(self.runtime, "tokenizer", None)
+                                    model = self.runtime.model
+                                    
+                                    if tokenizer and model:
+                                        sampler_instance = Sampler()
+                                        logits_processor = sampler_instance._get_logits_processor(
+                                            decoding_config.grammar_json_schema,
+                                            model,
+                                            tokenizer
+                                        )
+                                        
+                                        # Extract token sequence from activation message for grammar state
+                                        # The sequence is in the input pool buffer when dtype is "tokens"
+                                        if msg.dtype == "tokens" and msg.pool_id is not None:
+                                            try:
+                                                buffer = self.runtime.input_pool.get_buffer(msg.pool_id)
+                                                # Extract the actual token sequence from buffer
+                                                seq_len = msg.shape[0] if len(msg.shape) > 0 else 0
+                                                if seq_len > 0:
+                                                    token_seq = buffer[:seq_len]
+                                                    input_ids_for_grammar = mx.array(token_seq, dtype=mx.int32)
+                                            except Exception:
+                                                # Fallback: use empty sequence (grammar will start fresh)
+                                                input_ids_for_grammar = mx.array([], dtype=mx.int32)
+                                        else:
+                                            # For non-token activations, we don't have the sequence
+                                            # Grammar processor will work but with limited context
+                                            input_ids_for_grammar = mx.array([], dtype=mx.int32)
+                                except Exception as e:
+                                    logger.warning(f"Failed to create grammar logits processor: {e}")
 
                             sampler = Sampler()
                             result = sampler.sample(
@@ -154,6 +192,8 @@ class FitInMemoryPolicy(ComputePolicy):
                                 config=decoding_config,
                                 req_logprobs=msg.req_logprobs,
                                 req_top_logprobs=msg.req_top_logprobs,
+                                logits_processor=logits_processor,
+                                input_ids=input_ids_for_grammar,
                             )
 
                             token_id = result.token_id

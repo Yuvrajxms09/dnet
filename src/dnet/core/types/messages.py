@@ -46,6 +46,8 @@ class ActivationMessage:
     repetition_penalty: float = 1.0
     min_p: float = 0.0
     min_tokens_to_keep: int = 1
+    # Structured output support
+    grammar_json_schema: Optional[str] = None  # JSON schema for grammar-constrained generation
 
     @classmethod
     def from_proto(cls, proto_msg: ActivationRequest, pool_id: int = 0):
