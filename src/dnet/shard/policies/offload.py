@@ -23,6 +23,9 @@ class OffloadPolicy(ComputePolicy):
     Policy for offloading weights or sliding window fit.
     Handles 'offload' and 'sliding_fit' modes.
     """
+    
+    # Cache grammar states by nonce to maintain state across token generations
+    _grammar_states: dict = {}
 
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
         local_count = max(1, len(self.runtime.assigned_layers))
@@ -332,6 +335,10 @@ class OffloadPolicy(ComputePolicy):
                                 y = self.runtime.model.lm_project(y)
 
                             # Sampling
+                            grammar_schema = getattr(msg, "grammar_json_schema", None)
+                            if grammar_schema:
+                                logger.info(f"[GRAMMAR] Received grammar_json_schema: {grammar_schema[:100]}...")
+                            
                             decoding_config = DecodingConfig(
                                 temperature=msg.temperature,
                                 top_p=msg.top_p,
@@ -339,54 +346,36 @@ class OffloadPolicy(ComputePolicy):
                                 repetition_penalty=msg.repetition_penalty,
                                 min_p=msg.min_p,
                                 min_tokens_to_keep=msg.min_tokens_to_keep,
-                                grammar_json_schema=getattr(msg, "grammar_json_schema", None),
+                                grammar_json_schema=grammar_schema,
                             )
 
-                            # Create logits processor if grammar schema is provided
-                            logits_processor = None
-                            input_ids_for_grammar = None
-                            if decoding_config.grammar_json_schema:
-                                try:
-                                    # Get tokenizer from runtime if available
+                            # Get or create grammar state (cached by nonce for multi-token generation)
+                            grammar_state = None
+                            if grammar_schema:
+                                nonce = msg.nonce
+                                # Check cache first
+                                if nonce in OffloadPolicy._grammar_states:
+                                    grammar_state = OffloadPolicy._grammar_states[nonce]
+                                    logger.debug(f"[GRAMMAR] Using cached grammar state for nonce {nonce[:16]}...")
+                                else:
+                                    # Create new grammar state
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
-                                    model = self.runtime.model
-                                    
-                                    if tokenizer and model:
-                                        sampler_instance = Sampler()
-                                        logits_processor = sampler_instance._get_logits_processor(
-                                            decoding_config.grammar_json_schema,
-                                            model,
-                                            tokenizer
-                                        )
-                                        
-                                        # Extract token sequence from activation message for grammar state
-                                        # The sequence is in the input pool buffer when dtype is "tokens"
-                                        if msg.dtype == "tokens" and msg.pool_id is not None:
-                                            try:
-                                                buffer = self.runtime.input_pool.get_buffer(msg.pool_id)
-                                                # Extract the actual token sequence from buffer
-                                                seq_len = msg.shape[0] if len(msg.shape) > 0 else 0
-                                                if seq_len > 0:
-                                                    token_seq = buffer[:seq_len]
-                                                    input_ids_for_grammar = mx.array(token_seq, dtype=mx.int32)
-                                            except Exception:
-                                                # Fallback: use empty sequence (grammar will start fresh)
-                                                input_ids_for_grammar = mx.array([], dtype=mx.int32)
+                                    if tokenizer:
+                                        grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer)
+                                        if grammar_state:
+                                            OffloadPolicy._grammar_states[nonce] = grammar_state
+                                            logger.info(f"[GRAMMAR] Created and cached grammar state for nonce {nonce[:16]}...")
                                         else:
-                                            # For non-token activations, we don't have the sequence
-                                            # Grammar processor will work but with limited context
-                                        input_ids_for_grammar = mx.array([], dtype=mx.int32)
-                                except Exception as e:
-                                    logger.warning(f"Failed to create grammar logits processor: {e}")
+                                            logger.warning("[GRAMMAR] Failed to create grammar state")
+                                    else:
+                                        logger.warning("[GRAMMAR] No tokenizer available for grammar")
 
-                            sampler = Sampler()
-                            result = sampler.sample(
+                            result = Sampler.sample(
                                 logits=y,
                                 config=decoding_config,
                                 req_logprobs=msg.req_logprobs,
                                 req_top_logprobs=msg.req_top_logprobs,
-                                logits_processor=logits_processor,
-                                input_ids=input_ids_for_grammar,
+                                grammar_state=grammar_state,
                             )
 
                             token_id = result.token_id

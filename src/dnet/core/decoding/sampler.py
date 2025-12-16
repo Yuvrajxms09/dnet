@@ -1,56 +1,71 @@
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 from mlx_lm.sample_utils import make_sampler
 from dnet.core.types.messages import TokenResult
 from dnet.core.decoding.config import DecodingConfig
+from dnet.utils.logger import logger
+
+
+class GrammarState:
+    """Holds xgrammar state for a single generation session."""
+    
+    def __init__(self, compiled_grammar, tokenizer_info):
+        import xgrammar as xgr
+        self.compiled_grammar = compiled_grammar
+        self.tokenizer_info = tokenizer_info
+        self.matcher = xgr.GrammarMatcher(compiled_grammar)
+        self.bitmask = None
+        self.vocab_size = tokenizer_info.vocab_size
+    
+    def get_bitmask(self):
+        """Get or create the token bitmask."""
+        if self.bitmask is None:
+            import xgrammar as xgr
+            self.bitmask = xgr.allocate_token_bitmask(1, self.vocab_size)
+        return self.bitmask
 
 
 class Sampler:
     """
     Handles the transformation of logits into tokens based on a DecodingConfig.
     Wraps mlx_lm's make_sampler for consistent sampling behavior.
-    Supports structured output via grammar-constrained generation.
+    Supports structured output via grammar-constrained generation using xgrammar.
     """
 
     def __init__(self):
-        """Initialize sampler with optional grammar backend."""
-        self._grammar_backend = None
-        self._logits_processor = None
+        """Initialize sampler."""
+        pass
 
-    def _ensure_grammar_backend(self, model, tokenizer):
-        """Lazy initialization of grammar backend if needed."""
-        if self._grammar_backend is None and model is not None and tokenizer is not None:
-            try:
-                from outlines.models import MLXLM
-                from outlines.backends.xgrammar import XGrammarBackend
-
-                outlines_model = MLXLM(model, tokenizer)
-                self._grammar_backend = XGrammarBackend(outlines_model)
-            except ImportError:
-                # Outlines not installed, grammar support unavailable
-                pass
-            except Exception as e:
-                # Graceful degradation if grammar setup fails
-                import warnings
-                warnings.warn(f"Failed to initialize grammar backend: {e}")
-
-    def _get_logits_processor(self, json_schema: Optional[str], model, tokenizer):
-        """Get or create logits processor for JSON schema."""
+    @staticmethod
+    def create_grammar_state(json_schema: str, tokenizer) -> Optional[GrammarState]:
+        """Create a grammar state for JSON schema constrained generation."""
         if not json_schema:
             return None
-
+            
         try:
-            self._ensure_grammar_backend(model, tokenizer)
-            if self._grammar_backend is None:
-                return None
-
-            # Create new processor for this schema (processors are stateful)
-            return self._grammar_backend.get_json_schema_logits_processor(json_schema)
+            import xgrammar as xgr
+            
+            logger.info(f"[GRAMMAR] Creating grammar state for schema: {json_schema[:80]}...")
+            
+            # Create tokenizer info from HuggingFace tokenizer
+            tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+            logger.info(f"[GRAMMAR] TokenizerInfo created, vocab_size={tokenizer_info.vocab_size}")
+            
+            # Create grammar compiler
+            grammar_compiler = xgr.GrammarCompiler(tokenizer_info)
+            
+            # Compile JSON schema to grammar
+            compiled_grammar = grammar_compiler.compile_json_schema(json_schema)
+            logger.info("[GRAMMAR] JSON schema compiled successfully")
+            
+            return GrammarState(compiled_grammar, tokenizer_info)
+            
+        except ImportError as e:
+            logger.error(f"[GRAMMAR] xgrammar not installed: {e}")
+            return None
         except Exception as e:
-            # Graceful degradation if grammar processing fails
-            import warnings
-            warnings.warn(f"Failed to create grammar logits processor: {e}")
+            logger.error(f"[GRAMMAR] Failed to create grammar state: {e}")
             return None
 
     @staticmethod
@@ -59,11 +74,11 @@ class Sampler:
         config: DecodingConfig,
         req_logprobs: bool = False,
         req_top_logprobs: int = 0,
-        logits_processor: Optional[Any] = None,  # XGrammarLogitsProcessor
-        input_ids: Optional[mx.array] = None,  # Full token sequence for grammar state
+        grammar_state: Optional[GrammarState] = None,
     ) -> TokenResult:
         """
         Sample a token from logits using the provided configuration.
+        If grammar_state is provided, applies grammar constraints before sampling.
         """
         sampler_fn = make_sampler(
             temp=config.temperature,
@@ -84,31 +99,39 @@ class Sampler:
             v = logits
 
         # Apply grammar-constrained logits processing if available
-        if logits_processor is not None and input_ids is not None:
+        if grammar_state is not None:
             try:
-                # Convert input_ids to format expected by processor (numpy array)
-                if isinstance(input_ids, mx.array):
-                    input_ids_np = np.array(input_ids.tolist(), dtype=np.int32)
-                else:
-                    input_ids_np = np.array(input_ids, dtype=np.int32)
-
-                # Convert logits to numpy for processing (xgrammar expects numpy)
-                v_np = np.array(v.tolist(), dtype=np.float32)
-
-                # Process logits through grammar
-                processed_logits = logits_processor.process_logits(input_ids_np, v_np)
-
-                # Convert back to MLX array
-                v = mx.array(processed_logits)
+                import xgrammar as xgr
+                import torch
+                
+                bitmask = grammar_state.get_bitmask()
+                
+                # Fill the bitmask based on current grammar state
+                grammar_state.matcher.fill_next_token_bitmask(bitmask)
+                
+                # Convert MLX logits to PyTorch tensor (xgrammar works best with torch)
+                v_torch = torch.tensor(v.tolist(), dtype=torch.float32)
+                
+                # Apply bitmask - this sets invalid tokens to -inf
+                xgr.apply_token_bitmask_inplace(v_torch, bitmask.to(v_torch.device))
+                
+                # Convert back to MLX
+                v = mx.array(v_torch.numpy())
+                logger.debug("[GRAMMAR] Applied grammar bitmask to logits")
+                
             except Exception as e:
-                # Log the error for debugging instead of silently failing
-                import warnings
-                warnings.warn(f"Grammar logits processing failed: {e}")
-                # Graceful degradation: if grammar processing fails, use original logits
-                pass
+                logger.error(f"[GRAMMAR] Failed to apply grammar mask: {e}")
 
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
+        
+        # Update grammar state with accepted token
+        if grammar_state is not None:
+            try:
+                grammar_state.matcher.accept_token(token_id)
+                logger.debug(f"[GRAMMAR] Accepted token {token_id}")
+            except Exception as e:
+                logger.error(f"[GRAMMAR] Failed to accept token: {e}")
 
         logprob = 0.0
         top_logprobs = {}
