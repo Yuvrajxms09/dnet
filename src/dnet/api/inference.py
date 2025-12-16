@@ -65,6 +65,105 @@ class InferenceManager:
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = api_callback_addr
 
+    def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
+        """
+        Format tools for prompt injection.
+
+        The model needs to know what tools are available. This creates a
+        description that gets injected into the system message.
+        """
+        if not tools:
+            logger.debug("No tools provided for prompt formatting")
+            return ""
+
+        logger.debug(f"Formatting {len(tools)} tools for prompt injection")
+        tools_description = json.dumps(tools, indent=2)
+
+        return f"""
+
+You have access to the following tools. When you need to use a tool, respond with a JSON object in this exact format:
+
+{{
+  "tool_calls": [
+    {{
+      "id": "call_<unique_id>",
+      "type": "function",
+      "function": {{
+        "name": "<function_name>",
+        "arguments": "<json_string_of_arguments>"
+      }}
+    }}
+  ]
+}}
+
+Available tools:
+{tools_description}
+
+Important:
+- The "arguments" field must be a valid JSON string
+- Use the exact function names from the tools list above
+- Include all required parameters as specified in the tool's parameters schema
+"""
+
+    def _build_tool_call_schema(self, tools: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Build JSON schema for tool calls based on available tools.
+
+        This schema is used by xgrammar to constrain generation to valid
+        tool call JSON. The function names are restricted to an enum of
+        available tool names.
+
+        Returns None if no valid tools found (instead of empty string).
+        """
+        tool_names = []
+        for t in tools:
+            try:
+                if t.get("type") == "function" and "function" in t:
+                    func = t["function"]
+                    if isinstance(func, dict) and "name" in func:
+                        tool_names.append(func["name"])
+                    else:
+                        logger.warning(f"Tool missing 'name' in function definition: {t}")
+            except (KeyError, TypeError) as e:
+                logger.warning(f"Malformed tool definition, skipping: {e}")
+                continue
+
+        if not tool_names:
+            logger.warning("No valid tool names extracted from tools list")
+            return None
+
+        logger.debug(f"Building tool call schema for tools: {tool_names}")
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "tool_calls": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "type": {"const": "function"},
+                            "function": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"enum": tool_names},
+                                    "arguments": {"type": "string"},
+                                },
+                                "required": ["name", "arguments"],
+                            },
+                        },
+                        "required": ["id", "type", "function"],
+                    },
+                }
+            },
+            "required": ["tool_calls"],
+        }
+
+        schema_str = json.dumps(schema)
+        logger.debug(f"Generated tool call schema: {schema_str[:200]}...")
+        return schema_str
 
     async def generate_stream(self, req: ChatRequestModel):
         """
@@ -77,13 +176,47 @@ class InferenceManager:
 
         tokenizer = self.model_manager.tokenizer
 
+        # Prepare messages - inject tool descriptions if tools are provided
+        messages_for_prompt = req.messages.copy()
+        use_tool_grammar = False
+
+        if req.tools and req.tool_choice not in [None, "none"]:
+            logger.info(
+                f"Tool calling enabled: {len(req.tools)} tools, tool_choice={req.tool_choice}"
+            )
+            tools_prompt = self._format_tools_for_prompt(req.tools)
+
+            # Find system message or prepend one
+            has_system = any(m.role == "system" for m in messages_for_prompt)
+
+            if has_system:
+                # Append tools to existing system message
+                for i, msg in enumerate(messages_for_prompt):
+                    if msg.role == "system":
+                        messages_for_prompt[i] = ChatMessage(
+                            role="system", content=(msg.content or "") + tools_prompt
+                        )
+                        logger.debug("Appended tool descriptions to existing system message")
+                        break
+            else:
+                # Prepend system message with tools
+                messages_for_prompt.insert(
+                    0, ChatMessage(role="system", content=tools_prompt.strip())
+                )
+                logger.debug("Created new system message with tool descriptions")
+
+            use_tool_grammar = True
+        elif req.tools and req.tool_choice == "none":
+            logger.debug("Tools provided but tool_choice='none', skipping tool grammar")
+
         try:
             if (
                 hasattr(tokenizer, "chat_template")
                 and tokenizer.chat_template is not None
             ):
                 message_dicts = [
-                    {"role": m.role, "content": m.content} for m in req.messages
+                    {"role": m.role, "content": m.content or ""}
+                    for m in messages_for_prompt
                 ]
                 prompt_text = tokenizer.apply_chat_template(
                     message_dicts,
@@ -91,11 +224,16 @@ class InferenceManager:
                     tokenize=False,
                 )
             else:
+                logger.debug("No chat template available, using basic prompt format")
                 prompt_text = (
-                    "\n".join(m.content for m in req.messages) + "\nAssistant:"
+                    "\n".join(m.content or "" for m in messages_for_prompt)
+                    + "\nAssistant:"
                 )
-        except Exception:
-            prompt_text = "\n".join(m.content for m in req.messages) + "\nAssistant:"
+        except Exception as e:
+            logger.warning(f"Failed to apply chat template: {e}, using fallback format")
+            prompt_text = (
+                "\n".join(m.content or "" for m in messages_for_prompt) + "\nAssistant:"
+            )
 
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
@@ -107,17 +245,38 @@ class InferenceManager:
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
 
-        # Get grammar JSON schema from request if provided (for structured outputs)
+        # Get grammar JSON schema - tool calling takes priority
         grammar_json_schema = None
-        if hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
+
+        if use_tool_grammar and req.tools:
+            # Use tool call schema for constrained generation
+            tool_schema = self._build_tool_call_schema(req.tools)
+            if tool_schema:
+                grammar_json_schema = tool_schema
+                logger.info(
+                    f"Using xgrammar tool call schema for {len(req.tools)} tools"
+                )
+            else:
+                # Failed to build schema - disable tool grammar but continue
+                logger.warning(
+                    "Failed to build tool call schema, proceeding without grammar constraint"
+                )
+                use_tool_grammar = False
+        elif hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
             grammar_json_schema = req.grammar_json_schema
+            logger.debug("Using user-provided grammar_json_schema")
         elif hasattr(req, "response_format") and req.response_format:
             # Support OpenAI-style response_format with JSON schema
             if isinstance(req.response_format, dict):
                 if "schema" in req.response_format:
                     grammar_json_schema = json.dumps(req.response_format["schema"])
-                elif "type" in req.response_format and req.response_format["type"] == "json_object":
+                    logger.debug("Using response_format schema for grammar")
+                elif (
+                    "type" in req.response_format
+                    and req.response_format["type"] == "json_object"
+                ):
                     grammar_json_schema = json.dumps({"type": "object"})
+                    logger.debug("Using basic JSON object grammar for response_format")
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
@@ -228,6 +387,41 @@ class InferenceManager:
             y = mx.array([token], dtype=mx.int32)
 
         detokenizer.finalize()
+        final_text = detokenizer.text
+
+        # Check for tool calls if we used tool grammar
+        tool_calls = None
+        if use_tool_grammar and final_text:
+            logger.debug(f"Parsing tool call output (length={len(final_text)})")
+            try:
+                parsed = json.loads(final_text)
+                if isinstance(parsed, dict) and "tool_calls" in parsed:
+                    tool_calls = parsed["tool_calls"]
+                    if tool_calls and isinstance(tool_calls, list):
+                        completion_reason = ChatCompletionReason.TOOL_CALLS
+                        tool_names = [
+                            tc.get("function", {}).get("name", "unknown")
+                            for tc in tool_calls
+                            if isinstance(tc, dict)
+                        ]
+                        logger.info(
+                            f"Generated {len(tool_calls)} tool call(s): {tool_names}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Parsed tool_calls is empty or invalid: {tool_calls}"
+                        )
+                        tool_calls = None
+                else:
+                    logger.warning(
+                        f"Parsed JSON does not contain 'tool_calls' key: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed)}"
+                    )
+            except json.JSONDecodeError as e:
+                # Grammar should guarantee valid JSON, but log if it fails
+                logger.error(
+                    f"Failed to parse tool call JSON (this should not happen with xgrammar): {e}"
+                )
+                logger.debug(f"Raw output that failed parsing: {final_text[:500]}...")
 
         metrics_dict = None
         t_end = time.perf_counter()
@@ -248,13 +442,20 @@ class InferenceManager:
                 ),
             }
 
+        # Build final message - include tool_calls if present
+        final_message = ChatMessage(
+            role="assistant",
+            content=None if tool_calls else final_text,
+            tool_calls=tool_calls,
+        )
+
         # Final chunk with finish reason
         yield ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
                     index=0,
-                    delta=ChatMessage(role="assistant", content=""),
+                    delta=final_message,
                     finish_reason=completion_reason,
                 )
             ],
@@ -280,12 +481,17 @@ class InferenceManager:
         nonce = ""
         metrics_dict = None
         usage = None
+        tool_calls = None
 
         async for chunk in self.generate_stream(req):
             nonce = chunk.id
             choice = chunk.choices[0]
-            if choice.delta and choice.delta.content:
+            if choice.delta:
+                if choice.delta.content:
                     full_content += choice.delta.content
+                # Collect tool_calls from the final delta
+                if choice.delta.tool_calls:
+                    tool_calls = choice.delta.tool_calls
 
             if choice.logprobs:
                 if choice.logprobs.token_logprobs:
@@ -304,13 +510,32 @@ class InferenceManager:
             if chunk.usage:
                 usage = chunk.usage
 
+        # Build final message - content is None if tool_calls present
+        final_message = ChatMessage(
+            role="assistant",
+            content=None if tool_calls else full_content,
+            tool_calls=tool_calls,
+        )
+
+        # Log completion summary
+        if tool_calls:
+            logger.info(
+                f"Chat completion finished with {len(tool_calls)} tool call(s), "
+                f"reason={completion_reason.value}"
+            )
+        else:
+            logger.debug(
+                f"Chat completion finished, reason={completion_reason.value}, "
+                f"content_length={len(full_content)}"
+            )
+
         return ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
                     index=0,
                     finish_reason=completion_reason,
-                    message=ChatMessage(role="assistant", content=full_content),
+                    message=final_message,
                     logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs,
                         top_logprobs=top_logprobs_list,
