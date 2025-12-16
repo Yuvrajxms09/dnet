@@ -117,10 +117,15 @@ class Sampler:
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
         
-        # Update grammar state with accepted token
+        # Update grammar state with accepted token and check termination
+        grammar_terminated = False
         if grammar_state is not None:
             try:
                 grammar_state.matcher.accept_token(token_id)
+                # Check if grammar is satisfied (complete valid output)
+                if grammar_state.matcher.is_terminated():
+                    grammar_terminated = True
+                    logger.debug("Grammar matcher reports termination (complete output)")
             except Exception as e:
                 logger.warning(f"Failed to accept token in grammar: {e}")
 
@@ -145,4 +150,5 @@ class Sampler:
             token_id=token_id,
             logprob=logprob,
             top_logprobs=top_logprobs,
+            grammar_terminated=grammar_terminated,
         )

@@ -373,6 +373,7 @@ class OffloadPolicy(ComputePolicy):
                             token_id = result.token_id
                             token_logprob = result.logprob
                             top_logprobs = result.top_logprobs
+                            grammar_terminated = result.grammar_terminated
 
                         except Exception as e:
                             logger.error("End-shard sampling failed: %s", e)
@@ -393,6 +394,7 @@ class OffloadPolicy(ComputePolicy):
                             token_id=token_id,
                             logprob=token_logprob,
                             top_logprobs=top_logprobs,
+                            grammar_terminated=grammar_terminated,
                         )
                     else:
                         output_msg = ActivationMessage(
