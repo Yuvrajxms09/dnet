@@ -176,15 +176,21 @@ class FitInMemoryPolicy(ComputePolicy):
                                                 if seq_len > 0:
                                                     token_seq = buffer[:seq_len]
                                                     input_ids_for_grammar = mx.array(token_seq, dtype=mx.int32)
-                                            except Exception:
+                                                else:
+                                                    input_ids_for_grammar = mx.array([], dtype=mx.int32)
+                                            except Exception as e:
+                                                logger.warning(f"Failed to extract token sequence for grammar: {e}")
                                                 # Fallback: use empty sequence (grammar will start fresh)
                                                 input_ids_for_grammar = mx.array([], dtype=mx.int32)
                                         else:
                                             # For non-token activations, we don't have the sequence
                                             # Grammar processor will work but with limited context
                                             input_ids_for_grammar = mx.array([], dtype=mx.int32)
+                                        
+                                        if logits_processor:
+                                            logger.debug(f"Created grammar logits processor with input_ids length: {len(input_ids_for_grammar)}")
                                 except Exception as e:
-                                    logger.warning(f"Failed to create grammar logits processor: {e}")
+                                    logger.error(f"Failed to create grammar logits processor: {e}", exc_info=True)
 
                             sampler = Sampler()
                             result = sampler.sample(

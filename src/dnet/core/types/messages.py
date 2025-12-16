@@ -76,11 +76,14 @@ class ActivationMessage:
             min_tokens_to_keep=proto_msg.min_tokens_to_keep
             if proto_msg.HasField("min_tokens_to_keep")
             else 1,
+            grammar_json_schema=proto_msg.grammar_json_schema
+            if proto_msg.HasField("grammar_json_schema")
+            else None,
         )
 
     def to_proto(self, data: bytes) -> ActivationRequest:
         """Convert to protobuf request"""
-        return ActivationRequest(
+        req = ActivationRequest(
             nonce=self.nonce,
             activation=Activation(
                 data=data,
@@ -101,6 +104,10 @@ class ActivationMessage:
             min_p=self.min_p,
             min_tokens_to_keep=self.min_tokens_to_keep,
         )
+        # Add optional grammar schema if present
+        if self.grammar_json_schema:
+            req.grammar_json_schema = self.grammar_json_schema
+        return req
 
 
 @dataclass(slots=True)

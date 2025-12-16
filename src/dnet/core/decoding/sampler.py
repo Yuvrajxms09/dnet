@@ -100,7 +100,10 @@ class Sampler:
 
                 # Convert back to MLX array
                 v = mx.array(processed_logits)
-            except Exception:
+            except Exception as e:
+                # Log the error for debugging instead of silently failing
+                import warnings
+                warnings.warn(f"Grammar logits processing failed: {e}")
                 # Graceful degradation: if grammar processing fails, use original logits
                 pass
 

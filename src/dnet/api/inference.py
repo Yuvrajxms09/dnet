@@ -287,7 +287,7 @@ class InferenceManager:
             nonce = chunk.id
             choice = chunk.choices[0]
             if choice.delta and choice.delta.content:
-                full_content += choice.delta.content
+                    full_content += choice.delta.content
 
             if choice.logprobs:
                 if choice.logprobs.token_logprobs:

@@ -375,7 +375,7 @@ class OffloadPolicy(ComputePolicy):
                                         else:
                                             # For non-token activations, we don't have the sequence
                                             # Grammar processor will work but with limited context
-                                            input_ids_for_grammar = mx.array([], dtype=mx.int32)
+                                        input_ids_for_grammar = mx.array([], dtype=mx.int32)
                                 except Exception as e:
                                     logger.warning(f"Failed to create grammar logits processor: {e}")
 

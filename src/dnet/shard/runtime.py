@@ -106,6 +106,7 @@ class ShardRuntime:
         self.model: Optional[BaseShardModel] = None
         self.cache: Optional[Any] = None
         self.model_path: Optional[str] = None
+        self.tokenizer: Optional[Any] = None  # Cached tokenizer for grammar support
 
         # Memory Pools
         self.input_pool: Optional[LayerAwareMemoryPool] = None
