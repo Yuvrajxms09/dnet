@@ -384,17 +384,36 @@ Important:
             if token == tokenizer.eos_token_id:
                 completion_reason = ChatCompletionReason.STOP
                 break
+
+            # Check xgrammar's is_terminated() signal from the shard
+            # This is the proper way to detect grammar completion
+            if getattr(result, "grammar_terminated", False):
+                logger.info("Grammar terminated signal received from shard")
+                if use_tool_grammar:
+                    completion_reason = ChatCompletionReason.TOOL_CALLS
+                else:
+                    completion_reason = ChatCompletionReason.STOP
+                break
+
             y = mx.array([token], dtype=mx.int32)
 
         detokenizer.finalize()
         final_text = detokenizer.text
 
-        # Check for tool calls if we used tool grammar
+        # Parse tool calls from generated text if we used tool grammar
         tool_calls = None
         if use_tool_grammar and final_text:
             logger.debug(f"Parsing tool call output (length={len(final_text)})")
+            clean_text = final_text.strip()
+
+            # Remove any trailing special tokens (safety fallback)
+            for eos_pattern in ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"]:
+                if eos_pattern in clean_text:
+                    clean_text = clean_text.split(eos_pattern)[0].strip()
+                    break
+
             try:
-                parsed = json.loads(final_text)
+                parsed = json.loads(clean_text)
                 if isinstance(parsed, dict) and "tool_calls" in parsed:
                     tool_calls = parsed["tool_calls"]
                     if tool_calls and isinstance(tool_calls, list):
@@ -405,23 +424,18 @@ Important:
                             if isinstance(tc, dict)
                         ]
                         logger.info(
-                            f"Generated {len(tool_calls)} tool call(s): {tool_names}"
+                            f"Parsed {len(tool_calls)} tool call(s): {tool_names}"
                         )
                     else:
-                        logger.warning(
-                            f"Parsed tool_calls is empty or invalid: {tool_calls}"
-                        )
+                        logger.warning(f"tool_calls is empty or invalid: {tool_calls}")
                         tool_calls = None
                 else:
                     logger.warning(
-                        f"Parsed JSON does not contain 'tool_calls' key: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed)}"
+                        f"JSON missing 'tool_calls' key: {type(parsed)}"
                     )
             except json.JSONDecodeError as e:
-                # Grammar should guarantee valid JSON, but log if it fails
-                logger.error(
-                    f"Failed to parse tool call JSON (this should not happen with xgrammar): {e}"
-                )
-                logger.debug(f"Raw output that failed parsing: {final_text[:500]}...")
+                logger.error(f"Failed to parse tool call JSON: {e}")
+                logger.debug(f"Raw output: {clean_text[:300]}...")
 
         metrics_dict = None
         t_end = time.perf_counter()
