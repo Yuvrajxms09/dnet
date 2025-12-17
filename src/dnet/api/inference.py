@@ -116,7 +116,7 @@ Rules:
         """
         Build JSON schema for tool calls based on available tools.
 
-        This schema is used by xgrammar to constrain generation to valid
+        This schema is used by Outlines to constrain generation to valid
         tool call JSON. The function names are restricted to an enum of
         available tool names.
 
@@ -217,7 +217,7 @@ Rules:
             # This is the production-standard approach used by vLLM, OpenAI, etc.
             if req.tool_choice == "required":
                 use_tool_grammar = True
-                logger.debug("tool_choice='required': applying xgrammar constraint")
+                logger.debug("tool_choice='required': applying Outlines constraint")
             else:
                 # tool_choice is "auto" or specific function - don't force grammar
                 # Model can choose to call tools or respond with text
@@ -271,7 +271,7 @@ Rules:
             if tool_schema:
                 grammar_json_schema = tool_schema
                 logger.info(
-                    f"Using xgrammar tool call schema for {len(req.tools)} tools"
+                    f"Using Outlines tool call schema for {len(req.tools)} tools"
                 )
             else:
                 # Failed to build schema - disable tool grammar but continue
@@ -413,7 +413,7 @@ Rules:
                 completion_reason = ChatCompletionReason.STOP
                 break
 
-            # Check xgrammar's is_terminated() signal from the shard
+            # Check Outlines' is_terminated() signal from the shard
             # This is the proper way to detect grammar completion
             if getattr(result, "grammar_terminated", False):
                 logger.info("Grammar terminated signal received from shard")
