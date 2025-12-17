@@ -354,7 +354,13 @@ class OffloadPolicy(ComputePolicy):
                                 nonce = msg.nonce
                                 if nonce in OffloadPolicy._grammar_states:
                                     grammar_state = OffloadPolicy._grammar_states[nonce]
-                                else:
+                                    # Check if grammar state was already terminated - if so, don't reuse it
+                                    if grammar_state is not None and getattr(grammar_state, '_terminated', False):
+                                        logger.debug(f"Grammar state for nonce {nonce} already terminated, removing from cache")
+                                        del OffloadPolicy._grammar_states[nonce]
+                                        grammar_state = None
+                                
+                                if grammar_state is None:
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
                                     model_vocab_size = y.shape[-1] if hasattr(y, 'shape') else None
                                     if tokenizer:
@@ -374,6 +380,13 @@ class OffloadPolicy(ComputePolicy):
                             token_logprob = result.logprob
                             top_logprobs = result.top_logprobs
                             grammar_terminated = result.grammar_terminated
+                            
+                            # Clean up grammar state from cache if terminated
+                            if grammar_terminated and grammar_state is not None and grammar_schema:
+                                nonce = msg.nonce
+                                if nonce in OffloadPolicy._grammar_states:
+                                    logger.debug(f"Removing terminated grammar state for nonce {nonce}")
+                                    del OffloadPolicy._grammar_states[nonce]
 
                         except Exception as e:
                             logger.error("End-shard sampling failed: %s", e)
