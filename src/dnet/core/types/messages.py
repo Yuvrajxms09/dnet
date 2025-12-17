@@ -35,7 +35,7 @@ class ActivationMessage:
     token_id: int = -1
     logprob: float = 0.0
     top_logprobs: Optional[dict[int, float]] = None
-    grammar_terminated: bool = False  # True when xgrammar grammar is complete
+    grammar_terminated: bool = False  # True when Outlines grammar is complete
 
     # Request control
     req_logprobs: bool = False
@@ -134,7 +134,7 @@ class TokenResult:
     token_id: int
     logprob: float = 0.0
     top_logprobs: dict[int, float] = field(default_factory=dict)
-    grammar_terminated: bool = False  # True when xgrammar's is_terminated() returns True
+    grammar_terminated: bool = False  # True when Outlines' is_terminated() returns True
 
 
 __all__ = [

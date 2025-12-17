@@ -230,7 +230,6 @@ class Sampler:
             from outlines_core.kernels.mlx import allocate_token_bitmask
             
             # Get vocab_size: prefer model_vocab_size (from logits shape) over tokenizer.vocab_size
-            # This matches xgrammar's pattern:
             #   - model_vocab_size comes from logits.shape[-1] (most accurate, matches actual model)
             #   - tokenizer.vocab_size is fallback (may differ if model was extended)
             # The vocab_size is critical for bitmask allocation - must match logits shape
