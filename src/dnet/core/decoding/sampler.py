@@ -1,6 +1,6 @@
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, Tuple
+from typing import Optional, Any, Tuple, Dict
 from mlx_lm.sample_utils import make_sampler
 from dnet.core.types.messages import TokenResult
 from dnet.core.decoding.config import DecodingConfig
@@ -8,61 +8,206 @@ from dnet.utils.logger import logger
 
 
 class GrammarState:
-    """Holds xgrammar state for a single generation session."""
+    """Holds Outlines grammar state for a single generation session.
     
-    def __init__(self, compiled_grammar, tokenizer_info):
-        import xgrammar as xgr
-        self.compiled_grammar = compiled_grammar
-        self.tokenizer_info = tokenizer_info
-        self.matcher = xgr.GrammarMatcher(compiled_grammar)
-        self.bitmask = None
-        self.vocab_size = tokenizer_info.vocab_size
+    Uses Outlines' FSM-based approach for constrained JSON generation.
+    Replaces the previous xgrammar implementation.
+    """
+    
+    def __init__(self, guide, index, bitmask_allocator, vocab_size: int):
+        """Initialize grammar state with Outlines Guide.
+        
+        Args:
+            guide: Outlines Guide instance for tracking FSM state
+            index: Outlines Index for the compiled regex/grammar
+            bitmask_allocator: Function to allocate bitmask for vocab size
+            vocab_size: Size of the model vocabulary
+        """
+        self.guide = guide
+        self.index = index
+        self.bitmask_allocator = bitmask_allocator
+        self.vocab_size = vocab_size
+        self._bitmask = None
     
     def get_bitmask(self):
         """Get or create the token bitmask."""
-        if self.bitmask is None:
-            import xgrammar as xgr
-            self.bitmask = xgr.allocate_token_bitmask(1, self.vocab_size)
-        return self.bitmask
+        if self._bitmask is None:
+            self._bitmask = self.bitmask_allocator(self.vocab_size)
+        return self._bitmask
+    
+    def fill_next_token_bitmask(self):
+        """Fill bitmask with allowed tokens for current state."""
+        from outlines_core.kernels.mlx import fill_next_token_bitmask
+        bitmask = self.get_bitmask()
+        fill_next_token_bitmask(self.guide, bitmask)
+        return bitmask
+    
+    def accept_token(self, token_id: int) -> None:
+        """Accept a token and advance the grammar state."""
+        # Only advance if not finished or if token is still accepted
+        if not self.guide.is_finished() or self.guide.accepts_tokens([token_id]):
+            self.guide.advance(token_id=token_id, return_tokens=False)
+    
+    def is_terminated(self) -> bool:
+        """Check if the grammar has reached a final/accepting state."""
+        return self.guide.is_finished()
 
 
 class Sampler:
     """
     Handles the transformation of logits into tokens based on a DecodingConfig.
     Wraps mlx_lm's make_sampler for consistent sampling behavior.
-    Supports structured output via grammar-constrained generation using xgrammar.
+    Supports structured output via grammar-constrained generation using Outlines.
     """
+
+    # Cache for compiled vocabulary to avoid recomputing per request
+    _vocabulary_cache: Dict[int, Any] = {}
 
     def __init__(self):
         """Initialize sampler."""
         pass
 
     @staticmethod
+    def _get_or_create_vocabulary(tokenizer, vocab_size: int):
+        """Get or create Outlines Vocabulary from tokenizer.
+        
+        Caches vocabulary by tokenizer to avoid recomputation.
+        Validates that vocab_size matches tokenizer's actual vocabulary size.
+        
+        Args:
+            tokenizer: HuggingFace tokenizer
+            vocab_size: Expected vocabulary size (from model logits or tokenizer.vocab_size)
+        """
+        cache_key = id(tokenizer)
+        if cache_key in Sampler._vocabulary_cache:
+            return Sampler._vocabulary_cache[cache_key]
+        
+        try:
+            from outlines_core import Vocabulary
+            
+            # Get vocabulary dict from tokenizer
+            vocab = tokenizer.get_vocab()
+            actual_vocab_size = len(vocab)
+            
+            # Validate vocab_size matches actual tokenizer vocab size
+            # This is important for bitmask allocation - it must match logits shape
+            if vocab_size != actual_vocab_size:
+                logger.warning(
+                    f"Vocab size mismatch: expected {vocab_size} (from model/logits) "
+                    f"but tokenizer has {actual_vocab_size} tokens. "
+                    f"Using model vocab_size {vocab_size} for bitmask allocation."
+                )
+            
+            eos_token_id = tokenizer.eos_token_id
+            eos_token = tokenizer.eos_token or tokenizer.decode([eos_token_id])
+            
+            # Build formatted vocabulary for Outlines
+            # Need to convert token strings to their actual string representation
+            formatted_vocab = {}
+            for token, token_id in vocab.items():
+                try:
+                    # Convert token to its string representation
+                    # This handles special tokens like spacing tokens
+                    token_as_str = tokenizer.convert_tokens_to_string([token])
+                    if token_as_str not in formatted_vocab:
+                        formatted_vocab[token_as_str] = [token_id]
+                    else:
+                        formatted_vocab[token_as_str].append(token_id)
+                except Exception:
+                    # Fallback: use token as-is
+                    if token not in formatted_vocab:
+                        formatted_vocab[token] = [token_id]
+                    else:
+                        formatted_vocab[token].append(token_id)
+            
+            # Remove EOS token from vocab (Outlines handles it separately)
+            formatted_vocab.pop(eos_token, None)
+            
+            vocabulary = Vocabulary(eos_token_id, formatted_vocab)
+            Sampler._vocabulary_cache[cache_key] = vocabulary
+            
+            logger.debug(
+                f"Created Outlines vocabulary: {len(formatted_vocab)} entries, "
+                f"vocab_size={vocab_size}, actual_tokenizer_size={actual_vocab_size}"
+            )
+            return vocabulary
+            
+        except Exception as e:
+            logger.warning(f"Failed to create Outlines vocabulary: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
+
+    @staticmethod
     def create_grammar_state(json_schema: str, tokenizer, model_vocab_size: Optional[int] = None) -> Optional[GrammarState]:
-        """Create a grammar state for JSON schema constrained generation."""
+        """Create a grammar state for JSON schema constrained generation.
+        
+        Uses Outlines to compile JSON schema into an FSM-based grammar guide.
+        
+        Args:
+            json_schema: JSON schema string to constrain generation
+            tokenizer: HuggingFace tokenizer for the model
+            model_vocab_size: Optional vocab size override
+            
+        Returns:
+            GrammarState instance or None if creation fails
+        """
         if not json_schema:
             return None
             
         try:
-            import xgrammar as xgr
+            from outlines_core import Index, Guide
+            from outlines_core.outlines_core import json_schema as oc_json_schema
+            from outlines_core.kernels.mlx import allocate_token_bitmask
             
+            # Get vocab_size: prefer model_vocab_size (from logits shape) over tokenizer.vocab_size
+            # This matches xgrammar's pattern:
+            #   - model_vocab_size comes from logits.shape[-1] (most accurate, matches actual model)
+            #   - tokenizer.vocab_size is fallback (may differ if model was extended)
+            # The vocab_size is critical for bitmask allocation - must match logits shape
             vocab_size = model_vocab_size or getattr(tokenizer, 'vocab_size', None)
+            if vocab_size is None:
+                logger.warning("Could not determine vocab size for grammar state")
+                return None
             
-            if vocab_size:
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab_size)
+            # Log which source we used for debugging
+            if model_vocab_size:
+                logger.debug(f"Using model_vocab_size={vocab_size} (from logits shape)")
             else:
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+                tokenizer_vocab_size = getattr(tokenizer, 'vocab_size', None)
+                logger.debug(f"Using tokenizer.vocab_size={vocab_size} (fallback)")
             
-            grammar_compiler = xgr.GrammarCompiler(tokenizer_info)
-            compiled_grammar = grammar_compiler.compile_json_schema(json_schema)
+            # Build regex pattern from JSON schema
+            regex_pattern = oc_json_schema.build_regex_from_schema(json_schema)
+            logger.debug(f"Built regex from JSON schema (length: {len(regex_pattern)})")
             
-            return GrammarState(compiled_grammar, tokenizer_info)
+            # Get or create vocabulary
+            vocabulary = Sampler._get_or_create_vocabulary(tokenizer, vocab_size)
+            if vocabulary is None:
+                logger.warning("Failed to create vocabulary for grammar state")
+                return None
+            
+            # Create Index from regex and vocabulary
+            index = Index(regex_pattern, vocabulary)
+            
+            # Create Guide from Index
+            guide = Guide(index)
+            
+            logger.debug("Successfully created Outlines grammar state")
+            return GrammarState(
+                guide=guide,
+                index=index,
+                bitmask_allocator=allocate_token_bitmask,
+                vocab_size=vocab_size
+            )
             
         except ImportError as e:
-            logger.warning(f"xgrammar not installed: {e}")
+            logger.warning(f"Outlines not installed or import error: {e}")
             return None
         except Exception as e:
             logger.warning(f"Failed to create grammar state: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return None
 
     @staticmethod
@@ -76,6 +221,8 @@ class Sampler:
         """
         Sample a token from logits using the provided configuration.
         If grammar_state is provided, applies grammar constraints before sampling.
+        
+        Uses Outlines' FSM-based approach for constrained generation.
         """
         sampler_fn = make_sampler(
             temp=config.temperature,
@@ -98,21 +245,21 @@ class Sampler:
         # Apply grammar-constrained logits processing if available
         if grammar_state is not None:
             try:
-                import xgrammar as xgr
-                import torch
+                from outlines_core.kernels.mlx import apply_token_bitmask
                 
-                bitmask = grammar_state.get_bitmask()
-                grammar_state.matcher.fill_next_token_bitmask(bitmask)
+                # Fill bitmask with allowed tokens for current grammar state
+                bitmask = grammar_state.fill_next_token_bitmask()
                 
-                # Convert to float32 first (handles bfloat16 which NumPy doesn't support)
-                # Use buffer protocol instead of .tolist() for better performance
-                v_np = np.array(v.astype(mx.float32))
-                v_torch = torch.from_numpy(v_np).unsqueeze(0)
-                xgr.apply_token_bitmask_inplace(v_torch, bitmask.to(v_torch.device))
-                v = mx.array(v_torch.squeeze(0).numpy())
+                # Apply bitmask to logits (sets disallowed tokens to -inf)
+                # Outlines MLX kernel expects 2D input [batch, vocab]
+                v_2d = v[None, :] if v.ndim == 1 else v
+                v_masked = apply_token_bitmask(v_2d, bitmask)
+                v = v_masked[0] if v_masked.ndim == 2 else v_masked
                 
             except Exception as e:
                 logger.warning(f"Failed to apply grammar mask: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
 
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
@@ -121,11 +268,11 @@ class Sampler:
         grammar_terminated = False
         if grammar_state is not None:
             try:
-                grammar_state.matcher.accept_token(token_id)
+                grammar_state.accept_token(token_id)
                 # Check if grammar is satisfied (complete valid output)
-                if grammar_state.matcher.is_terminated():
+                if grammar_state.is_terminated():
                     grammar_terminated = True
-                    logger.debug("Grammar matcher reports termination (complete output)")
+                    logger.debug("Grammar guide reports termination (complete output)")
             except Exception as e:
                 logger.warning(f"Failed to accept token in grammar: {e}")
 
