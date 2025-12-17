@@ -161,7 +161,16 @@ class FitInMemoryPolicy(ComputePolicy):
                                 nonce = msg.nonce
                                 if nonce in FitInMemoryPolicy._grammar_states:
                                     grammar_state = FitInMemoryPolicy._grammar_states[nonce]
-                                else:
+                                    # Check if grammar state was already terminated - if so, don't reuse it
+                                    if grammar_state is not None and getattr(grammar_state, '_terminated', False):
+                                        logger.info(f"Grammar state for nonce {nonce} already terminated, removing from cache - this should not happen!")
+                                        del FitInMemoryPolicy._grammar_states[nonce]
+                                        grammar_state = None
+                                    else:
+                                        logger.debug(f"Reusing grammar state for nonce {nonce}, _terminated={getattr(grammar_state, '_terminated', False) if grammar_state else None}")
+                                
+                                if grammar_state is None:
+                                    logger.debug(f"Creating new grammar state for nonce {nonce}")
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
                                     model_vocab_size = y.shape[-1] if hasattr(y, 'shape') else None
                                     if tokenizer:
@@ -181,6 +190,15 @@ class FitInMemoryPolicy(ComputePolicy):
                             token_logprob = result.logprob
                             top_logprobs = result.top_logprobs
                             grammar_terminated = result.grammar_terminated
+                            
+                            # Clean up grammar state from cache if terminated
+                            if grammar_terminated and grammar_state is not None and grammar_schema:
+                                nonce = msg.nonce
+                                if nonce in FitInMemoryPolicy._grammar_states:
+                                    logger.info(f"Removing terminated grammar state for nonce {nonce}, token_id={token_id}")
+                                    del FitInMemoryPolicy._grammar_states[nonce]
+                                else:
+                                    logger.warning(f"Grammar terminated but state not found in cache for nonce {nonce}")
 
                         except Exception as e:
                             logger.error("End-shard sampling failed: %s", e)

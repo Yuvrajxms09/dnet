@@ -375,8 +375,19 @@ Rules:
             full_text = detokenizer.text
             delta_text = full_text[last_text_len:]
             last_text_len = len(full_text)
+            
+            # Debug logging for grammar termination
+            if getattr(result, "grammar_terminated", False):
+                logger.info(
+                    f"Grammar terminated - token_id={token}, delta_text='{delta_text}', "
+                    f"full_text='{full_text[:100]}...', tokens_count={len(tokens)}"
+                )
 
             # Yield chunk
+            logger.debug(
+                f"Yielding chunk: token_id={token}, delta_text='{delta_text}', "
+                f"full_text='{full_text[:100]}...', last_text_len={last_text_len}"
+            )
             yield ChatResponseModel(
                 id=nonce,
                 choices=[
@@ -505,12 +516,15 @@ Rules:
         )
 
         # Final chunk with finish reason
+        # Note: Use delta=None to avoid duplication in chat_completions accumulation
+        # The delta should only contain incremental content, not the full message
         yield ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
                     index=0,
-                    delta=final_message,
+                    delta=None,  # Final chunk has no delta to avoid re-accumulating full text
+                    message=final_message,  # Use message field for final complete message
                     finish_reason=completion_reason,
                 )
             ],
@@ -537,14 +551,28 @@ Rules:
         metrics_dict = None
         usage = None
         tool_calls = None
+        final_message_from_chunk = None  # Track if we get a final message from the last chunk
 
         async for chunk in self.generate_stream(req):
             nonce = chunk.id
             choice = chunk.choices[0]
-            if choice.delta:
+            
+            # If this is the final chunk with a message (instead of delta), use it directly
+            if choice.message:
+                final_message_from_chunk = choice.message
+                # Don't accumulate from message - it's the complete final message
+                # Just collect tool_calls if present
+                if final_message_from_chunk.tool_calls:
+                    tool_calls = final_message_from_chunk.tool_calls
+            elif choice.delta:
                 if choice.delta.content:
                     full_content += choice.delta.content
-                # Collect tool_calls from the final delta
+                    logger.debug(
+                        f"Accumulated content: delta='{choice.delta.content[:50]}...', "
+                        f"full_content_len={len(full_content)}, "
+                        f"full_content='{full_content[:100]}...'"
+                    )
+                # Collect tool_calls from the delta
                 if choice.delta.tool_calls:
                     tool_calls = choice.delta.tool_calls
 
@@ -566,11 +594,26 @@ Rules:
                 usage = chunk.usage
 
         # Build final message - content is None if tool_calls present
-        final_message = ChatMessage(
-            role="assistant",
-            content=None if tool_calls else full_content,
-            tool_calls=tool_calls,
-        )
+        # If we already have a final message from the last chunk, use it; otherwise build from accumulated content
+        if final_message_from_chunk is not None:
+            # Use the message from the final chunk
+            final_message = final_message_from_chunk
+            logger.info(
+                f"Final chat_completions: using message from final chunk, "
+                f"content_len={len(final_message.content) if final_message.content else 0}, "
+                f"tool_calls={final_message.tool_calls is not None}"
+            )
+        else:
+            # Build from accumulated content
+            logger.info(
+                f"Final chat_completions: full_content_len={len(full_content)}, "
+                f"full_content='{full_content[:200]}...', tool_calls={tool_calls is not None}"
+            )
+            final_message = ChatMessage(
+                role="assistant",
+                content=None if tool_calls else full_content,
+                tool_calls=tool_calls,
+            )
 
         # Log completion summary
         if tool_calls:

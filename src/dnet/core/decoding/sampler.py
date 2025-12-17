@@ -14,7 +14,7 @@ class GrammarState:
     Replaces the previous xgrammar implementation.
     """
     
-    def __init__(self, guide, index, bitmask_allocator, vocab_size: int):
+    def __init__(self, guide, index, bitmask_allocator, vocab_size: int, eos_token_id: Optional[int] = None):
         """Initialize grammar state with Outlines Guide.
         
         Args:
@@ -22,12 +22,15 @@ class GrammarState:
             index: Outlines Index for the compiled regex/grammar
             bitmask_allocator: Function to allocate bitmask for vocab size
             vocab_size: Size of the model vocabulary
+            eos_token_id: EOS token ID for forced termination
         """
         self.guide = guide
         self.index = index
         self.bitmask_allocator = bitmask_allocator
         self.vocab_size = vocab_size
+        self._eos_token_id = eos_token_id
         self._bitmask = None
+        self._terminated = False  # Track termination state - once True, always True
     
     def get_bitmask(self):
         """Get or create the token bitmask."""
@@ -36,21 +39,87 @@ class GrammarState:
         return self._bitmask
     
     def fill_next_token_bitmask(self):
-        """Fill bitmask with allowed tokens for current state."""
+        """Fill bitmask with allowed tokens for current state.
+        
+        Returns None if already terminated to prevent further token generation.
+        """
+        # Don't fill bitmask if already terminated
+        if self._terminated:
+            return None
+        
         from outlines_core.kernels.mlx import fill_next_token_bitmask
         bitmask = self.get_bitmask()
         fill_next_token_bitmask(self.guide, bitmask)
         return bitmask
     
     def accept_token(self, token_id: int) -> None:
-        """Accept a token and advance the grammar state."""
-        # Only advance if not finished or if token is still accepted
-        if not self.guide.is_finished() or self.guide.accepts_tokens([token_id]):
+        """Accept a token and advance the grammar state.
+        
+        IMPORTANT: Do NOT advance if guide is already finished or terminated, even if it accepts tokens.
+        This prevents the guide from restarting/continuing after JSON completion.
+        """
+        # Never advance if we've already been terminated
+        if self._terminated:
+            return
+        
+        # Only advance if NOT finished - once finished, we should stop
+        # The accepts_tokens check was allowing continuation after completion
+        if not self.guide.is_finished():
             self.guide.advance(token_id=token_id, return_tokens=False)
+        else:
+            # Guide is finished - mark as terminated to prevent further advancement
+            self._terminated = True
     
     def is_terminated(self) -> bool:
-        """Check if the grammar has reached a final/accepting state."""
-        return self.guide.is_finished()
+        """Check if the grammar has reached a final/accepting state.
+        
+        For JSON schemas, this should return True when we've generated
+        a complete valid JSON object and are in a final accepting state.
+        
+        Important: This should be checked BEFORE accepting the next token
+        to prevent generating beyond the valid JSON structure.
+        
+        Once terminated, always returns True to prevent duplication.
+        """
+        # If we've already been terminated, always return True
+        # This prevents the guide from resetting/continuing after completion
+        if self._terminated:
+            return True
+        
+        # Primary check: is the guide finished?
+        if not self.guide.is_finished():
+            return False
+        
+        # When finished, verify we're in a final accepting state of the FSM
+        # This ensures we've completed a valid JSON structure
+        try:
+            current_state = self.guide.get_state()
+            is_final = self.index.is_final_state(current_state)
+            
+            if is_final:
+                # We're in a final state - mark as terminated and return True
+                # Once terminated, we'll always return True on subsequent checks
+                self._terminated = True
+                return True
+            
+            # If guide is finished but not in final state, still mark as terminated
+            # This is a safety measure - if the guide says it's finished, we should stop
+            # The issue was that we were returning False here, allowing continuation
+            self._terminated = True
+            logger.debug(
+                f"Guide finished but not in final state - marking as terminated anyway. "
+                f"state={current_state}, is_final={is_final}"
+            )
+            return True
+        except Exception as e:
+            # Fallback: if we can't check final state, trust is_finished()
+            # Since guide.is_finished() returned True, mark as terminated
+            self._terminated = True
+            logger.debug(
+                f"Could not verify final state: {e}, using is_finished()={self.guide.is_finished()}, "
+                f"marking as terminated"
+            )
+            return True
 
 
 class Sampler:
@@ -193,12 +262,16 @@ class Sampler:
             # Create Guide from Index
             guide = Guide(index)
             
+            # Get EOS token ID for forced termination when grammar completes
+            eos_token_id = getattr(tokenizer, 'eos_token_id', None)
+            
             logger.debug("Successfully created Outlines grammar state")
             return GrammarState(
                 guide=guide,
                 index=index,
                 bitmask_allocator=allocate_token_bitmask,
-                vocab_size=vocab_size
+                vocab_size=vocab_size,
+                eos_token_id=eos_token_id
             )
             
         except ImportError as e:
@@ -242,39 +315,103 @@ class Sampler:
         else:
             v = logits
 
-        # Apply grammar-constrained logits processing if available
+        # Check termination BEFORE generating token to prevent extra tokens
+        grammar_terminated_before = False
         if grammar_state is not None:
+            grammar_terminated_before = grammar_state.is_terminated()
+            if grammar_terminated_before:
+                logger.info("Grammar already terminated before token generation - preventing further generation")
+        
+        # Apply grammar-constrained logits processing if available
+        if grammar_state is not None and not grammar_terminated_before:
             try:
                 from outlines_core.kernels.mlx import apply_token_bitmask
                 
                 # Fill bitmask with allowed tokens for current grammar state
                 bitmask = grammar_state.fill_next_token_bitmask()
                 
-                # Apply bitmask to logits (sets disallowed tokens to -inf)
-                # Outlines MLX kernel expects 2D input [batch, vocab]
-                v_2d = v[None, :] if v.ndim == 1 else v
-                v_masked = apply_token_bitmask(v_2d, bitmask)
-                v = v_masked[0] if v_masked.ndim == 2 else v_masked
+                # If bitmask is None, grammar was terminated during bitmask fill
+                # This shouldn't happen if we checked is_terminated() first, but be defensive
+                if bitmask is None:
+                    grammar_terminated_before = True
+                    # Mask all tokens except EOS to prevent further generation
+                    eos_token_id = getattr(grammar_state, '_eos_token_id', None)
+                    if eos_token_id is not None and eos_token_id < len(v):
+                        v = mx.full_like(v, float('-inf'))
+                        v[eos_token_id] = 0.0
+                    else:
+                        v = mx.full_like(v, float('-inf'))
+                    logger.debug("Grammar terminated during bitmask fill - masking all tokens except EOS")
+                else:
+                    # Apply bitmask to logits (sets disallowed tokens to -inf)
+                    # Outlines MLX kernel expects 2D input [batch, vocab]
+                    v_2d = v[None, :] if v.ndim == 1 else v
+                    v_masked = apply_token_bitmask(v_2d, bitmask)
+                    v = v_masked[0] if v_masked.ndim == 2 else v_masked
                 
             except Exception as e:
                 logger.warning(f"Failed to apply grammar mask: {e}")
                 import traceback
                 logger.debug(traceback.format_exc())
+        
+        if grammar_terminated_before:
+            # Grammar is already terminated - only allow EOS token
+            # This prevents generating any more content tokens
+            eos_token_id = getattr(grammar_state, '_eos_token_id', None)
+            if eos_token_id is not None and eos_token_id < len(v):
+                # Mask all tokens except EOS to force termination
+                v = mx.full_like(v, float('-inf'))
+                v[eos_token_id] = 0.0  # Allow EOS token only
+                logger.debug(f"Grammar terminated - only allowing EOS token {eos_token_id}")
+            else:
+                # No EOS token ID - mask all to prevent further generation
+                v = mx.full_like(v, float('-inf'))
+                logger.debug("Grammar terminated - masked all tokens (no EOS token ID)")
 
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
         
-        # Update grammar state with accepted token and check termination
-        grammar_terminated = False
+        # Log token generation for debugging
         if grammar_state is not None:
+            logger.debug(
+                f"Generated token_id={token_id}, grammar_terminated_before={grammar_terminated_before}, "
+                f"_terminated={getattr(grammar_state, '_terminated', False)}, "
+                f"guide.is_finished()={grammar_state.guide.is_finished()}"
+            )
+        
+        # Update grammar state with accepted token and check termination
+        grammar_terminated = grammar_terminated_before  # Use pre-check result
+        if grammar_state is not None and not grammar_terminated_before:
             try:
+                # Accept the token first
                 grammar_state.accept_token(token_id)
+                
                 # Check if grammar is satisfied (complete valid output)
+                # This should return True when we've generated a complete valid JSON
                 if grammar_state.is_terminated():
                     grammar_terminated = True
-                    logger.debug("Grammar guide reports termination (complete output)")
+                    try:
+                        current_state = grammar_state.guide.get_state()
+                        is_final = grammar_state.index.is_final_state(current_state)
+                        logger.info(
+                            f"Grammar terminated after token: token_id={token_id}, "
+                            f"guide.is_finished()={grammar_state.guide.is_finished()}, "
+                            f"is_final_state={is_final}, state={current_state}, "
+                            f"_terminated={getattr(grammar_state, '_terminated', False)}"
+                        )
+                    except Exception:
+                        logger.info(
+                            f"Grammar terminated after token: token_id={token_id}, "
+                            f"guide.is_finished()={grammar_state.guide.is_finished()}, "
+                            f"_terminated={getattr(grammar_state, '_terminated', False)}"
+                        )
             except Exception as e:
                 logger.warning(f"Failed to accept token in grammar: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+        elif grammar_terminated_before:
+            # Grammar was already terminated - don't accept more tokens
+            logger.info(f"Grammar already terminated, not accepting token_id={token_id} - this should not happen")
 
         logprob = 0.0
         top_logprobs = {}
