@@ -19,6 +19,7 @@ from .models import (
 from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
+from .mcp_tools import MCPToolProvider
 from dnet.core.decoding.config import DecodingConfig
 from dnet.utils.logger import logger
 
@@ -47,11 +48,13 @@ class InferenceManager:
         model_manager: ModelManager,
         grpc_port: int,
         adapter: ApiAdapterBase,
+        mcp_provider: Optional[MCPToolProvider] = None,
     ):
         self.cluster_manager = cluster_manager
         self.model_manager = model_manager
         self.grpc_port = grpc_port
         self.adapter = adapter
+        self.mcp_provider = mcp_provider
 
         self._api_callback_addr: str = ""
 
@@ -64,6 +67,60 @@ class InferenceManager:
         """
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = api_callback_addr
+
+    def set_mcp_provider(self, provider: MCPToolProvider) -> None:
+        """Set MCP tool provider for external tool execution."""
+        self.mcp_provider = provider
+        if provider.enabled:
+            logger.info(f"MCP provider set with {len(provider.get_tool_names())} tools")
+
+    async def _execute_tool_calls(
+        self, tool_calls: List[Dict[str, Any]]
+    ) -> List[ChatMessage]:
+        """Execute tool calls via MCP and return tool result messages.
+
+        Args:
+            tool_calls: List of tool calls in OpenAI format
+
+        Returns:
+            List of ChatMessage with role="tool" containing results
+        """
+        results = []
+
+        for tc in tool_calls:
+            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            
+            # Parse arguments (may be string or dict)
+            args_raw = func.get("arguments", "{}")
+            if isinstance(args_raw, str):
+                try:
+                    arguments = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    arguments = {}
+                    logger.warning(f"Failed to parse tool arguments: {args_raw[:100]}")
+            else:
+                arguments = args_raw
+
+            # Execute via MCP
+            if self.mcp_provider and self.mcp_provider.enabled:
+                result_text = await self.mcp_provider.execute(tool_name, arguments)
+            else:
+                result_text = f"Error: MCP provider not available for tool '{tool_name}'"
+                logger.warning(result_text)
+
+            # Create tool result message (OpenAI format)
+            results.append(ChatMessage(
+                role="tool",
+                name=tool_name,
+                content=result_text,
+                tool_call_id=tool_id,
+            ))
+
+            logger.info(f"Tool '{tool_name}' executed, result: {len(result_text)} chars")
+
+        return results
 
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """
@@ -538,10 +595,101 @@ Rules:
             ),
         )
 
-    async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
+    async def chat_completions(
+        self, 
+        req: ChatRequestModel, 
+        execute_tools: bool = True,
+        max_tool_rounds: int = 5,
+    ) -> ChatResponseModel:
         """
-        Handles chat completion request (non-streaming).
+        Handles chat completion request (non-streaming) with optional tool execution.
+
+        Args:
+            req: Chat request
+            execute_tools: If True, automatically execute tool calls via MCP
+            max_tool_rounds: Maximum tool execution iterations (prevents infinite loops)
         """
+        # Inject MCP tools if available and no tools provided in request
+        working_req = req
+        if self.mcp_provider and self.mcp_provider.enabled and not req.tools:
+            mcp_tools = self.mcp_provider.get_tools()
+            if mcp_tools:
+                # Create new request with MCP tools
+                working_req = ChatRequestModel(
+                    messages=req.messages,
+                    model=req.model,
+                    temperature=req.temperature,
+                    max_tokens=req.max_tokens,
+                    top_p=req.top_p,
+                    top_k=req.top_k,
+                    stop=req.stop,
+                    stream=req.stream,
+                    logprobs=req.logprobs,
+                    top_logprobs=req.top_logprobs,
+                    repetition_penalty=req.repetition_penalty,
+                    tools=mcp_tools,
+                    tool_choice=req.tool_choice or "auto",
+                )
+                logger.info(f"Injected {len(mcp_tools)} MCP tools into request")
+
+        # Tool execution loop
+        current_messages = list(working_req.messages)
+        tool_round = 0
+
+        while tool_round < max_tool_rounds:
+            tool_round += 1
+
+            # Generate response
+            response = await self._generate_single_completion(
+                ChatRequestModel(
+                    messages=current_messages,
+                    model=working_req.model,
+                    temperature=working_req.temperature,
+                    max_tokens=working_req.max_tokens,
+                    top_p=working_req.top_p,
+                    top_k=working_req.top_k,
+                    stop=working_req.stop,
+                    stream=False,
+                    logprobs=working_req.logprobs,
+                    top_logprobs=working_req.top_logprobs,
+                    repetition_penalty=working_req.repetition_penalty,
+                    tools=working_req.tools,
+                    tool_choice=working_req.tool_choice,
+                )
+            )
+
+            # Check if we need to execute tools
+            choice = response.choices[0]
+            if (
+                execute_tools
+                and choice.finish_reason == ChatCompletionReason.TOOL_CALLS
+                and choice.message
+                and choice.message.tool_calls
+                and self.mcp_provider
+                and self.mcp_provider.enabled
+            ):
+                tool_calls = choice.message.tool_calls
+                logger.info(f"Tool round {tool_round}: executing {len(tool_calls)} tool(s)")
+
+                # Add assistant message with tool calls
+                current_messages.append(choice.message)
+
+                # Execute tools and add results
+                tool_results = await self._execute_tool_calls(tool_calls)
+                current_messages.extend(tool_results)
+
+                # Continue loop for next response
+                continue
+
+            # No tool calls or tool execution disabled - return response
+            return response
+
+        # Max rounds reached
+        logger.warning(f"Max tool rounds ({max_tool_rounds}) reached")
+        return response
+
+    async def _generate_single_completion(self, req: ChatRequestModel) -> ChatResponseModel:
+        """Generate a single completion without tool execution loop."""
         full_content = ""
         tokens = []
         token_logprobs = []
@@ -551,28 +699,19 @@ Rules:
         metrics_dict = None
         usage = None
         tool_calls = None
-        final_message_from_chunk = None  # Track if we get a final message from the last chunk
+        final_message_from_chunk = None
 
         async for chunk in self.generate_stream(req):
             nonce = chunk.id
             choice = chunk.choices[0]
-            
-            # If this is the final chunk with a message (instead of delta), use it directly
+
             if choice.message:
                 final_message_from_chunk = choice.message
-                # Don't accumulate from message - it's the complete final message
-                # Just collect tool_calls if present
                 if final_message_from_chunk.tool_calls:
                     tool_calls = final_message_from_chunk.tool_calls
             elif choice.delta:
                 if choice.delta.content:
                     full_content += choice.delta.content
-                    logger.debug(
-                        f"Accumulated content: delta='{choice.delta.content[:50]}...', "
-                        f"full_content_len={len(full_content)}, "
-                        f"full_content='{full_content[:100]}...'"
-                    )
-                # Collect tool_calls from the delta
                 if choice.delta.tool_calls:
                     tool_calls = choice.delta.tool_calls
 
@@ -586,46 +725,27 @@ Rules:
 
             if choice.finish_reason:
                 completion_reason = choice.finish_reason
-
             if chunk.metrics:
                 metrics_dict = chunk.metrics
-
             if chunk.usage:
                 usage = chunk.usage
 
-        # Build final message - content is None if tool_calls present
-        # If we already have a final message from the last chunk, use it; otherwise build from accumulated content
+        # Build final message
         if final_message_from_chunk is not None:
-            # Use the message from the final chunk
             final_message = final_message_from_chunk
-            logger.info(
-                f"Final chat_completions: using message from final chunk, "
-                f"content_len={len(final_message.content) if final_message.content else 0}, "
-                f"tool_calls={final_message.tool_calls is not None}"
-            )
         else:
-            # Build from accumulated content
-            logger.info(
-                f"Final chat_completions: full_content_len={len(full_content)}, "
-                f"full_content='{full_content[:200]}...', tool_calls={tool_calls is not None}"
-            )
             final_message = ChatMessage(
                 role="assistant",
                 content=None if tool_calls else full_content,
                 tool_calls=tool_calls,
             )
 
-        # Log completion summary
+        # Log completion
         if tool_calls:
-            logger.info(
-                f"Chat completion finished with {len(tool_calls)} tool call(s), "
-                f"reason={completion_reason.value}"
-            )
+            tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+            logger.info(f"Completion with tool calls: {tool_names}")
         else:
-            logger.debug(
-                f"Chat completion finished, reason={completion_reason.value}, "
-                f"content_length={len(full_content)}"
-            )
+            logger.debug(f"Completion finished, content_len={len(full_content)}")
 
         return ChatResponseModel(
             id=nonce,

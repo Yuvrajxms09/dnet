@@ -13,12 +13,16 @@ from dnet_p2p import AsyncDnetP2P, StaticDiscovery
 from dnet.api.cluster import ClusterManager
 from dnet.api.model_manager import ModelManager
 from dnet.api.inference import InferenceManager
+from dnet.api.mcp_tools import MCPToolProvider, load_mcp_config
 from dnet.api.http_api import HTTPServer as ApiHTTPServer
 from dnet.api.grpc_servicer import GrpcServer as ApiGrpcServer
 
 
 async def serve(
-    http_port: int, grpc_port: int, hostfile: Optional[Path] = None
+    http_port: int,
+    grpc_port: int,
+    hostfile: Optional[Path] = None,
+    mcp_config_path: Optional[str] = None,
 ) -> None:
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -80,8 +84,25 @@ async def serve(
 
         cluster_manager = ClusterManager(discovery, solver=strategy.solver)
         model_manager = ModelManager(on_model_change=update_tui_model_info)
+
+        # Initialize MCP tool provider if configured
+        mcp_provider: Optional[MCPToolProvider] = None
+        mcp_config = load_mcp_config(mcp_config_path)
+        if mcp_config:
+            tui.update_status("Initializing MCP Tools...")
+            mcp_provider = MCPToolProvider(mcp_config)
+            await mcp_provider.initialize()
+            if mcp_provider.enabled:
+                tool_names = mcp_provider.get_tool_names()
+                logger.info(f"MCP tools enabled: {len(tool_names)} tools available")
+                tui.update_status(f"MCP: {len(tool_names)} tools loaded")
+
         inference_manager = InferenceManager(
-            cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
+            cluster_manager,
+            model_manager,
+            grpc_port,
+            adapter=strategy.adapter,
+            mcp_provider=mcp_provider,
         )
 
         # Servers
@@ -149,6 +170,12 @@ def main() -> None:
         default=None,
         help="Path to hostfile for static peer discovery (bypasses UDP broadcast)",
     )
+    ap.add_argument(
+        "--mcp-config",
+        type=str,
+        default=None,
+        help="Path to MCP servers config file (JSON/YAML) for external tool integration",
+    )
     args = ap.parse_args()
 
     hostfile = Path(args.hostfile) if args.hostfile else None
@@ -158,8 +185,17 @@ def main() -> None:
     )
     if hostfile:
         logger.info(f"Using static discovery from hostfile: {hostfile}")
+    if args.mcp_config:
+        logger.info(f"Using MCP config from: {args.mcp_config}")
 
-    asyncio.run(serve(args.http_port, args.grpc_port, hostfile=hostfile))
+    asyncio.run(
+        serve(
+            args.http_port,
+            args.grpc_port,
+            hostfile=hostfile,
+            mcp_config_path=args.mcp_config,
+        )
+    )
 
 
 if __name__ == "__main__":
