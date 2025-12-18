@@ -1,6 +1,8 @@
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Dict
 import asyncio
 import os
+import json
+import uuid
 from hypercorn import Config
 from hypercorn.utils import LifespanFailureError
 import hypercorn.asyncio as aio_hypercorn
@@ -11,6 +13,8 @@ from distilp.profiler import profile_model
 from dnet.utils.logger import logger
 from .models import (
     ChatRequestModel,
+    ChatMessage,
+    ChatCompletionReason,
     APILoadModelRequest,
     APILoadModelResponse,
     PrepareTopologyRequest,
@@ -35,12 +39,14 @@ class HTTPServer:
         inference_manager: InferenceManager,
         model_manager: ModelManager,
         node_id: str,
+        mcp_provider: Optional[Any] = None,  # MCPToolProvider
     ):
         self.http_port = http_port
         self.cluster_manager = cluster_manager
         self.inference_manager = inference_manager
         self.model_manager = model_manager
         self.node_id = node_id
+        self.mcp_provider = mcp_provider
         self.app = FastAPI()
         self.http_server: Optional[asyncio.Task] = None
 
@@ -91,6 +97,8 @@ class HTTPServer:
             methods=["POST"],
         )
         self.app.add_api_route("/v1/devices", self.get_devices, methods=["GET"])
+        # MCP tools discovery endpoint
+        self.app.add_api_route("/v1/mcp/tools", self.get_mcp_tools, methods=["GET"])
 
     async def health(self) -> HealthResponse:
         return HealthResponse(
@@ -115,6 +123,61 @@ class HTTPServer:
             ],
         )
 
+    async def get_mcp_tools(self) -> Dict[str, Any]:
+        """Get available MCP tools for client to use in requests.
+        
+        Returns list of tools in OpenAI format that clients can include
+        in their chat completion requests.
+        """
+        if not self.mcp_provider or not self.mcp_provider.enabled:
+            return {"tools": [], "enabled": False}
+        
+        tools = self.mcp_provider.get_tools()
+        return {
+            "tools": tools,
+            "enabled": True,
+            "count": len(tools),
+        }
+
+    async def _execute_tool_calls(
+        self, tool_calls: List[Dict[str, Any]]
+    ) -> List[ChatMessage]:
+        """Execute tool calls via MCP and return tool result messages."""
+        if not self.mcp_provider or not self.mcp_provider.enabled:
+            return []
+        
+        results = []
+        for tc in tool_calls:
+            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            
+            # Parse arguments (may be string or dict)
+            args_raw = func.get("arguments", "{}")
+            if isinstance(args_raw, str):
+                try:
+                    arguments = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    arguments = {}
+                    logger.warning(f"Failed to parse tool arguments: {args_raw[:100]}")
+            else:
+                arguments = args_raw
+
+            # Execute via MCP
+            result_text = await self.mcp_provider.execute(tool_name, arguments)
+            
+            # Create tool result message (OpenAI format)
+            results.append(ChatMessage(
+                role="tool",
+                name=tool_name,
+                content=result_text,
+                tool_call_id=tool_id,
+            ))
+            
+            logger.info(f"Tool '{tool_name}' executed, result: {len(result_text)} chars")
+
+        return results
+
     async def chat_completions(self, req: ChatRequestModel):
         if not self.model_manager.current_model_id:
             from fastapi import HTTPException, status
@@ -124,18 +187,64 @@ class HTTPServer:
                 detail="No model loaded. Please load a model via /v1/load_model first.",
             )
 
-        if req.stream:
+        # NOTE: We do NOT auto-inject MCP tools. Clients should:
+        # 1. Call GET /v1/mcp/tools to discover available tools
+        # 2. Include desired tools in their request's "tools" field
 
+        if req.stream:
             async def stream_generator():
                 async for chunk in self.inference_manager.generate_stream(req):
-                    # Use model_dump_json with exclude_none to omit empty fields like 'message' in chunks
                     data = chunk.model_dump_json(exclude_none=True)
                     yield f"data: {data}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
-            return await self.inference_manager.chat_completions(req)
+            # Non-streaming with tool execution loop (if tools provided and MCP enabled)
+            current_messages = list(req.messages)
+            max_tool_rounds = 5
+            response = None
+            
+            for tool_round in range(max_tool_rounds):
+                # Generate response using model_copy to avoid validation issues
+                loop_req = req.model_copy(update={
+                    "messages": current_messages,
+                    "stream": False,
+                })
+                
+                response = await self.inference_manager.chat_completions(loop_req)
+                
+                # Check if we need to execute tools
+                choice = response.choices[0]
+                should_execute_tools = (
+                    req.tools  # Only if client provided tools
+                    and self.mcp_provider 
+                    and self.mcp_provider.enabled
+                    and choice.finish_reason == ChatCompletionReason.TOOL_CALLS
+                    and choice.message
+                    and choice.message.tool_calls
+                )
+                
+                if should_execute_tools:
+                    tool_calls = choice.message.tool_calls
+                    logger.info(f"Tool round {tool_round + 1}: executing {len(tool_calls)} tool(s)")
+                    
+                    # Add assistant message with tool calls
+                    current_messages.append(choice.message)
+                    
+                    # Execute tools and add results
+                    tool_results = await self._execute_tool_calls(tool_calls)
+                    current_messages.extend(tool_results)
+                    
+                    # Continue loop for next response
+                    continue
+                
+                # No tool calls or tools not provided - return response
+                return response
+            
+            # Max rounds reached
+            logger.warning(f"Max tool rounds ({max_tool_rounds}) reached")
+            return response
 
     async def load_model(self, req: APILoadModelRequest) -> APILoadModelResponse:
         try:

@@ -1,3 +1,10 @@
+"""Inference manager for dnet API server.
+
+Handles chat completions with optional:
+- Tool calling (prompt injection + grammar-constrained generation)
+- MCP tool execution (server-side tool execution loop)
+"""
+
 import asyncio
 import time
 import uuid
@@ -19,9 +26,17 @@ from .models import (
 from .cluster import ClusterManager
 from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
-from .mcp_tools import MCPToolProvider
 from dnet.core.decoding.config import DecodingConfig
 from dnet.utils.logger import logger
+
+# Optional MCP import - graceful degradation if not available
+try:
+    from .mcp_tools import MCPToolProvider
+    MCP_AVAILABLE = True
+except ImportError:
+    MCPToolProvider = None
+    MCP_AVAILABLE = False
+    logger.debug("MCP tools module not available")
 
 
 async def arange(count: int):
@@ -48,7 +63,7 @@ class InferenceManager:
         model_manager: ModelManager,
         grpc_port: int,
         adapter: ApiAdapterBase,
-        mcp_provider: Optional[MCPToolProvider] = None,
+        mcp_provider: Optional[Any] = None,  # MCPToolProvider, but Optional to avoid import issues
     ):
         self.cluster_manager = cluster_manager
         self.model_manager = model_manager
@@ -57,6 +72,12 @@ class InferenceManager:
         self.mcp_provider = mcp_provider
 
         self._api_callback_addr: str = ""
+        
+        # Log MCP status
+        if mcp_provider:
+            logger.info(f"InferenceManager initialized with MCP provider (enabled={getattr(mcp_provider, 'enabled', False)})")
+        else:
+            logger.debug("InferenceManager initialized without MCP provider")
 
     async def connect_to_ring(
         self, first_shard_ip: str, first_shard_port: int, api_callback_addr: str
@@ -68,117 +89,48 @@ class InferenceManager:
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = api_callback_addr
 
-    def set_mcp_provider(self, provider: MCPToolProvider) -> None:
-        """Set MCP tool provider for external tool execution."""
-        self.mcp_provider = provider
-        if provider.enabled:
-            logger.info(f"MCP provider set with {len(provider.get_tool_names())} tools")
-
-    async def _execute_tool_calls(
-        self, tool_calls: List[Dict[str, Any]]
-    ) -> List[ChatMessage]:
-        """Execute tool calls via MCP and return tool result messages.
-
-        Args:
-            tool_calls: List of tool calls in OpenAI format
-
-        Returns:
-            List of ChatMessage with role="tool" containing results
-        """
-        results = []
-
-        for tc in tool_calls:
-            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            
-            # Parse arguments (may be string or dict)
-            args_raw = func.get("arguments", "{}")
-            if isinstance(args_raw, str):
-                try:
-                    arguments = json.loads(args_raw)
-                except json.JSONDecodeError:
-                    arguments = {}
-                    logger.warning(f"Failed to parse tool arguments: {args_raw[:100]}")
-            else:
-                arguments = args_raw
-
-            # Execute via MCP
-            if self.mcp_provider and self.mcp_provider.enabled:
-                result_text = await self.mcp_provider.execute(tool_name, arguments)
-            else:
-                result_text = f"Error: MCP provider not available for tool '{tool_name}'"
-                logger.warning(result_text)
-
-            # Create tool result message (OpenAI format)
-            results.append(ChatMessage(
-                role="tool",
-                name=tool_name,
-                content=result_text,
-                tool_call_id=tool_id,
-            ))
-
-            logger.info(f"Tool '{tool_name}' executed, result: {len(result_text)} chars")
-
-        return results
+    # =========================================================================
+    # Tool Calling Support
+    # =========================================================================
 
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
-        """
-        Format tools for prompt injection.
-
-        The model needs to know what tools are available. This creates a
-        description that gets injected into the system message.
+        """Format tools for prompt injection.
+        
+        Only injects tool names and short descriptions to keep prompt small.
+        Full schemas are used for grammar constraint, not prompt injection.
         """
         if not tools:
-            logger.debug("No tools provided for prompt formatting")
             return ""
 
         logger.debug(f"Formatting {len(tools)} tools for prompt injection")
-        tools_description = json.dumps(tools, indent=2)
+        
+        # Only include name and first sentence of description to keep prompt small
+        tool_summaries = []
+        for t in tools:
+            if t.get("type") == "function" and "function" in t:
+                func = t["function"]
+                name = func.get("name", "unknown")
+                desc = func.get("description", "")
+                # Truncate description to first sentence or 80 chars
+                short_desc = desc.split(".")[0][:80] if desc else ""
+                tool_summaries.append(f"- {name}: {short_desc}")
+        
+        tools_list = "\n".join(tool_summaries)
 
         return f"""
 
-You have access to the following tools.
-
-CRITICAL INSTRUCTIONS:
-- ONLY use tools when the user's request SPECIFICALLY requires the tool's functionality
-- For greetings (hi, hello, how are you), casual chat, or general knowledge questions - respond with NORMAL TEXT, do NOT call any tools
-- For requests that clearly match a tool's purpose (e.g., "what's the weather" → use get_weather) - use the appropriate tool
-
-When you DO need to use a tool, respond with a JSON object in this exact format:
-{{
-  "tool_calls": [
-    {{
-      "id": "call_<unique_id>",
-      "type": "function",
-      "function": {{
-        "name": "<function_name>",
-        "arguments": "{{\\"param1\\": \\"value1\\", \\"param2\\": 123}}"
-      }}
-    }}
-  ]
-}}
+You have access to {len(tools)} tools. Use them ONLY when the user's request requires external data.
+For greetings or general questions, respond normally without tools.
 
 Available tools:
-{tools_description}
+{tools_list}
 
-Rules:
-- The "arguments" field MUST be a valid JSON string with double quotes
-- Use the exact function names from the tools list above
-- Include all required parameters
-- If unsure whether to use a tool, respond with normal text instead
+To use a tool, respond with JSON:
+{{"tool_calls": [{{"id": "call_1", "type": "function", "function": {{"name": "<tool_name>", "arguments": "{{\\"param\\": \\"value\\"}}"}}}}]}}
 """
 
     def _build_tool_call_schema(self, tools: List[Dict[str, Any]]) -> Optional[str]:
-        """
-        Build JSON schema for tool calls based on available tools.
-
-        This schema is used by Outlines to constrain generation to valid
-        tool call JSON. The function names are restricted to an enum of
-        available tool names.
-
-        Returns None if no valid tools found (instead of empty string).
-        """
+        """Build JSON schema for tool calls (used by Outlines for grammar constraint)."""
         tool_names = []
         for t in tools:
             try:
@@ -186,8 +138,6 @@ Rules:
                     func = t["function"]
                     if isinstance(func, dict) and "name" in func:
                         tool_names.append(func["name"])
-                    else:
-                        logger.warning(f"Tool missing 'name' in function definition: {t}")
             except (KeyError, TypeError) as e:
                 logger.warning(f"Malformed tool definition, skipping: {e}")
                 continue
@@ -225,14 +175,63 @@ Rules:
             "required": ["tool_calls"],
         }
 
-        schema_str = json.dumps(schema)
-        logger.debug(f"Generated tool call schema: {schema_str[:200]}...")
-        return schema_str
+        return json.dumps(schema)
+
+    # =========================================================================
+    # MCP Tool Execution
+    # =========================================================================
+
+    async def _execute_tool_calls(
+        self, tool_calls: List[Dict[str, Any]]
+    ) -> List[ChatMessage]:
+        """Execute tool calls via MCP and return tool result messages."""
+        if not self.mcp_provider or not getattr(self.mcp_provider, 'enabled', False):
+            logger.warning("MCP provider not available for tool execution")
+            return []
+
+        results = []
+        for tc in tool_calls:
+            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            
+            # Parse arguments
+            args_raw = func.get("arguments", "{}")
+            if isinstance(args_raw, str):
+                try:
+                    arguments = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    arguments = {}
+                    logger.warning(f"Failed to parse tool arguments: {args_raw[:100]}")
+            else:
+                arguments = args_raw
+
+            logger.info(f"Executing MCP tool: {tool_name} with args: {arguments}")
+            
+            try:
+                result_text = await self.mcp_provider.execute(tool_name, arguments)
+                logger.info(f"Tool '{tool_name}' returned {len(result_text)} chars")
+            except Exception as e:
+                result_text = f"Error executing tool: {e}"
+                logger.error(f"Tool execution failed: {e}")
+
+            results.append(ChatMessage(
+                role="tool",
+                name=tool_name,
+                content=result_text,
+                tool_call_id=tool_id,
+            ))
+
+        return results
+
+    # =========================================================================
+    # Core Generation
+    # =========================================================================
 
     async def generate_stream(self, req: ChatRequestModel):
-        """
-        Generator for chat completion chunks.
-        """
+        """Generator for chat completion chunks."""
+        logger.debug(f"generate_stream called: model={req.model}, tools={len(req.tools) if req.tools else 0}")
+        
         if not self.model_manager.tokenizer:
             raise RuntimeError(
                 "Inference manager not ready (ring not connected or tokenizer not loaded)"
@@ -245,69 +244,55 @@ Rules:
         use_tool_grammar = False
 
         if req.tools and req.tool_choice not in [None, "none"]:
-            logger.info(
-                f"Tool calling enabled: {len(req.tools)} tools, tool_choice={req.tool_choice}"
-            )
+            logger.info(f"Tool calling enabled: {len(req.tools)} tools, tool_choice={req.tool_choice}")
             tools_prompt = self._format_tools_for_prompt(req.tools)
 
             # Find system message or prepend one
             has_system = any(m.role == "system" for m in messages_for_prompt)
 
             if has_system:
-                # Append tools to existing system message
                 for i, msg in enumerate(messages_for_prompt):
                     if msg.role == "system":
                         messages_for_prompt[i] = ChatMessage(
                             role="system", content=(msg.content or "") + tools_prompt
                         )
-                        logger.debug("Appended tool descriptions to existing system message")
                         break
             else:
-                # Prepend system message with tools
                 messages_for_prompt.insert(
                     0, ChatMessage(role="system", content=tools_prompt.strip())
                 )
-                logger.debug("Created new system message with tool descriptions")
 
-            # IMPORTANT: Only apply grammar constraint for "required"
-            # For "auto", let model decide freely whether to call tools or respond with text
-            # This is the production-standard approach used by vLLM, OpenAI, etc.
+            # Only apply grammar constraint for "required"
             if req.tool_choice == "required":
                 use_tool_grammar = True
-                logger.debug("tool_choice='required': applying Outlines constraint")
-            else:
-                # tool_choice is "auto" or specific function - don't force grammar
-                # Model can choose to call tools or respond with text
-                use_tool_grammar = False
-                logger.debug(f"tool_choice='{req.tool_choice}': grammar constraint disabled, model decides")
-        elif req.tools and req.tool_choice == "none":
-            logger.debug("Tools provided but tool_choice='none', skipping tool grammar")
+                logger.debug("tool_choice='required': applying grammar constraint")
 
+        # Build prompt
         try:
-            if (
-                hasattr(tokenizer, "chat_template")
-                and tokenizer.chat_template is not None
-            ):
-                message_dicts = [
-                    {"role": m.role, "content": m.content or ""}
-                    for m in messages_for_prompt
-                ]
+            if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
+                # Convert messages to dict format
+                message_dicts = []
+                for m in messages_for_prompt:
+                    msg_dict = {"role": m.role, "content": m.content or ""}
+                    # Include tool-related fields for proper chat template
+                    if m.role == "tool" and m.name:
+                        msg_dict["name"] = m.name
+                    if m.role == "tool" and m.tool_call_id:
+                        msg_dict["tool_call_id"] = m.tool_call_id
+                    if m.role == "assistant" and m.tool_calls:
+                        msg_dict["tool_calls"] = m.tool_calls
+                    message_dicts.append(msg_dict)
+                
                 prompt_text = tokenizer.apply_chat_template(
                     message_dicts,
                     add_generation_prompt=True,
                     tokenize=False,
                 )
             else:
-                logger.debug("No chat template available, using basic prompt format")
-                prompt_text = (
-                    "\n".join(m.content or "" for m in messages_for_prompt)
-                    + "\nAssistant:"
-                )
+                prompt_text = "\n".join(m.content or "" for m in messages_for_prompt) + "\nAssistant:"
         except Exception as e:
-            logger.warning(f"Failed to apply chat template: {e}, using fallback format")
-            prompt_text = (
-                "\n".join(m.content or "" for m in messages_for_prompt) + "\nAssistant:"
-            )
+            logger.warning(f"Failed to apply chat template: {e}, using fallback")
+            prompt_text = "\n".join(m.content or "" for m in messages_for_prompt) + "\nAssistant:"
 
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
@@ -319,38 +304,24 @@ Rules:
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
 
-        # Get grammar JSON schema - tool calling takes priority
+        # Get grammar JSON schema
         grammar_json_schema = None
 
         if use_tool_grammar and req.tools:
-            # Use tool call schema for constrained generation
             tool_schema = self._build_tool_call_schema(req.tools)
             if tool_schema:
                 grammar_json_schema = tool_schema
-                logger.info(
-                    f"Using Outlines tool call schema for {len(req.tools)} tools"
-                )
+                logger.info(f"Using Outlines tool call schema for {len(req.tools)} tools")
             else:
-                # Failed to build schema - disable tool grammar but continue
-                logger.warning(
-                    "Failed to build tool call schema, proceeding without grammar constraint"
-                )
                 use_tool_grammar = False
         elif hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
             grammar_json_schema = req.grammar_json_schema
-            logger.debug("Using user-provided grammar_json_schema")
         elif hasattr(req, "response_format") and req.response_format:
-            # Support OpenAI-style response_format with JSON schema
             if isinstance(req.response_format, dict):
                 if "schema" in req.response_format:
                     grammar_json_schema = json.dumps(req.response_format["schema"])
-                    logger.debug("Using response_format schema for grammar")
-                elif (
-                    "type" in req.response_format
-                    and req.response_format["type"] == "json_object"
-                ):
+                elif req.response_format.get("type") == "json_object":
                     grammar_json_schema = json.dumps({"type": "object"})
-                    logger.debug("Using basic JSON object grammar for response_format")
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
@@ -397,9 +368,7 @@ Rules:
                 top_p=req.top_p,
                 repetition_penalty=req.repetition_penalty,
                 min_p=req.min_p if hasattr(req, "min_p") else 0.0,
-                min_tokens_to_keep=req.min_tokens_to_keep
-                if hasattr(req, "min_tokens_to_keep")
-                else 1,
+                min_tokens_to_keep=req.min_tokens_to_keep if hasattr(req, "min_tokens_to_keep") else 1,
                 grammar_json_schema=grammar_json_schema,
             )
 
@@ -428,23 +397,11 @@ Rules:
             detokenizer.add_token(token)
             tokens.append(token)
 
-            # mlx_lm detokenizer usually updates .text property
             full_text = detokenizer.text
             delta_text = full_text[last_text_len:]
             last_text_len = len(full_text)
-            
-            # Debug logging for grammar termination
-            if getattr(result, "grammar_terminated", False):
-                logger.info(
-                    f"Grammar terminated - token_id={token}, delta_text='{delta_text}', "
-                    f"full_text='{full_text[:100]}...', tokens_count={len(tokens)}"
-                )
 
             # Yield chunk
-            logger.debug(
-                f"Yielding chunk: token_id={token}, delta_text='{delta_text}', "
-                f"full_text='{full_text[:100]}...', last_text_len={last_text_len}"
-            )
             yield ChatResponseModel(
                 id=nonce,
                 choices=[
@@ -455,9 +412,7 @@ Rules:
                             token_logprobs=token_logprobs,
                             top_logprobs=top_logprobs_list,
                             tokens=[token],
-                        )
-                        if req.logprobs
-                        else None,
+                        ) if req.logprobs else None,
                         finish_reason=None,
                     )
                 ],
@@ -465,15 +420,14 @@ Rules:
                 model=req.model,
             )
 
-            # stopping criteria
+            # Stopping criteria
             if token == tokenizer.eos_token_id:
                 completion_reason = ChatCompletionReason.STOP
                 break
 
-            # Check Outlines' is_terminated() signal from the shard
-            # This is the proper way to detect grammar completion
+            # Check grammar termination
             if getattr(result, "grammar_terminated", False):
-                logger.info("Grammar terminated signal received from shard")
+                logger.info("Grammar terminated signal received")
                 if use_tool_grammar:
                     completion_reason = ChatCompletionReason.TOOL_CALLS
                 else:
@@ -486,31 +440,24 @@ Rules:
         final_text = detokenizer.text
 
         # Parse tool calls from generated text
-        # - For tool_choice="required" with grammar: always parse
-        # - For tool_choice="auto" without grammar: attempt to parse if contains tool_calls JSON
         tool_calls = None
-        
-        # For auto mode, check if output contains tool_calls JSON (may be after <think> tags)
         has_tool_calls_json = '"tool_calls"' in final_text and "{" in final_text
         should_attempt_parse = use_tool_grammar or (
             req.tools and req.tool_choice == "auto" and has_tool_calls_json
         )
 
         if should_attempt_parse and final_text:
-            logger.debug(f"Attempting to parse tool call output (length={len(final_text)}, grammar={use_tool_grammar})")
             clean_text = final_text.strip()
 
-            # Remove any trailing special tokens (safety fallback)
+            # Remove special tokens
             for eos_pattern in ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"]:
                 if eos_pattern in clean_text:
                     clean_text = clean_text.split(eos_pattern)[0].strip()
                     break
-            
-            # Handle Qwen3 <think> tags - extract content after </think>
+
+            # Handle Qwen3 <think> tags
             if "</think>" in clean_text:
-                # Get content after the LAST </think> tag
                 clean_text = clean_text.split("</think>")[-1].strip()
-                logger.debug("Extracted content after </think> tags")
 
             try:
                 parsed = json.loads(clean_text)
@@ -518,34 +465,15 @@ Rules:
                     tool_calls = parsed["tool_calls"]
                     if tool_calls and isinstance(tool_calls, list):
                         completion_reason = ChatCompletionReason.TOOL_CALLS
-                        tool_names = [
-                            tc.get("function", {}).get("name", "unknown")
-                            for tc in tool_calls
-                            if isinstance(tc, dict)
-                        ]
-                        logger.info(
-                            f"Parsed {len(tool_calls)} tool call(s): {tool_names}"
-                        )
+                        tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                        logger.info(f"Parsed {len(tool_calls)} tool call(s): {tool_names}")
                     else:
-                        logger.debug(f"tool_calls is empty or invalid, treating as text response")
                         tool_calls = None
-                elif use_tool_grammar:
-                    # Grammar was enforced but no tool_calls - this shouldn't happen
-                    logger.warning(
-                        f"Grammar enforced but JSON missing 'tool_calls' key: {type(parsed)}"
-                    )
-                else:
-                    # For auto mode, valid JSON without tool_calls is fine - just text response
-                    logger.debug("Model output JSON without tool_calls, treating as text response")
-            except json.JSONDecodeError as e:
+            except json.JSONDecodeError:
                 if use_tool_grammar:
-                    # Grammar was enforced, JSON parse failure is unexpected
-                    logger.error(f"Failed to parse tool call JSON (grammar was enforced): {e}")
-                    logger.debug(f"Raw output: {clean_text[:300]}...")
-                else:
-                    # For auto mode, non-JSON output is expected when model chooses not to use tools
-                    logger.debug("Model chose to respond with text instead of tool calls")
+                    logger.error(f"Failed to parse tool call JSON: {clean_text[:200]}")
 
+        # Build metrics
         metrics_dict = None
         t_end = time.perf_counter()
         if getattr(req, "profile", False):
@@ -557,31 +485,25 @@ Rules:
                 "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
                 "token_gen_ms": round(gen_s * 1000.0, 3),
                 "tokens_generated": tokens_generated,
-                "tps_overall": round(
-                    (tokens_generated / total_s) if tokens_generated else 0.0, 4
-                ),
-                "tps_decoding": round(
-                    (tokens_generated / gen_s) if tokens_generated else 0.0, 4
-                ),
+                "tps_overall": round((tokens_generated / total_s) if tokens_generated else 0.0, 4),
+                "tps_decoding": round((tokens_generated / gen_s) if tokens_generated else 0.0, 4),
             }
 
-        # Build final message - include tool_calls if present
+        # Build final message
         final_message = ChatMessage(
             role="assistant",
             content=None if tool_calls else final_text,
             tool_calls=tool_calls,
         )
 
-        # Final chunk with finish reason
-        # Note: Use delta=None to avoid duplication in chat_completions accumulation
-        # The delta should only contain incremental content, not the full message
+        # Final chunk
         yield ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
                     index=0,
-                    delta=None,  # Final chunk has no delta to avoid re-accumulating full text
-                    message=final_message,  # Use message field for final complete message
+                    delta=None,
+                    message=final_message,
                     finish_reason=completion_reason,
                 )
             ],
@@ -595,83 +517,72 @@ Rules:
             ),
         )
 
+    # =========================================================================
+    # Chat Completions (with optional MCP tool execution loop)
+    # =========================================================================
+
     async def chat_completions(
-        self, 
-        req: ChatRequestModel, 
+        self,
+        req: ChatRequestModel,
         execute_tools: bool = True,
         max_tool_rounds: int = 5,
     ) -> ChatResponseModel:
         """
-        Handles chat completion request (non-streaming) with optional tool execution.
-
-        Args:
-            req: Chat request
-            execute_tools: If True, automatically execute tool calls via MCP
-            max_tool_rounds: Maximum tool execution iterations (prevents infinite loops)
+        Handles chat completion request (non-streaming).
+        
+        If MCP is enabled and execute_tools=True, will automatically execute
+        tool calls and feed results back to the model.
         """
-        # Inject MCP tools if available and no tools provided in request
+        logger.debug(f"chat_completions called: model={req.model}, execute_tools={execute_tools}")
+        
+        # Check if MCP tool injection is needed
         working_req = req
-        if self.mcp_provider and self.mcp_provider.enabled and not req.tools:
-            mcp_tools = self.mcp_provider.get_tools()
-            if mcp_tools:
-                # Create new request with MCP tools
-                working_req = ChatRequestModel(
-                    messages=req.messages,
-                    model=req.model,
-                    temperature=req.temperature,
-                    max_tokens=req.max_tokens,
-                    top_p=req.top_p,
-                    top_k=req.top_k,
-                    stop=req.stop,
-                    stream=req.stream,
-                    logprobs=req.logprobs,
-                    top_logprobs=req.top_logprobs,
-                    repetition_penalty=req.repetition_penalty,
-                    tools=mcp_tools,
-                    tool_choice=req.tool_choice or "auto",
-                )
-                logger.info(f"Injected {len(mcp_tools)} MCP tools into request")
+        mcp_enabled = (
+            self.mcp_provider is not None 
+            and getattr(self.mcp_provider, 'enabled', False)
+        )
+        
+        # NOTE: We do NOT auto-inject MCP tools into requests.
+        # MCP tools are available for EXECUTION only - the client must explicitly
+        # include tools in their request if they want tool calling.
+        # This is the production-standard approach (same as OpenAI, Anthropic, etc.)
+        #
+        # To use MCP tools, client should:
+        # 1. Call GET /v1/mcp/tools to discover available tools
+        # 2. Include desired tools in the request's "tools" field
+        # 3. Server executes tool calls via MCP when model generates them
 
         # Tool execution loop
         current_messages = list(working_req.messages)
         tool_round = 0
+        response = None
 
         while tool_round < max_tool_rounds:
             tool_round += 1
+            logger.debug(f"Tool round {tool_round}/{max_tool_rounds}")
 
-            # Generate response
-            response = await self._generate_single_completion(
-                ChatRequestModel(
-                    messages=current_messages,
-                    model=working_req.model,
-                    temperature=working_req.temperature,
-                    max_tokens=working_req.max_tokens,
-                    top_p=working_req.top_p,
-                    top_k=working_req.top_k,
-                    stop=working_req.stop,
-                    stream=False,
-                    logprobs=working_req.logprobs,
-                    top_logprobs=working_req.top_logprobs,
-                    repetition_penalty=working_req.repetition_penalty,
-                    tools=working_req.tools,
-                    tool_choice=working_req.tool_choice,
-                )
-            )
+            # Generate response - use model_copy to preserve all fields correctly
+            loop_req = working_req.model_copy(update={
+                "messages": current_messages,
+                "stream": False,
+            })
+            response = await self._generate_single_completion(loop_req)
 
             # Check if we need to execute tools
             choice = response.choices[0]
-            if (
+            should_execute = (
                 execute_tools
+                and mcp_enabled
                 and choice.finish_reason == ChatCompletionReason.TOOL_CALLS
                 and choice.message
                 and choice.message.tool_calls
-                and self.mcp_provider
-                and self.mcp_provider.enabled
-            ):
-                tool_calls = choice.message.tool_calls
-                logger.info(f"Tool round {tool_round}: executing {len(tool_calls)} tool(s)")
+            )
 
-                # Add assistant message with tool calls
+            if should_execute:
+                tool_calls = choice.message.tool_calls
+                logger.info(f"Executing {len(tool_calls)} tool call(s) in round {tool_round}")
+
+                # Add assistant message with tool calls to conversation
                 current_messages.append(choice.message)
 
                 # Execute tools and add results
@@ -681,7 +592,7 @@ Rules:
                 # Continue loop for next response
                 continue
 
-            # No tool calls or tool execution disabled - return response
+            # No tool calls or execution disabled - return response
             return response
 
         # Max rounds reached
@@ -689,7 +600,7 @@ Rules:
         return response
 
     async def _generate_single_completion(self, req: ChatRequestModel) -> ChatResponseModel:
-        """Generate a single completion without tool execution loop."""
+        """Generate a single completion (accumulates stream into response)."""
         full_content = ""
         tokens = []
         token_logprobs = []
@@ -740,13 +651,6 @@ Rules:
                 tool_calls=tool_calls,
             )
 
-        # Log completion
-        if tool_calls:
-            tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
-            logger.info(f"Completion with tool calls: {tool_names}")
-        else:
-            logger.debug(f"Completion finished, content_len={len(full_content)}")
-
         return ChatResponseModel(
             id=nonce,
             choices=[
@@ -758,9 +662,7 @@ Rules:
                         token_logprobs=token_logprobs,
                         top_logprobs=top_logprobs_list,
                         tokens=tokens,
-                    )
-                    if req.logprobs
-                    else None,
+                    ) if req.logprobs else None,
                 )
             ],
             usage=usage,
