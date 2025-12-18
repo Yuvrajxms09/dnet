@@ -39,6 +39,7 @@ dependencies = [
   "rich>=13.0.0",
   "psutil>=5.9.0",
   "outlines>=1.2.0",
+  "fastmcp>=2.0.0",  # MCP client for external tool integration
 ]
 
 [project.optional-dependencies]

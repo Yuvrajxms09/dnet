@@ -66,6 +66,10 @@ class ChatMessage(BaseModel):
         default=None,
         description="List of tool calls made by the assistant (OpenAI format: {id, type, function: {name, arguments}})",
     )
+    tool_call_id: Optional[str] = Field(
+        default=None,
+        description="ID of the tool call this message is responding to (required for tool role)",
+    )
 
 
 class ChatParams(BaseModel):
