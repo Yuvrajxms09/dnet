@@ -125,16 +125,15 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
             p.wait()
 
 
-def mcp_call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def mcp_call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     try:
         from fastmcp.client import Client
-        from fastmcp.client.transports import HTTPTransport
+        from fastmcp.client.transports import StreamableHttpTransport
     except ImportError:
         pytest.skip("fastmcp not available")
 
     async def _call():
-        transport = HTTPTransport(MCP_URL)
-        async with Client(transport=transport) as client:
+        async with Client(transport=StreamableHttpTransport(MCP_URL)) as client:
             return await client.call_tool(name=tool_name, arguments=arguments)
 
     import asyncio
@@ -143,6 +142,12 @@ def mcp_call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_and_load_model_mcp(model_id: str) -> None:
+    resp = requests.post(
+        f"{BASE_URL}/v1/prepare_topology",
+        json={"model": model_id},
+        timeout=MODEL_LOAD_TIMEOUT,
+    )
+    resp.raise_for_status()
     result = mcp_call_tool("load_model", {"model": model_id})
     assert result.data is not None
     assert "loaded successfully" in result.data.lower()
