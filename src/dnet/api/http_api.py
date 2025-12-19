@@ -1,6 +1,5 @@
 from typing import Optional, Any, List
 import asyncio
-import os
 from hypercorn import Config
 from hypercorn.utils import LifespanFailureError
 import hypercorn.asyncio as aio_hypercorn

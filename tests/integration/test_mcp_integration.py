@@ -36,9 +36,10 @@ SHARD_GRPC_PORT = 58081
 BASE_URL = f"http://localhost:{API_HTTP_PORT}"
 MCP_URL = f"{BASE_URL}/mcp"
 
-HEALTH_CHECK_TIMEOUT = 60
-MODEL_LOAD_TIMEOUT = 300
-INFERENCE_TIMEOUT = 120
+# Timeouts
+HEALTH_CHECK_TIMEOUT = 60  # seconds to wait for servers to start
+MODEL_LOAD_TIMEOUT = 300  # seconds to wait for model loading
+INFERENCE_TIMEOUT = 120  # seconds for inference
 
 
 def wait_for_health(url: str, timeout: float = HEALTH_CHECK_TIMEOUT) -> bool:
@@ -48,27 +49,6 @@ def wait_for_health(url: str, timeout: float = HEALTH_CHECK_TIMEOUT) -> bool:
             resp = requests.get(f"{url}/health", timeout=2)
             if resp.status_code == 200:
                 return True
-        except requests.RequestException:
-            pass
-        time.sleep(1)
-    return False
-
-
-def wait_for_shards_discovered(base_url: str, timeout: float = 30) -> bool:
-    """Wait for at least one shard to be discovered via P2P discovery."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            resp = requests.get(f"{base_url}/v1/devices", timeout=2)
-            if resp.status_code == 200:
-                data = resp.json()
-                devices = data.get("devices", {})
-                # Check if we have any non-manager devices (shards)
-                shard_count = sum(
-                    1 for props in devices.values() if not props.get("is_manager", False)
-                )
-                if shard_count > 0:
-                    return True
         except requests.RequestException:
             pass
         time.sleep(0.5)
@@ -136,6 +116,7 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
         pytest.skip(f"Server not healthy at {BASE_URL}/health")
 
     # When starting servers automatically, wait for P2P discovery to find shards
+    # This is needed because MCP's load_model will try to profile immediately
     if start_servers_flag:
         if not wait_for_shards_discovered(BASE_URL, timeout=30):
             for p in procs:
@@ -158,7 +139,16 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
             p.wait()
 
 
-def mcp_call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
+def mcp_call_tool(
+    tool_name: str, arguments: dict[str, Any], timeout: float | None = None
+) -> Any:
+    """Call an MCP tool via HTTP transport.
+
+    Args:
+        tool_name: Name of the MCP tool to call
+        arguments: Arguments to pass to the tool
+        timeout: Optional timeout in seconds. If None, no timeout is applied.
+    """
     try:
         from fastmcp.client import Client
         from fastmcp.client.transports import StreamableHttpTransport
@@ -171,17 +161,52 @@ def mcp_call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
 
     import asyncio
 
-    return asyncio.run(_call())
+    if timeout is not None:
+        return asyncio.run(asyncio.wait_for(_call(), timeout=timeout))
+    else:
+        return asyncio.run(_call())
+
+
+def wait_for_shards_discovered(base_url: str, timeout: float = 30) -> bool:
+    """Wait for at least one shard to be discovered via P2P discovery."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            resp = requests.get(f"{base_url}/v1/devices", timeout=2)
+            if resp.status_code == 200:
+                data = resp.json()
+                devices = data.get("devices", {})
+                # Check if we have any non-manager devices (shards)
+                shard_count = sum(
+                    1
+                    for props in devices.values()
+                    if not props.get("is_manager", False)
+                )
+                if shard_count > 0:
+                    return True
+        except requests.RequestException:
+            pass
+        time.sleep(0.5)
+    return False
 
 
 def prepare_and_load_model_mcp(model_id: str) -> None:
-    # MCP's load_model already handles topology preparation internally if needed
-    result = mcp_call_tool("load_model", {"model": model_id})
+    """Prepare topology and load model via MCP.
+
+    MCP's load_model already handles topology preparation internally if needed.
+    """
+    result = mcp_call_tool(
+        "load_model", {"model": model_id}, timeout=MODEL_LOAD_TIMEOUT
+    )
     assert result.data is not None
     assert "loaded successfully" in result.data.lower()
 
 
 def unload_model_mcp() -> None:
+    """Unload the current model via MCP.
+
+    Logs a warning if unloading fails, as this is a best-effort cleanup.
+    """
     try:
         mcp_call_tool("unload_model", {})
     except Exception as e:
@@ -193,7 +218,7 @@ CI_TEST_MODELS = get_ci_test_models()
 
 @pytest.mark.integration
 def test_mcp_health_check(servers):
-    resp = requests.get(f"{MCP_URL}/mcp-health", timeout=10)
+    resp = requests.get(f"{MCP_URL}/mcp-health", timeout=HEALTH_CHECK_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     assert data["status"] == "healthy"
@@ -243,6 +268,7 @@ def test_mcp_load_and_chat(servers, model: dict[str, Any]):
                 "max_tokens": 50,
                 "temperature": 0.1,
             },
+            timeout=INFERENCE_TIMEOUT,
         )
         assert result.data is not None
         assert isinstance(result.data, str)
