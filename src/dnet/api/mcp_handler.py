@@ -13,8 +13,12 @@ from .inference import InferenceManager
 from .model_manager import ModelManager
 from .cluster import ClusterManager
 from dnet.utils.logger import logger
-from dnet.utils.model import get_model_config_json
-from distilp.profiler import profile_model
+from .load_helpers import (
+    get_api_callback_address,
+    _prepare_topology_core,
+    _load_model_core,
+    _unload_model_core,
+)
 
 
 class McpError(Exception):
@@ -169,81 +173,42 @@ def create_mcp_server(
             if ctx:
                 await ctx.info(f"Starting to load model: {req.model}")
 
-            if model_manager.current_model_id == req.model:
-                return f"Model '{req.model}' is already loaded."
-
             topology = cluster_manager.current_topology
-            if topology is None or topology.model != req.model:
+            if topology is None:
                 if ctx:
                     await ctx.info("Preparing topology ...")
-
-                await cluster_manager.scan_devices()
-                if not cluster_manager.shards:
-                    raise McpError(
-                        -32002,
-                        "No shards discovered. Check shard connectivity.",
-                        data={"action": "check_shard_connectivity"},
+                try:
+                    topology = await _prepare_topology_core(
+                        cluster_manager,
+                        req.model,
+                        req.kv_bits,
+                        req.seq_len,
+                        progress_callback=ctx.info if ctx else None,
                     )
-
-                if ctx:
-                    await ctx.info("Profiling cluster performance")
-
-                model_config = get_model_config_json(req.model)
-                embedding_size = int(model_config["hidden_size"])
-                num_layers = int(model_config["num_hidden_layers"])
-
-                batch_sizes = [1]
-                profiles = await cluster_manager.profile_cluster(
-                    req.model, embedding_size, 2, batch_sizes
-                )
-                if not profiles:
-                    raise McpError(
-                        -32603,
-                        "Failed to collect device profiles. Check shard connectivity.",
-                        data={
-                            "step": "profiling",
-                            "shards_count": len(cluster_manager.shards)
-                            if cluster_manager.shards
-                            else 0,
-                        },
-                    )
-
-                if ctx:
-                    await ctx.info("Computing optimal layer distribution")
-
-                model_profile_split = profile_model(
-                    repo_id=req.model,
-                    batch_sizes=batch_sizes,
-                    sequence_length=req.seq_len,
-                )
-                model_profile = model_profile_split.to_model_profile()
-
-                topology = await cluster_manager.solve_topology(
-                    profiles, model_profile, req.model, num_layers, req.kv_bits
-                )
+                except RuntimeError as e:
+                    if "No profiles collected" in str(e):
+                        raise McpError(
+                            -32603,
+                            "Failed to collect device profiles. Check shard connectivity.",
+                            data={
+                                "step": "profiling",
+                                "shards_count": len(cluster_manager.shards)
+                                if cluster_manager.shards
+                                else 0,
+                            },
+                        )
+                    raise
                 cluster_manager.current_topology = topology
-
                 if ctx:
                     await ctx.info("Topology prepared")
 
             if ctx:
                 await ctx.info("Loading model layers across shards...")
-            api_props = await cluster_manager.discovery.async_get_own_properties()
-            grpc_port = int(inference_manager.grpc_port)
-
-            # Compute callback address (same logic as http_api.py)
-            api_callback_addr = (os.getenv("DNET_API_CALLBACK_ADDR") or "").strip()
-            if not api_callback_addr:
-                api_callback_addr = f"{api_props.local_ip}:{grpc_port}"
-                if api_props.local_ip in ("127.0.0.1", "localhost"):
-                    logger.warning(
-                        "API callback address is loopback (%s). Remote shards will fail to SendToken. "
-                        "Set DNET_API_CALLBACK_ADDR to a reachable host:port.",
-                        api_callback_addr,
-                    )
-
-            response = await model_manager.load_model(
-                topology, api_props, grpc_port, api_callback_address=api_callback_addr
+            response = await _load_model_core(
+                cluster_manager,
+                model_manager,
+                inference_manager,
+                topology,
             )
 
             if not response.success:
@@ -263,12 +228,6 @@ def create_mcp_server(
                         "failed_shards": len(shard_errors),
                         "total_shards": len(response.shard_statuses),
                     },
-                )
-
-            if topology.devices:
-                first_shard = topology.devices[0]
-                await inference_manager.connect_to_ring(
-                    first_shard.local_ip, first_shard.shard_port, api_callback_addr
                 )
 
             if ctx:
@@ -309,12 +268,9 @@ def create_mcp_server(
         if ctx:
             await ctx.info(f"Unloading model: {model_name}")
 
-        await cluster_manager.scan_devices()
-        shards = cluster_manager.shards
-        response = await model_manager.unload_model(shards)
+        response = await _unload_model_core(cluster_manager, model_manager)
 
         if response.success:
-            cluster_manager.current_topology = None
             if ctx:
                 await ctx.info("Model unloaded successfully")
             return f"Model '{model_name}' unloaded successfully from all shards."
