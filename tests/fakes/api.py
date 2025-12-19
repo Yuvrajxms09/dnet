@@ -213,12 +213,31 @@ class FakeModelManager:
         load_success: bool = True,
         unload_success: bool = True,
     ):
+        from dnet.api.models import ModelObjectExtended
+        import time
+
         self.tokenizer = tok
         self.current_model_id = current_model_id
         self.load_success = load_success
         self.unload_success = unload_success
         self.load_calls: list = []
         self.unload_calls: list = []
+        self.available_models = [
+            ModelObjectExtended(
+                id="test-model-1",
+                arch="test",
+                quantization="8bit",
+                alias="test1",
+                created=int(time.time()),
+            ),
+            ModelObjectExtended(
+                id="test-model-2",
+                arch="test",
+                quantization="4bit",
+                alias="test2",
+                created=int(time.time()),
+            ),
+        ]
 
     def is_model_available(self, model_id) -> bool:
         if model_id == "m":
