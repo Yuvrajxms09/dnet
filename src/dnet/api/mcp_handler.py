@@ -1,5 +1,4 @@
 import json
-import os
 from fastmcp import FastMCP, Context
 from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
 from starlette.responses import JSONResponse
@@ -219,8 +218,7 @@ def create_mcp_server(
                 ]
                 raise McpError(
                     -32603,
-                    f"Model loading failed: {error_msg}. "
-                    f"{len(shard_errors)}/{len(response.shard_statuses)} shards failed.",
+                    f"Model loading failed: {error_msg}. {len(shard_errors)}/{len(response.shard_statuses)} shards failed.",
                     data={
                         "model": req.model,
                         "shard_errors": shard_errors,
