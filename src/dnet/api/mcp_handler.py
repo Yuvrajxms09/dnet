@@ -160,8 +160,8 @@ def create_mcp_server(
 
         Args:
             model: Model ID from catalog
-            kv_bits: KV cache quantization
-            seq_len: Sequence length
+            kv_bits: KV cache quantization mode for the model's KV cache, the default is "8bit".
+            seq_len: Maximum sequence length (in tokens). defaults to 4096.
         """
         try:
             req = APILoadModelRequest(
