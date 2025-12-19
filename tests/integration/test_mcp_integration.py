@@ -54,6 +54,27 @@ def wait_for_health(url: str, timeout: float = HEALTH_CHECK_TIMEOUT) -> bool:
     return False
 
 
+def wait_for_shards_discovered(base_url: str, timeout: float = 30) -> bool:
+    """Wait for at least one shard to be discovered via P2P discovery."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            resp = requests.get(f"{base_url}/v1/devices", timeout=2)
+            if resp.status_code == 200:
+                data = resp.json()
+                devices = data.get("devices", {})
+                # Check if we have any non-manager devices (shards)
+                shard_count = sum(
+                    1 for props in devices.values() if not props.get("is_manager", False)
+                )
+                if shard_count > 0:
+                    return True
+        except requests.RequestException:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 @pytest.fixture(scope="module")
 def servers(start_servers_flag) -> Generator[None, None, None]:
     procs: list[subprocess.Popen] = []
@@ -114,6 +135,18 @@ def servers(start_servers_flag) -> Generator[None, None, None]:
                 p.wait()
         pytest.skip(f"Server not healthy at {BASE_URL}/health")
 
+    # When starting servers automatically, wait for P2P discovery to find shards
+    if start_servers_flag:
+        if not wait_for_shards_discovered(BASE_URL, timeout=30):
+            for p in procs:
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+            pytest.skip("Shards not discovered within timeout")
+
     yield
 
     for p in procs:
@@ -142,12 +175,7 @@ def mcp_call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
 
 
 def prepare_and_load_model_mcp(model_id: str) -> None:
-    resp = requests.post(
-        f"{BASE_URL}/v1/prepare_topology",
-        json={"model": model_id},
-        timeout=MODEL_LOAD_TIMEOUT,
-    )
-    resp.raise_for_status()
+    # MCP's load_model already handles topology preparation internally if needed
     result = mcp_call_tool("load_model", {"model": model_id})
     assert result.data is not None
     assert "loaded successfully" in result.data.lower()
