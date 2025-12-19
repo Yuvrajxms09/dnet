@@ -27,7 +27,6 @@ from .model_manager import ModelManager
 from dnet_p2p import DnetDeviceProperties
 from .mcp_handler import create_mcp_server
 from .load_helpers import (
-    get_api_callback_address,
     _prepare_topology_core,
     _load_model_core,
     _unload_model_core,

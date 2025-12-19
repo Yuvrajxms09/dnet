@@ -96,4 +96,3 @@ async def _unload_model_core(
     if response.success:
         cluster_manager.current_topology = None
     return response
-

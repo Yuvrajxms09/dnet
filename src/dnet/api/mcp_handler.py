@@ -14,7 +14,6 @@ from .model_manager import ModelManager
 from .cluster import ClusterManager
 from dnet.utils.logger import logger
 from .load_helpers import (
-    get_api_callback_address,
     _prepare_topology_core,
     _load_model_core,
     _unload_model_core,
@@ -334,37 +333,47 @@ def create_mcp_server(
 
     def _get_available_models_data() -> str:
         """Return available models as JSON (same format as /v1/models endpoint)."""
-        return json.dumps({
-            "object": "list",
-            "data": [m.model_dump() for m in model_manager.available_models],
-        })
+        return json.dumps(
+            {
+                "object": "list",
+                "data": [m.model_dump() for m in model_manager.available_models],
+            }
+        )
 
     def _get_model_status_data() -> str:
         """Return current status as JSON."""
         topology = cluster_manager.current_topology
-        return json.dumps({
-            "model_loaded": model_manager.current_model_id,
-            "topology": topology.model_dump() if topology else None,
-            "shards_discovered": len(cluster_manager.shards) if cluster_manager.shards else 0,
-        })
+        return json.dumps(
+            {
+                "model_loaded": model_manager.current_model_id,
+                "topology": topology.model_dump() if topology else None,
+                "shards_discovered": len(cluster_manager.shards)
+                if cluster_manager.shards
+                else 0,
+            }
+        )
 
     def _get_cluster_info_data() -> str:
         """Return cluster information as JSON (same format as /v1/devices endpoint)."""
         shards = cluster_manager.shards
         topology = cluster_manager.current_topology
-        return json.dumps({
-            "devices": {
-                name: {
-                    "instance": props.instance,
-                    "local_ip": props.local_ip,
-                    "server_port": props.server_port,
-                    "shard_port": props.shard_port,
-                    "is_manager": props.is_manager,
-                    "is_busy": props.is_busy,
+        return json.dumps(
+            {
+                "devices": {
+                    name: {
+                        "instance": props.instance,
+                        "local_ip": props.local_ip,
+                        "server_port": props.server_port,
+                        "shard_port": props.shard_port,
+                        "is_manager": props.is_manager,
+                        "is_busy": props.is_busy,
+                    }
+                    for name, props in shards.items()
                 }
-                for name, props in shards.items()
-            } if shards else {},
-            "topology": topology.model_dump() if topology else None,
-        })
+                if shards
+                else {},
+                "topology": topology.model_dump() if topology else None,
+            }
+        )
 
     return mcp

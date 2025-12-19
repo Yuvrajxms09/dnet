@@ -5,7 +5,6 @@ import pytest
 
 try:
     from fastmcp.client import Client
-    from fastmcp.client.transports import FastMCPTransport
 except ImportError:
     pytest.skip("fastmcp not available", allow_module_level=True)
 
@@ -325,4 +324,3 @@ async def test_chat_completion_validation_error(mcp_client):
             name="chat_completion",
             arguments={"messages": "invalid"},
         )
-
