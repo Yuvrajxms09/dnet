@@ -114,6 +114,11 @@ class ChatParams(BaseModel):
         description="List of tools (functions) available to the model. "
         "Each tool should have: type='function', function={name, description, parameters (JSON schema)}",
     )
+    use_mcp_tools: bool = Field(
+        default=False,
+        description="If true, server auto-injects all available MCP tools into the request. "
+        "Model decides which tool to call. Uses grammar-constrained generation for reliable output.",
+    )
     top_logprobs: int = Field(default=0, ge=0, le=20)
     top_p: float = Field(default=1.0, ge=0, le=1)
     verbosity: Literal["low", "medium", "high"] = Field(default="medium")  # TODO: used?

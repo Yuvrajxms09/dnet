@@ -7,6 +7,7 @@ Design:
 - Uses fastmcp Client for MCP protocol
 - Auto-discovers tools from servers
 - Converts to OpenAI format (works with existing Outlines integration)
+- Production features: connection reuse, retries, timeouts
 - Simple execute() method for tool calls
 
 Usage:
@@ -17,6 +18,7 @@ Usage:
 """
 
 import json
+import asyncio
 from typing import Optional, Dict, Any, List
 from dnet.utils.logger import logger
 
@@ -30,9 +32,21 @@ except ImportError:
 
 
 class MCPToolProvider:
-    """Minimal MCP tool provider using fastmcp."""
+    """Minimal MCP tool provider using fastmcp with production features.
+    
+    Features:
+    - Connection reuse (learned from Temporal example)
+    - Retry logic with exponential backoff
+    - Timeout handling
+    - Error recovery
+    """
 
-    def __init__(self, servers: Optional[Dict[str, Dict[str, Any]]] = None):
+    def __init__(
+        self, 
+        servers: Optional[Dict[str, Dict[str, Any]]] = None,
+        max_retries: int = 3,
+        timeout_seconds: float = 30.0,
+    ):
         """Initialize MCP tool provider.
 
         Args:
@@ -47,11 +61,15 @@ class MCPToolProvider:
                         "args": ["-y", "@modelcontextprotocol/server-filesystem", "~"]
                     }
                 }
+            max_retries: Maximum number of retries for failed tool calls (default: 3)
+            timeout_seconds: Timeout for tool execution in seconds (default: 30.0)
         """
         self.servers = servers or {}
         self._tools: Dict[str, Dict[str, Any]] = {}  # tool_name -> {server, schema}
         self._clients: Dict[str, Any] = {}  # server_name -> Client
         self._initialized = False
+        self.max_retries = max_retries
+        self.timeout_seconds = timeout_seconds
 
     @property
     def enabled(self) -> bool:
@@ -131,7 +149,12 @@ class MCPToolProvider:
         return list(self._tools.keys())
 
     async def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """Execute a tool and return the result as string.
+        """Execute a tool with retry logic and timeout handling.
+        
+        Implements production patterns learned from Temporal example:
+        - Exponential backoff retries
+        - Timeout protection
+        - Connection reuse (via persistent clients)
 
         Args:
             tool_name: Name of the tool to execute
@@ -151,32 +174,51 @@ class MCPToolProvider:
 
         client = self._clients[server_name]
 
-        try:
-            logger.info(f"Executing MCP tool: {tool_name} on {server_name}")
-            logger.debug(f"Tool arguments: {arguments}")
+        # Retry logic with exponential backoff (learned from Temporal example)
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                logger.debug(f"Executing MCP tool: {tool_name} on {server_name} (attempt {attempt + 1}/{self.max_retries + 1})")
+                logger.debug(f"Tool arguments: {arguments}")
 
-            async with client:
-                result = await client.call_tool(tool_name, arguments)
+                # Execute with timeout (learned from Temporal example)
+                async with client:
+                    result = await asyncio.wait_for(
+                        client.call_tool(tool_name, arguments),
+                        timeout=self.timeout_seconds
+                    )
 
-                if result and result.content:
-                    # Extract text content from result
-                    text = result.content[0].text if hasattr(result.content[0], 'text') else str(result.content[0])
-                    
-                    # Truncate very long results
-                    max_len = 8000
-                    if len(text) > max_len:
-                        text = text[:max_len] + f"\n\n[Truncated from {len(text)} chars]"
-                    
-                    logger.info(f"Tool {tool_name} returned {len(text)} chars")
-                    return text
+                    if result and result.content:
+                        # Extract text content from result
+                        text = result.content[0].text if hasattr(result.content[0], 'text') else str(result.content[0])
+                        logger.info(f"Tool {tool_name} succeeded: {len(text)} chars")
+                        return text
 
-                logger.warning(f"Tool {tool_name} returned empty result")
-                return ""
+                    logger.warning(f"Tool {tool_name} returned empty result")
+                    return ""
 
-        except Exception as e:
-            error_msg = f"Tool execution failed: {e}"
-            logger.error(f"MCP tool {tool_name} failed: {e}")
-            return error_msg
+            except asyncio.TimeoutError:
+                last_error = f"Tool execution timed out after {self.timeout_seconds}s"
+                logger.warning(f"MCP tool {tool_name} timeout (attempt {attempt + 1}/{self.max_retries + 1})")
+                
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"MCP tool {tool_name} failed (attempt {attempt + 1}/{self.max_retries + 1}): {e}")
+                
+                # Don't retry on certain errors (e.g., invalid arguments)
+                if "not found" in str(e).lower() or "invalid" in str(e).lower():
+                    break
+
+            # Exponential backoff before retry (except on last attempt)
+            if attempt < self.max_retries:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s, ...
+                logger.debug(f"Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+
+        # All retries exhausted
+        error_msg = f"Tool execution failed after {self.max_retries + 1} attempts: {last_error}"
+        logger.error(f"MCP tool {tool_name} failed: {error_msg}")
+        return f"Error: {error_msg}"
 
     async def shutdown(self) -> None:
         """Clean up MCP connections."""

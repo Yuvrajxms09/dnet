@@ -38,6 +38,30 @@ except ImportError:
     MCP_AVAILABLE = False
     logger.debug("MCP tools module not available")
 
+# =============================================================================
+# Pseudo-tool for "respond without tools" - enables always-required mode
+# =============================================================================
+# This allows using tool_choice="required" with Outlines grammar while still
+# giving the model the option to respond directly without calling external tools.
+# The model either calls a real tool OR calls respond_to_user with its answer.
+RESPOND_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "respond_to_user",
+        "description": "Respond directly to the user when no external tool is needed. Use this for general questions, greetings, or when you can answer from your knowledge.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Your response message to the user"
+                }
+            },
+            "required": ["message"]
+        }
+    }
+}
+
 
 async def arange(count: int):
     """Async range generator."""
@@ -95,7 +119,7 @@ class InferenceManager:
 
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """Format tools for prompt injection.
-        
+
         Only injects tool names and short descriptions to keep prompt small.
         Full schemas are used for grammar constraint, not prompt injection.
         """
@@ -439,6 +463,24 @@ To use a tool, respond with JSON:
         detokenizer.finalize()
         final_text = detokenizer.text
 
+        # Strip special tokens from output
+        # mlx-lm's NaiveStreamingDetokenizer calls tokenizer.decode() without skip_special_tokens=True
+        # (see: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tokenizer_utils.py)
+        # So we strip them manually as a post-processing step
+        SPECIAL_TOKENS_TO_STRIP = [
+            "<|im_end|>",       # Qwen, ChatML format
+            "<|im_start|>",     # Qwen, ChatML format
+            "<|endoftext|>",    # GPT/generic
+            "</s>",             # Llama, Mistral
+            "<|eot_id|>",       # Llama 3
+            "<|end|>",          # Phi
+            "<|assistant|>",    # Some chat templates
+            "<|user|>",         # Some chat templates
+        ]
+        for token in SPECIAL_TOKENS_TO_STRIP:
+            final_text = final_text.replace(token, "")
+        final_text = final_text.strip()
+
         # Parse tool calls from generated text
         tool_calls = None
         has_tool_calls_json = '"tool_calls"' in final_text and "{" in final_text
@@ -454,7 +496,7 @@ To use a tool, respond with JSON:
                 if eos_pattern in clean_text:
                     clean_text = clean_text.split(eos_pattern)[0].strip()
                     break
-
+            
             # Handle Qwen3 <think> tags
             if "</think>" in clean_text:
                 clean_text = clean_text.split("</think>")[-1].strip()
@@ -542,15 +584,28 @@ To use a tool, respond with JSON:
             and getattr(self.mcp_provider, 'enabled', False)
         )
         
-        # NOTE: We do NOT auto-inject MCP tools into requests.
-        # MCP tools are available for EXECUTION only - the client must explicitly
-        # include tools in their request if they want tool calling.
-        # This is the production-standard approach (same as OpenAI, Anthropic, etc.)
-        #
-        # To use MCP tools, client should:
-        # 1. Call GET /v1/mcp/tools to discover available tools
-        # 2. Include desired tools in the request's "tools" field
-        # 3. Server executes tool calls via MCP when model generates them
+        # Auto-inject MCP tools when explicitly requested via use_mcp_tools flag
+        # This is opt-in - client must explicitly request tool injection
+        should_inject = (
+            mcp_enabled
+            and req.use_mcp_tools  # Explicit opt-in flag
+            and not req.tools  # No tools already provided by client
+        )
+        
+        if should_inject:
+            mcp_tools = self.mcp_provider.get_tools()
+            if mcp_tools:
+                # Include RESPOND_TOOL so model can choose to answer directly
+                # This enables using tool_choice="required" with Outlines grammar
+                # while still allowing non-tool responses
+                all_tools = mcp_tools + [RESPOND_TOOL]
+                logger.info(f"MCP tools injected: {len(mcp_tools)} tools + respond_to_user (grammar-constrained)")
+                working_req = req.model_copy(update={
+                    "tools": all_tools,
+                    "tool_choice": "required",  # Always required - Outlines grammar guarantees valid JSON
+                })
+            else:
+                logger.warning("use_mcp_tools=true but no MCP tools available")
 
         # Tool execution loop
         current_messages = list(working_req.messages)
@@ -580,6 +635,37 @@ To use a tool, respond with JSON:
 
             if should_execute:
                 tool_calls = choice.message.tool_calls
+                
+                # Check for respond_to_user pseudo-tool - return directly without execution
+                if len(tool_calls) == 1:
+                    tc = tool_calls[0]
+                    fn_name = tc.get("function", {}).get("name", "")
+                    if fn_name == "respond_to_user":
+                        # Extract message and return as normal text response
+                        try:
+                            args_str = tc.get("function", {}).get("arguments", "{}")
+                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                            user_message = args.get("message", "")
+                            logger.info(f"respond_to_user called - returning direct response ({len(user_message)} chars)")
+                            
+                            # Return as normal text completion
+                            return ChatResponseModel(
+                                id=response.id,
+                                choices=[
+                                    ChatChoice(
+                                        index=0,
+                                        finish_reason=ChatCompletionReason.STOP,
+                                        message=ChatMessage(role="assistant", content=user_message),
+                                    )
+                                ],
+                                created=response.created,
+                                model=response.model,
+                                usage=response.usage,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to parse respond_to_user: {e}")
+                            # Fall through to normal tool execution
+                
                 logger.info(f"Executing {len(tool_calls)} tool call(s) in round {tool_round}")
 
                 # Add assistant message with tool calls to conversation
@@ -588,7 +674,44 @@ To use a tool, respond with JSON:
                 # Execute tools and add results
                 tool_results = await self._execute_tool_calls(tool_calls)
                 current_messages.extend(tool_results)
-
+                
+                # Add task-specific guidance for model to interpret tool results (learned from Ollama tutorial)
+                # The Ollama tutorial shows that explicit, actionable guidance helps the model understand
+                # what to do with tool outputs, rather than generic "summarize" instructions
+                if tool_results:
+                    # Check if any tool returned an error
+                    has_errors = any(
+                        result.content and (
+                            result.content.startswith("Error") or 
+                            "failed" in result.content.lower() or
+                            "timeout" in result.content.lower()
+                        )
+                        for result in tool_results
+                    )
+                    
+                    if has_errors:
+                        # Specific guidance for error cases (learned from Ollama tutorial pattern)
+                        guidance = (
+                            "Some tools encountered errors. Please inform the user about what went wrong "
+                            "in a clear, helpful way. If possible, suggest alternative approaches or what the user "
+                            "could try instead. Do not make up information if the tools failed."
+                        )
+                    else:
+                        # Task-specific guidance: help model understand what to extract from tool results
+                        # Pattern from Ollama tutorial: "If tool output contains X, then do Y"
+                        guidance = (
+                            "Based on the tool results above, provide a helpful, accurate response to the user's "
+                            "original question. Extract and present the key information from the tool outputs in a "
+                            "clear, organized manner. If the tool results contain specific data (like repository names, "
+                            "file paths, or structured information), present that information directly. "
+                            "Do not add information that wasn't in the tool results."
+                        )
+                    
+                    current_messages.append(ChatMessage(
+                        role="user",
+                        content=guidance
+                    ))
+                
                 # Continue loop for next response
                 continue
 
@@ -615,7 +738,7 @@ To use a tool, respond with JSON:
         async for chunk in self.generate_stream(req):
             nonce = chunk.id
             choice = chunk.choices[0]
-
+            
             if choice.message:
                 final_message_from_chunk = choice.message
                 if final_message_from_chunk.tool_calls:
