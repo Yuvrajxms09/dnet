@@ -39,28 +39,12 @@ except ImportError:
     logger.debug("MCP tools module not available")
 
 # =============================================================================
-# Pseudo-tool for "respond without tools" - enables always-required mode
+# Tool calling support - no pseudo-tool needed
 # =============================================================================
-# This allows using tool_choice="required" with Outlines grammar while still
-# giving the model the option to respond directly without calling external tools.
-# The model either calls a real tool OR calls respond_to_user with its answer.
-RESPOND_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "respond_to_user",
-        "description": "Respond directly to the user when no external tool is needed. Use this for general questions, greetings, or when you can answer from your knowledge.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "Your response message to the user"
-                }
-            },
-            "required": ["message"]
-        }
-    }
-}
+# We use tool_choice="auto" which allows the model to:
+# - Call tools when needed (with grammar constraint for reliability)
+# - Respond with text when no tools are needed (natural response)
+# This is simpler and more natural than forcing structured output for everything.
 
 
 async def arange(count: int):
@@ -268,7 +252,7 @@ To use a tool, respond with JSON:
         use_tool_grammar = False
 
         if req.tools and req.tool_choice not in [None, "none"]:
-            logger.info(f"Tool calling enabled: {len(req.tools)} tools, tool_choice={req.tool_choice}")
+            logger.debug(f"Tool calling enabled: {len(req.tools)} tools, tool_choice={req.tool_choice}")
             tools_prompt = self._format_tools_for_prompt(req.tools)
 
             # Find system message or prepend one
@@ -286,10 +270,17 @@ To use a tool, respond with JSON:
                     0, ChatMessage(role="system", content=tools_prompt.strip())
                 )
 
-            # Only apply grammar constraint for "required"
+            # Apply grammar constraint only for "required"
+            # For "auto", let model decide - if it calls tools, we'll parse them (with retry on malformed JSON)
+            # This is more natural: model can respond with text OR call tools
             if req.tool_choice == "required":
                 use_tool_grammar = True
                 logger.debug("tool_choice='required': applying grammar constraint")
+            else:
+                # tool_choice is "auto" or specific function - don't force grammar
+                # Model can choose to call tools or respond with text naturally
+                use_tool_grammar = False
+                logger.debug(f"tool_choice='{req.tool_choice}': no grammar constraint, model decides")
 
         # Build prompt
         try:
@@ -405,7 +396,7 @@ To use a tool, respond with JSON:
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
             )
-            result = await self.adapter.await_token(nonce, timeout_s=300.0)
+            result = await self.adapter.await_token(nonce, timeout_s=600.0)  # 10min for tool-calling scenarios
             token = int(result.token_id)
 
             # Accumulate logprobs
@@ -567,7 +558,7 @@ To use a tool, respond with JSON:
         self,
         req: ChatRequestModel,
         execute_tools: bool = True,
-        max_tool_rounds: int = 5,
+        max_tool_rounds: int = 10,  # Increased to allow more tool execution rounds
     ) -> ChatResponseModel:
         """
         Handles chat completion request (non-streaming).
@@ -584,28 +575,21 @@ To use a tool, respond with JSON:
             and getattr(self.mcp_provider, 'enabled', False)
         )
         
-        # Auto-inject MCP tools when explicitly requested via use_mcp_tools flag
-        # This is opt-in - client must explicitly request tool injection
-        should_inject = (
-            mcp_enabled
-            and req.use_mcp_tools  # Explicit opt-in flag
-            and not req.tools  # No tools already provided by client
-        )
-        
-        if should_inject:
+        # Auto-inject MCP tools if MCP is enabled (matching Ollama pattern)
+        # Tools are always available when MCP is enabled - model decides when to use them
+        # This matches Ollama's approach: tools are always provided, model decides usage
+        if mcp_enabled and not req.tools:  # Only inject if client didn't provide tools
             mcp_tools = self.mcp_provider.get_tools()
             if mcp_tools:
-                # Include RESPOND_TOOL so model can choose to answer directly
-                # This enables using tool_choice="required" with Outlines grammar
-                # while still allowing non-tool responses
-                all_tools = mcp_tools + [RESPOND_TOOL]
-                logger.info(f"MCP tools injected: {len(mcp_tools)} tools + respond_to_user (grammar-constrained)")
+                # Use tool_choice="auto" - model decides when to use tools (like Ollama)
+                # Model can respond with text OR call tools based on the request
+                logger.info(f"MCP tools auto-injected: {len(mcp_tools)} tools (tool_choice=auto, like Ollama)")
                 working_req = req.model_copy(update={
-                    "tools": all_tools,
-                    "tool_choice": "required",  # Always required - Outlines grammar guarantees valid JSON
+                    "tools": mcp_tools,
+                    "tool_choice": "auto",  # Model decides - matches Ollama pattern
                 })
             else:
-                logger.warning("use_mcp_tools=true but no MCP tools available")
+                logger.debug("MCP enabled but no tools available")
 
         # Tool execution loop
         current_messages = list(working_req.messages)
@@ -635,36 +619,6 @@ To use a tool, respond with JSON:
 
             if should_execute:
                 tool_calls = choice.message.tool_calls
-                
-                # Check for respond_to_user pseudo-tool - return directly without execution
-                if len(tool_calls) == 1:
-                    tc = tool_calls[0]
-                    fn_name = tc.get("function", {}).get("name", "")
-                    if fn_name == "respond_to_user":
-                        # Extract message and return as normal text response
-                        try:
-                            args_str = tc.get("function", {}).get("arguments", "{}")
-                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
-                            user_message = args.get("message", "")
-                            logger.info(f"respond_to_user called - returning direct response ({len(user_message)} chars)")
-                            
-                            # Return as normal text completion
-                            return ChatResponseModel(
-                                id=response.id,
-                                choices=[
-                                    ChatChoice(
-                                        index=0,
-                                        finish_reason=ChatCompletionReason.STOP,
-                                        message=ChatMessage(role="assistant", content=user_message),
-                                    )
-                                ],
-                                created=response.created,
-                                model=response.model,
-                                usage=response.usage,
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to parse respond_to_user: {e}")
-                            # Fall through to normal tool execution
                 
                 logger.info(f"Executing {len(tool_calls)} tool call(s) in round {tool_round}")
 
@@ -697,14 +651,14 @@ To use a tool, respond with JSON:
                             "could try instead. Do not make up information if the tools failed."
                         )
                     else:
-                        # Task-specific guidance: help model understand what to extract from tool results
+                        # Generic guidance for any MCP tool results (works for GitHub, HuggingFace, Exa, filesystem, etc.)
                         # Pattern from Ollama tutorial: "If tool output contains X, then do Y"
+                        # Model naturally understands it should respond with text (no need to explicitly say "no tool call")
                         guidance = (
                             "Based on the tool results above, provide a helpful, accurate response to the user's "
                             "original question. Extract and present the key information from the tool outputs in a "
-                            "clear, organized manner. If the tool results contain specific data (like repository names, "
-                            "file paths, or structured information), present that information directly. "
-                            "Do not add information that wasn't in the tool results."
+                            "clear, organized manner. If the tool results contain specific data or structured "
+                            "information, present that information directly to the user."
                         )
                     
                     current_messages.append(ChatMessage(

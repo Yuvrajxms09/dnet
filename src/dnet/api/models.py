@@ -116,8 +116,9 @@ class ChatParams(BaseModel):
     )
     use_mcp_tools: bool = Field(
         default=False,
-        description="If true, server auto-injects all available MCP tools into the request. "
-        "Model decides which tool to call. Uses grammar-constrained generation for reliable output.",
+        description="[DEPRECATED] MCP tools are now auto-injected when MCP is enabled. "
+        "This field is ignored - tools are always available when MCP is configured.",
+        deprecated=True,
     )
     top_logprobs: int = Field(default=0, ge=0, le=20)
     top_p: float = Field(default=1.0, ge=0, le=1)
