@@ -29,6 +29,36 @@ from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
 from dnet.utils.logger import logger
 
+# =============================================================================
+# Tool Execution Constants
+# =============================================================================
+# These defaults work well for most use cases. They can be overridden via
+# the max_tool_rounds parameter in chat_completions() if needed.
+
+# Maximum number of tool execution rounds in a single chat completion
+# Prevents infinite loops from tool calling chains
+DEFAULT_MAX_TOOL_ROUNDS = 10
+
+# Timeout for token generation (seconds)
+# Increased from default to accommodate tool-calling scenarios which may
+# require multiple round trips
+DEFAULT_TOKEN_TIMEOUT_SECONDS = 600.0  # 10 minutes
+
+# System message guidance when tool execution encounters errors
+TOOL_EXECUTION_GUIDANCE_ERROR = (
+    "Some tools encountered errors. Please inform the user about what went wrong "
+    "in a clear, helpful way. If possible, suggest alternative approaches or what the user "
+    "could try instead. Do not make up information if the tools failed."
+)
+
+# System message guidance when tool execution succeeds
+TOOL_EXECUTION_GUIDANCE_SUCCESS = (
+    "Based on the tool results above, provide a helpful, accurate response to the user's "
+    "original question. Extract and present the key information from the tool outputs in a "
+    "clear, organized manner. If the tool results contain specific data or structured "
+    "information, present that information directly to the user."
+)
+
 # Optional MCP import - graceful degradation if not available
 try:
     from .mcp_tools import MCPToolProvider
@@ -45,6 +75,79 @@ except ImportError:
 # - Call tools when needed (with grammar constraint for reliability)
 # - Respond with text when no tools are needed (natural response)
 # This is simpler and more natural than forcing structured output for everything.
+
+
+# =============================================================================
+# Tool Execution Logging
+# =============================================================================
+# Helper for consistent tool execution logging with context.
+# Includes key info in the message for readability, and adds structured fields
+# via `extra` for log aggregation systems that support it (JSON formatters, etc.).
+def _log_tool_execution(
+    level: str,
+    message: str,
+    tool_name: Optional[str] = None,
+    tool_id: Optional[str] = None,
+    round_num: Optional[int] = None,
+    duration_ms: Optional[float] = None,
+    success: Optional[bool] = None,
+    error_type: Optional[str] = None,
+    result_size: Optional[int] = None,
+) -> None:
+    """
+    Log tool execution event with context.
+    
+    Builds a readable message and includes structured fields for log aggregation.
+    The message is always readable even without JSON formatters.
+    
+    Args:
+        level: Log level ("info", "debug", "warning", "error")
+        message: Base log message
+        tool_name: Name of the tool being executed
+        tool_id: Unique ID for this tool call
+        round_num: Tool execution round number (1-indexed)
+        duration_ms: Execution duration in milliseconds
+        success: Whether execution succeeded
+        error_type: Type of error if execution failed
+        result_size: Size of result (e.g., character count)
+    """
+    # Build readable message with key context
+    parts = [message]
+    if round_num is not None:
+        parts.append(f"round={round_num}")
+    if tool_name:
+        parts.append(f"tool={tool_name}")
+    if duration_ms is not None:
+        parts.append(f"duration={duration_ms:.2f}ms")
+    if result_size is not None:
+        parts.append(f"result_size={result_size}")
+    if success is not None:
+        parts.append(f"success={success}")
+    if error_type:
+        parts.append(f"error={error_type}")
+    
+    formatted_message = " | ".join(parts)
+    
+    # Build structured context for log aggregation systems
+    # (only include non-None values to keep logs clean)
+    context = {"component": "tool_execution"}
+    if tool_name is not None:
+        context["tool_name"] = tool_name
+    if tool_id is not None:
+        context["tool_id"] = tool_id
+    if round_num is not None:
+        context["round"] = round_num
+    if duration_ms is not None:
+        context["duration_ms"] = round(duration_ms, 2)
+    if success is not None:
+        context["success"] = success
+    if error_type is not None:
+        context["error_type"] = error_type
+    if result_size is not None:
+        context["result_size"] = result_size
+    
+    log_func = getattr(logger, level.lower(), logger.info)
+    log_func(formatted_message, extra=context)
 
 
 async def arange(count: int):
@@ -78,12 +181,12 @@ class InferenceManager:
         self.grpc_port = grpc_port
         self.adapter = adapter
         self.mcp_provider = mcp_provider
-
         self._api_callback_addr: str = ""
         
         # Log MCP status
         if mcp_provider:
-            logger.info(f"InferenceManager initialized with MCP provider (enabled={getattr(mcp_provider, 'enabled', False)})")
+            mcp_enabled = getattr(mcp_provider, 'enabled', False)
+            logger.info(f"InferenceManager initialized with MCP provider (enabled={mcp_enabled})")
         else:
             logger.debug("InferenceManager initialized without MCP provider")
 
@@ -190,14 +293,24 @@ To use a tool, respond with JSON:
     # =========================================================================
 
     async def _execute_tool_calls(
-        self, tool_calls: List[Dict[str, Any]]
+        self, tool_calls: List[Dict[str, Any]], round_num: Optional[int] = None
     ) -> List[ChatMessage]:
-        """Execute tool calls via MCP and return tool result messages."""
+        """
+        Execute tool calls via MCP and return tool result messages.
+        
+        Uses structured logging to enable tool execution trace analysis.
+        """
         if not self.mcp_provider or not getattr(self.mcp_provider, 'enabled', False):
-            logger.warning("MCP provider not available for tool execution")
+            _log_tool_execution(
+                "warning",
+                "MCP provider not available for tool execution",
+                error_type="provider_unavailable",
+            )
             return []
 
         results = []
+        execution_start = time.perf_counter()
+        
         for tc in tool_calls:
             tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             func = tc.get("function", {})
@@ -210,18 +323,55 @@ To use a tool, respond with JSON:
                     arguments = json.loads(args_raw)
                 except json.JSONDecodeError:
                     arguments = {}
-                    logger.warning(f"Failed to parse tool arguments: {args_raw[:100]}")
+                    _log_tool_execution(
+                        "warning",
+                        f"Failed to parse tool arguments: {args_raw[:100]}",
+                        tool_name=tool_name,
+                        tool_id=tool_id,
+                        round_num=round_num,
+                        error_type="json_parse_error",
+                    )
             else:
                 arguments = args_raw
 
-            logger.info(f"Executing MCP tool: {tool_name} with args: {arguments}")
+            _log_tool_execution(
+                "info",
+                f"Executing MCP tool: {tool_name}",
+                tool_name=tool_name,
+                tool_id=tool_id,
+                round_num=round_num,
+            )
             
+            tool_start = time.perf_counter()
             try:
                 result_text = await self.mcp_provider.execute(tool_name, arguments)
-                logger.info(f"Tool '{tool_name}' returned {len(result_text)} chars")
+                tool_duration_ms = (time.perf_counter() - tool_start) * 1000.0
+                
+                _log_tool_execution(
+                    "info",
+                    f"Tool '{tool_name}' completed successfully",
+                    tool_name=tool_name,
+                    tool_id=tool_id,
+                    round_num=round_num,
+                    duration_ms=tool_duration_ms,
+                    success=True,
+                    result_size=len(result_text) if result_text else 0,
+                )
             except Exception as e:
+                tool_duration_ms = (time.perf_counter() - tool_start) * 1000.0
+                error_type = type(e).__name__
                 result_text = f"Error executing tool: {e}"
-                logger.error(f"Tool execution failed: {e}")
+                
+                _log_tool_execution(
+                    "error",
+                    f"Tool execution failed: {e}",
+                    tool_name=tool_name,
+                    tool_id=tool_id,
+                    round_num=round_num,
+                    duration_ms=tool_duration_ms,
+                    success=False,
+                    error_type=error_type,
+                )
 
             results.append(ChatMessage(
                 role="tool",
@@ -229,6 +379,18 @@ To use a tool, respond with JSON:
                 content=result_text,
                 tool_call_id=tool_id,
             ))
+
+        total_duration_ms = (time.perf_counter() - execution_start) * 1000.0
+        _log_tool_execution(
+            "info",
+            f"Completed execution of {len(tool_calls)} tool call(s)",
+            round_num=round_num,
+            duration_ms=total_duration_ms,
+            success=all(
+                not (r.content and r.content.startswith("Error"))
+                for r in results
+            ),
+        )
 
         return results
 
@@ -271,8 +433,7 @@ To use a tool, respond with JSON:
                 )
 
             # Apply grammar constraint only for "required"
-            # For "auto", let model decide - if it calls tools, we'll parse them (with retry on malformed JSON)
-            # This is more natural: model can respond with text OR call tools
+            # For "auto", let model decide - if it calls tools, we'll parse them
             if req.tool_choice == "required":
                 use_tool_grammar = True
                 logger.debug("tool_choice='required': applying grammar constraint")
@@ -396,7 +557,11 @@ To use a tool, respond with JSON:
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
             )
-            result = await self.adapter.await_token(nonce, timeout_s=600.0)  # 10min for tool-calling scenarios
+            # Use increased timeout for tool-calling scenarios
+            result = await self.adapter.await_token(
+                nonce, 
+                timeout_s=DEFAULT_TOKEN_TIMEOUT_SECONDS
+            )
             token = int(result.token_id)
 
             # Accumulate logprobs
@@ -558,15 +723,23 @@ To use a tool, respond with JSON:
         self,
         req: ChatRequestModel,
         execute_tools: bool = True,
-        max_tool_rounds: int = 10,  # Increased to allow more tool execution rounds
+        max_tool_rounds: Optional[int] = None,
     ) -> ChatResponseModel:
         """
         Handles chat completion request (non-streaming).
         
         If MCP is enabled and execute_tools=True, will automatically execute
         tool calls and feed results back to the model.
+        
+        Args:
+            req: Chat completion request
+            execute_tools: Whether to automatically execute tool calls
+            max_tool_rounds: Maximum tool execution rounds (defaults to config value)
         """
-        logger.debug(f"chat_completions called: model={req.model}, execute_tools={execute_tools}")
+        # Use default max_tool_rounds if not explicitly provided
+        max_rounds = max_tool_rounds or DEFAULT_MAX_TOOL_ROUNDS
+        
+        logger.debug(f"chat_completions called: model={req.model}, execute_tools={execute_tools}, max_rounds={max_rounds}")
         
         # Check if MCP tool injection is needed
         working_req = req
@@ -575,18 +748,13 @@ To use a tool, respond with JSON:
             and getattr(self.mcp_provider, 'enabled', False)
         )
         
-        # Auto-inject MCP tools if MCP is enabled (matching Ollama pattern)
-        # Tools are always available when MCP is enabled - model decides when to use them
-        # This matches Ollama's approach: tools are always provided, model decides usage
-        if mcp_enabled and not req.tools:  # Only inject if client didn't provide tools
+        if mcp_enabled and not req.tools:  
             mcp_tools = self.mcp_provider.get_tools()
             if mcp_tools:
-                # Use tool_choice="auto" - model decides when to use tools (like Ollama)
-                # Model can respond with text OR call tools based on the request
                 logger.info(f"MCP tools auto-injected: {len(mcp_tools)} tools (tool_choice=auto, like Ollama)")
                 working_req = req.model_copy(update={
                     "tools": mcp_tools,
-                    "tool_choice": "auto",  # Model decides - matches Ollama pattern
+                    "tool_choice": "auto",  
                 })
             else:
                 logger.debug("MCP enabled but no tools available")
@@ -595,10 +763,17 @@ To use a tool, respond with JSON:
         current_messages = list(working_req.messages)
         tool_round = 0
         response = None
+        loop_start_time = time.perf_counter()
 
-        while tool_round < max_tool_rounds:
+        while tool_round < max_rounds:
             tool_round += 1
-            logger.debug(f"Tool round {tool_round}/{max_tool_rounds}")
+            round_start_time = time.perf_counter()
+            
+            _log_tool_execution(
+                "debug",
+                f"Starting tool execution round {tool_round}/{max_rounds}",
+                round_num=tool_round,
+            )
 
             # Generate response - use model_copy to preserve all fields correctly
             loop_req = working_req.model_copy(update={
@@ -620,18 +795,19 @@ To use a tool, respond with JSON:
             if should_execute:
                 tool_calls = choice.message.tool_calls
                 
-                logger.info(f"Executing {len(tool_calls)} tool call(s) in round {tool_round}")
+                _log_tool_execution(
+                    "info",
+                    f"Executing {len(tool_calls)} tool call(s) in round {tool_round}",
+                    round_num=tool_round,
+                )
 
                 # Add assistant message with tool calls to conversation
                 current_messages.append(choice.message)
 
                 # Execute tools and add results
-                tool_results = await self._execute_tool_calls(tool_calls)
+                tool_results = await self._execute_tool_calls(tool_calls, round_num=tool_round)
                 current_messages.extend(tool_results)
                 
-                # Add task-specific guidance for model to interpret tool results (learned from Ollama tutorial)
-                # The Ollama tutorial shows that explicit, actionable guidance helps the model understand
-                # what to do with tool outputs, rather than generic "summarize" instructions
                 if tool_results:
                     # Check if any tool returned an error
                     has_errors = any(
@@ -643,37 +819,47 @@ To use a tool, respond with JSON:
                         for result in tool_results
                     )
                     
+                    # Use appropriate guidance message based on tool execution result
                     if has_errors:
-                        # Specific guidance for error cases (learned from Ollama tutorial pattern)
-                        guidance = (
-                            "Some tools encountered errors. Please inform the user about what went wrong "
-                            "in a clear, helpful way. If possible, suggest alternative approaches or what the user "
-                            "could try instead. Do not make up information if the tools failed."
-                        )
+                        guidance = TOOL_EXECUTION_GUIDANCE_ERROR
                     else:
-                        # Generic guidance for any MCP tool results (works for GitHub, HuggingFace, Exa, filesystem, etc.)
-                        # Pattern from Ollama tutorial: "If tool output contains X, then do Y"
-                        # Model naturally understands it should respond with text (no need to explicitly say "no tool call")
-                        guidance = (
-                            "Based on the tool results above, provide a helpful, accurate response to the user's "
-                            "original question. Extract and present the key information from the tool outputs in a "
-                            "clear, organized manner. If the tool results contain specific data or structured "
-                            "information, present that information directly to the user."
-                        )
+                        guidance = TOOL_EXECUTION_GUIDANCE_SUCCESS
                     
                     current_messages.append(ChatMessage(
                         role="user",
                         content=guidance
                     ))
                 
+                round_duration_ms = (time.perf_counter() - round_start_time) * 1000.0
+                _log_tool_execution(
+                    "debug",
+                    f"Completed tool execution round {tool_round}",
+                    round_num=tool_round,
+                    duration_ms=round_duration_ms,
+                )
+                
                 # Continue loop for next response
                 continue
 
             # No tool calls or execution disabled - return response
+            total_duration_ms = (time.perf_counter() - loop_start_time) * 1000.0
+            _log_tool_execution(
+                "info",
+                f"Chat completion finished after {tool_round} round(s)",
+                round_num=tool_round,
+                duration_ms=total_duration_ms,
+            )
             return response
 
         # Max rounds reached
-        logger.warning(f"Max tool rounds ({max_tool_rounds}) reached")
+        total_duration_ms = (time.perf_counter() - loop_start_time) * 1000.0
+        _log_tool_execution(
+            "warning",
+            f"Max tool rounds ({max_rounds}) reached",
+            round_num=tool_round,
+            duration_ms=total_duration_ms,
+            error_type="max_rounds_exceeded",
+        )
         return response
 
     async def _generate_single_completion(self, req: ChatRequestModel) -> ChatResponseModel:
