@@ -6,6 +6,21 @@
       "Authorization": "Bearer YOUR_GITHUB_TOKEN_HERE"
     }
   },
+  "exa": {
+    "url": "https://mcp.exa.ai/mcp?tools=web_search_exa,deep_search_exa,get_code_context_exa,crawling_exa,company_research_exa,linkedin_search_exa,deep_researcher_start,deep_researcher_check&exaApiKey=YOUR_EXA_API_KEY_HERE",
+    "transport": "http",
+    "headers": {}
+  },
+  "duckduckgo": {
+    "command": "npx",
+    "args": ["-y", "@oevortex/ddg_search@latest"],
+    "transport": "stdio"
+  },
+  "financial-modeling-prep": {
+    "url": "https://server.smithery.ai/@imbenrabi/financial-modeling-prep-mcp-server",
+    "transport": "http",
+    "headers": {}
+  },
   "filesystem": {
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "~"],

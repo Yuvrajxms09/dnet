@@ -185,26 +185,40 @@ class InferenceManager:
 
     
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
-        """Inject tools into system message using compact format.
+        """Inject tools into system message with minimal parameter info.
         
-        Uses compact format (name + description) in prompt to avoid memory issues
-        with large tool schemas. Full schemas are still available for Outlines
-        grammar constraint validation (used separately).
+        Shows tool name, description, and required parameter names only.
+        This helps the model use correct parameter names without overwhelming
+        the prompt with full schemas.
         """
         if not tools:
             return ""
 
-        logger.debug(f"Injecting {len(tools)} tools into prompt (compact format)")
+        logger.debug(f"Injecting {len(tools)} tools into prompt (with required params)")
         
-        # Compact format: just name + description (for model awareness)
-        # Full schemas are used separately for grammar constraint validation
         tool_list = []
         for t in tools:
             if t.get("type") == "function" and "function" in t:
                 func = t["function"]
                 name = func.get("name", "unknown")
                 desc = func.get("description", "")
-                tool_list.append(f"- {name}: {desc}")
+                params = func.get("parameters", {})
+                
+                # Extract only required parameter names (minimal info)
+                required_params = []
+                if isinstance(params, dict):
+                    required = params.get("required", [])
+                    if required:
+                        required_params = required
+                
+                # Format tool entry
+                if required_params:
+                    params_str = ", ".join(required_params)
+                    tool_entry = f"- {name}: {desc} (required params: {params_str})"
+                else:
+                    tool_entry = f"- {name}: {desc}"
+                
+                tool_list.append(tool_entry)
         
         tools_text = "\n".join(tool_list)
 
@@ -217,7 +231,9 @@ Available tools:
 {tools_text}
 
 To use a tool, respond with JSON:
-{{"tool_calls": [{{"id": "call_1", "type": "function", "function": {{"name": "<tool_name>", "arguments": "{{\\"param\\": \\"value\\"}}"}}}}]}}
+{{"tool_calls": [{{"id": "call_1", "type": "function", "function": {{"name": "<tool_name>", "arguments": "{{\\"param_name\\": \\"param_value\\"}}"}}}}]}}
+
+IMPORTANT: Use the exact parameter names shown in parentheses above. For example, if it shows "(required params: companyName)", use {{"companyName": "value"}} not {{"name": "value"}}.
 """
 
     def _build_tool_call_schema(self, tools: List[Dict[str, Any]]) -> Optional[str]:
