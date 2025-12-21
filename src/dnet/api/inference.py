@@ -29,19 +29,10 @@ from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
 from dnet.utils.logger import logger
 
-# =============================================================================
-# Tool Execution Constants
-# =============================================================================
-# These defaults work well for most use cases. They can be overridden via
-# the max_tool_rounds parameter in chat_completions() if needed.
 
-# Maximum number of tool execution rounds in a single chat completion
 # Prevents infinite loops from tool calling chains
 DEFAULT_MAX_TOOL_ROUNDS = 10
 
-# Timeout for token generation (seconds)
-# Increased from default to accommodate tool-calling scenarios which may
-# require multiple round trips
 DEFAULT_TOKEN_TIMEOUT_SECONDS = 600.0  # 10 minutes
 
 # System message guidance when tool execution encounters errors
@@ -67,14 +58,6 @@ except ImportError:
     MCPToolProvider = None
     MCP_AVAILABLE = False
     logger.debug("MCP tools module not available")
-
-# =============================================================================
-# Tool calling support - no pseudo-tool needed
-# =============================================================================
-# We use tool_choice="auto" which allows the model to:
-# - Call tools when needed (with grammar constraint for reliability)
-# - Respond with text when no tools are needed (natural response)
-# This is simpler and more natural than forcing structured output for everything.
 
 
 # =============================================================================
@@ -200,33 +183,30 @@ class InferenceManager:
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = api_callback_addr
 
-    # =========================================================================
-    # Tool Calling Support
-    # =========================================================================
-
+    
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
-        """Format tools for prompt injection.
-
-        Only injects tool names and short descriptions to keep prompt small.
-        Full schemas are used for grammar constraint, not prompt injection.
+        """Inject tools into system message using compact format.
+        
+        Uses compact format (name + description) in prompt to avoid memory issues
+        with large tool schemas. Full schemas are still available for Outlines
+        grammar constraint validation (used separately).
         """
         if not tools:
             return ""
 
-        logger.debug(f"Formatting {len(tools)} tools for prompt injection")
+        logger.debug(f"Injecting {len(tools)} tools into prompt (compact format)")
         
-        # Only include name and first sentence of description to keep prompt small
-        tool_summaries = []
+        # Compact format: just name + description (for model awareness)
+        # Full schemas are used separately for grammar constraint validation
+        tool_list = []
         for t in tools:
             if t.get("type") == "function" and "function" in t:
                 func = t["function"]
                 name = func.get("name", "unknown")
                 desc = func.get("description", "")
-                # Truncate description to first sentence or 80 chars
-                short_desc = desc.split(".")[0][:80] if desc else ""
-                tool_summaries.append(f"- {name}: {short_desc}")
+                tool_list.append(f"- {name}: {desc}")
         
-        tools_list = "\n".join(tool_summaries)
+        tools_text = "\n".join(tool_list)
 
         return f"""
 
@@ -234,7 +214,7 @@ You have access to {len(tools)} tools. Use them ONLY when the user's request req
 For greetings or general questions, respond normally without tools.
 
 Available tools:
-{tools_list}
+{tools_text}
 
 To use a tool, respond with JSON:
 {{"tool_calls": [{{"id": "call_1", "type": "function", "function": {{"name": "<tool_name>", "arguments": "{{\\"param\\": \\"value\\"}}"}}}}]}}
