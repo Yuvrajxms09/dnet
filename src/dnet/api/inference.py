@@ -260,11 +260,14 @@ Available tools:
 To use a tool, respond with JSON:
 {{"tool_calls": [{{"id": "call_1", "type": "function", "function": {{"name": "<tool_name>", "arguments": "{{\\"param_name\\": \\"param_value\\"}}"}}}}]}}
 
-IMPORTANT: Use the exact parameter names shown in parentheses above. For example, if it shows "(required params: companyName)", use {{"companyName": "value"}} not {{"name": "value"}}.
+CRITICAL RULES:
+1. Use the EXACT parameter names shown in parentheses above. For example, if it shows "(required params: companyName)", use {{"companyName": "value"}} not {{"name": "value"}}.
+2. ALL required parameters MUST be included in the arguments JSON object. Do NOT use empty {{}} or omit required parameters.
+3. The arguments field must be a valid JSON object string with all required parameters filled in.
 """
 
     def _build_tool_call_schema(self, tools: List[Dict[str, Any]]) -> Optional[str]:
-        """Build JSON schema for tool calls (used by Outlines for grammar constraint)."""
+        """Build JSON schema for tool calls (used by LLGuidance for grammar constraint)."""
         tool_names = []
         for t in tools:
             try:
@@ -297,7 +300,10 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
                                 "type": "object",
                                 "properties": {
                                     "name": {"enum": tool_names},
-                                    "arguments": {"type": "string"},
+                                    "arguments": {
+                                        "type": "string",
+                                        "minLength": 3,  # At least "{}" is 2 chars, require more for actual params
+                                    },
                                 },
                                 "required": ["name", "arguments"],
                             },
@@ -341,11 +347,14 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
             
             # Parse arguments with robust error handling
             args_raw = func.get("arguments", "{}")
+            logger.debug(f"[TOOL ARGS] Parsing arguments for '{tool_name}': raw={args_raw[:200]}, type={type(args_raw).__name__}")
+            
             if isinstance(args_raw, str):
                 try:
                     # Use partial_json_loads to handle malformed JSON with extra data
                     parsed, _ = partial_json_loads(args_raw)
                     arguments = parsed if isinstance(parsed, dict) else {}
+                    logger.debug(f"[TOOL ARGS] Parsed JSON successfully: {arguments}")
                 except (JSONDecodeError, ValueError) as e:
                     arguments = {}
                     _log_tool_execution(
@@ -356,8 +365,10 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
                         round_num=round_num,
                         error_type="json_parse_error",
                     )
+                    logger.warning(f"[TOOL ARGS] JSON parse failed for '{tool_name}': {e}")
             elif isinstance(args_raw, dict):
                 arguments = args_raw
+                logger.debug(f"[TOOL ARGS] Arguments already a dict: {arguments}")
             else:
                 # Unexpected type
                 arguments = {}
@@ -369,18 +380,46 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
                     round_num=round_num,
                     error_type="invalid_type",
                 )
+                logger.warning(f"[TOOL ARGS] Unexpected argument type for '{tool_name}': {type(args_raw).__name__}")
             
             # Filter out None values - MCP servers may not accept undefined/None
             # Keep empty strings and other falsy values as they might be valid
+            arguments_before_filter = arguments.copy()
             arguments = {k: v for k, v in arguments.items() if v is not None}
+            if len(arguments) < len(arguments_before_filter):
+                filtered_keys = set(arguments_before_filter.keys()) - set(arguments.keys())
+                logger.debug(f"[TOOL ARGS] Filtered out None values for '{tool_name}': {filtered_keys}")
+            
+            # Validate required parameters if we have tool info
+            if self.mcp_provider and hasattr(self.mcp_provider, '_tools'):
+                tool_info = self.mcp_provider._tools.get(tool_name)
+                if tool_info:
+                    params_schema = tool_info.get("parameters", {})
+                    if isinstance(params_schema, dict):
+                        required_params = params_schema.get("required", [])
+                        if required_params:
+                            missing_params = [p for p in required_params if p not in arguments or arguments.get(p) == ""]
+                            if missing_params:
+                                logger.warning(
+                                    f"[TOOL ARGS] ⚠️ Tool '{tool_name}' missing required parameters: {missing_params}. "
+                                    f"Provided: {list(arguments.keys())}, Required: {required_params}"
+                                )
+                                _log_tool_execution(
+                                    "warning",
+                                    f"Missing required parameters: {missing_params}",
+                                    tool_name=tool_name,
+                                    tool_id=tool_id,
+                                    round_num=round_num,
+                                    error_type="missing_required_params",
+                                )
             
             # Log arguments for debugging (truncate long values)
             if arguments:
                 args_preview = {k: (str(v)[:100] + "..." if len(str(v)) > 100 else v) 
                                for k, v in arguments.items()}
-                logger.debug(f"Tool {tool_name} arguments: {args_preview}")
+                logger.debug(f"[TOOL ARGS] Final arguments for '{tool_name}': {args_preview}")
             else:
-                logger.debug(f"Tool {tool_name} called with empty arguments")
+                logger.warning(f"[TOOL ARGS] ⚠️ Tool '{tool_name}' called with empty arguments!")
 
             _log_tool_execution(
                 "info",
@@ -535,7 +574,7 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
             tool_schema = self._build_tool_call_schema(req.tools)
             if tool_schema:
                 grammar_json_schema = tool_schema
-                logger.info(f"Using Outlines tool call schema for {len(req.tools)} tools")
+                logger.info(f"Using LLGuidance tool call schema for {len(req.tools)} tools")
             else:
                 use_tool_grammar = False
         elif hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
@@ -828,6 +867,16 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
                             completion_reason = ChatCompletionReason.TOOL_CALLS
                             tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
                             logger.info(f"Parsed {len(tool_calls)} tool call(s): {tool_names}")
+                            
+                            # Log raw arguments for debugging
+                            for tc in tool_calls:
+                                func = tc.get("function", {})
+                                tool_name = func.get("name", "?")
+                                args_raw = func.get("arguments", "")
+                                logger.debug(
+                                    f"[TOOL ARGS] Tool '{tool_name}': raw_arguments={args_raw[:200]} "
+                                    f"(type={type(args_raw).__name__})"
+                                )
                         else:
                             tool_calls = None
                             logger.debug(f"Parsed tool_calls but it's not a valid list: {tool_calls}")
@@ -846,6 +895,16 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
                                 completion_reason = ChatCompletionReason.TOOL_CALLS
                                 tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
                                 logger.info(f"Parsed {len(tool_calls)} tool call(s) via fallback: {tool_names}")
+                                
+                                # Log raw arguments for debugging
+                                for tc in tool_calls:
+                                    func = tc.get("function", {})
+                                    tool_name = func.get("name", "?")
+                                    args_raw = func.get("arguments", "")
+                                    logger.debug(
+                                        f"[TOOL ARGS] Tool '{tool_name}': raw_arguments={args_raw[:200]} "
+                                        f"(type={type(args_raw).__name__})"
+                                    )
                             else:
                                 tool_calls = None
                     except (JSONDecodeError, ValueError):

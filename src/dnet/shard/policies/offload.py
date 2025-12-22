@@ -43,17 +43,25 @@ class OffloadPolicy(ComputePolicy):
         """
         logger.info(f"[MEMORY TRACE] Starting cleanup for grammar state nonce={nonce}")
         if nonce in OffloadPolicy._grammar_states:
+            size_str = "unknown"  # Initialize for logging
             try:
                 grammar_state = OffloadPolicy._grammar_states[nonce]
                 # Log bitmask info before cleanup
-                bitmask_size = None
+                # LLGuidance uses packed bitmasks (much smaller than full vocab arrays)
                 if hasattr(grammar_state, '_bitmask') and grammar_state._bitmask is not None:
                     if hasattr(grammar_state._bitmask, 'nbytes'):
-                        bitmask_size = grammar_state._bitmask.nbytes / (1024 ** 3)  # GB
+                        bitmask_size_bytes = grammar_state._bitmask.nbytes
+                        # LLGuidance bitmasks are small (MB range), not GB
+                        if bitmask_size_bytes > 1024 ** 3:  # > 1GB (shouldn't happen with LLGuidance)
+                            bitmask_size = bitmask_size_bytes / (1024 ** 3)
+                            size_str = f"{bitmask_size:.2f}GB"
+                        else:
+                            bitmask_size = bitmask_size_bytes / (1024 ** 2)
+                            size_str = f"{bitmask_size:.2f}MB"
                     logger.info(
                         f"[MEMORY TRACE] Clearing bitmask: "
                         f"vocab_size={getattr(grammar_state, 'vocab_size', 'unknown')}, "
-                        f"bitmask_size={bitmask_size:.2f}GB" if bitmask_size else f"bitmask_size=unknown"
+                        f"bitmask_size={size_str}"
                     )
                     grammar_state._bitmask = None
                 else:
@@ -70,14 +78,14 @@ class OffloadPolicy(ComputePolicy):
                 # Always remove from tracking dicts
                 OffloadPolicy._grammar_states_last_seen.pop(nonce, None)
                 logger.debug(f"[MEMORY TRACE] Running garbage collection...")
-                # Force GC for large grammar states (bitmasks can be 10GB+)
+                # Force GC for grammar states (LLGuidance bitmasks are small, but matcher state may be larger)
                 gc.collect()
                 logger.debug(f"[MEMORY TRACE] Clearing MLX cache...")
                 # Clear MLX cache to free memory immediately (bitmasks are MLX arrays)
                 mx.clear_cache()
                 logger.info(
                     f"[MEMORY TRACE] ✅ Grammar state cleanup completed for nonce={nonce}"
-                    + (f", freed ~{bitmask_size:.2f}GB" if bitmask_size else "")
+                    + (f", freed ~{size_str}" if size_str != "unknown" else "")
                 )
         else:
             logger.debug(f"[MEMORY TRACE] Grammar state not found in cache for nonce={nonce}")

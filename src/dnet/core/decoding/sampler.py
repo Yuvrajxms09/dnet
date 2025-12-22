@@ -8,24 +8,22 @@ from dnet.utils.logger import logger
 
 
 class GrammarState:
-    """Holds Outlines grammar state for a single generation session.
+    """Holds LLGuidance grammar state for a single generation session.
     
-    Uses Outlines' FSM-based approach for constrained JSON generation.
-    Replaces the previous xgrammar implementation.
+    Uses LLGuidance's dynamic mask computation approach for constrained JSON generation.
+    Replaces the previous Outlines implementation to avoid memory allocation issues.
     """
     
-    def __init__(self, guide, index, bitmask_allocator, vocab_size: int, eos_token_id: Optional[int] = None):
-        """Initialize grammar state with Outlines Guide.
+    def __init__(self, matcher, bitmask_allocator, vocab_size: int, eos_token_id: Optional[int] = None):
+        """Initialize grammar state with LLGuidance LLMatcher.
         
         Args:
-            guide: Outlines Guide instance for tracking FSM state
-            index: Outlines Index for the compiled regex/grammar
-            bitmask_allocator: Function to allocate bitmask for vocab size
+            matcher: LLGuidance LLMatcher instance for tracking grammar state
+            bitmask_allocator: Function to allocate bitmask (batch_size, vocab_size)
             vocab_size: Size of the model vocabulary
             eos_token_id: EOS token ID for forced termination
         """
-        self.guide = guide
-        self.index = index
+        self.matcher = matcher
         self.bitmask_allocator = bitmask_allocator
         self.vocab_size = vocab_size
         self._eos_token_id = eos_token_id
@@ -36,33 +34,37 @@ class GrammarState:
         """Get or create the token bitmask.
         
         Returns None if allocation fails (memory insufficient).
+        LLGuidance uses packed bitmasks (much smaller than full vocab arrays).
         """
         if self._bitmask is None:
-            # Estimate bitmask size for logging
-            estimated_size_gb = (self.vocab_size * 4) / (1024 ** 3)  # Rough estimate
-            logger.info(
-                f"[MEMORY TRACE] Attempting to allocate grammar bitmask: "
-                f"vocab_size={self.vocab_size}, estimated_size={estimated_size_gb:.2f}GB"
+            # LLGuidance bitmask is packed: (batch_size, (vocab_size + 31) // 32)
+            # This is much smaller than full vocab arrays
+            batch_size = 1
+            estimated_size_bytes = ((self.vocab_size + 31) // 32) * 4  # int32 = 4 bytes
+            estimated_size_mb = estimated_size_bytes / (1024 ** 2)
+            logger.debug(
+                f"[MEMORY TRACE] Allocating LLGuidance bitmask: "
+                f"vocab_size={self.vocab_size}, estimated_size={estimated_size_mb:.2f}MB"
             )
             
             try:
-                logger.debug(f"[MEMORY TRACE] Calling bitmask_allocator for vocab_size={self.vocab_size}")
-                self._bitmask = self.bitmask_allocator(self.vocab_size)
+                logger.debug(f"[MEMORY TRACE] Calling bitmask_allocator(batch_size={batch_size}, vocab_size={self.vocab_size})")
+                self._bitmask = self.bitmask_allocator(batch_size, self.vocab_size)
                 # Get actual size if possible
                 if hasattr(self._bitmask, 'nbytes'):
-                    actual_size_gb = self._bitmask.nbytes / (1024 ** 3)
-                    logger.info(
+                    actual_size_mb = self._bitmask.nbytes / (1024 ** 2)
+                    logger.debug(
                         f"[MEMORY TRACE] Bitmask allocated successfully: "
-                        f"actual_size={actual_size_gb:.2f}GB, shape={getattr(self._bitmask, 'shape', 'unknown')}"
+                        f"actual_size={actual_size_mb:.2f}MB, shape={getattr(self._bitmask, 'shape', 'unknown')}"
                     )
                 else:
-                    logger.info(f"[MEMORY TRACE] Bitmask allocated successfully (size unknown)")
+                    logger.debug(f"[MEMORY TRACE] Bitmask allocated successfully (size unknown)")
             except (MemoryError, RuntimeError) as e:
                 error_msg = str(e)
                 logger.error(
                     f"[MEMORY TRACE] ❌ Bitmask allocation FAILED: "
                     f"vocab_size={self.vocab_size}, error={error_msg}, "
-                    f"estimated_size={estimated_size_gb:.2f}GB"
+                    f"estimated_size={estimated_size_mb:.2f}MB"
                 )
                 if "allocate" in error_msg.lower() or "memory" in error_msg.lower() or "out of memory" in error_msg.lower():
                     logger.error(
@@ -84,36 +86,57 @@ class GrammarState:
         """Fill bitmask with allowed tokens for current state.
         
         Returns None if already terminated or if bitmask allocation failed.
+        LLGuidance computes masks dynamically - no pre-allocation of large arrays.
         """
         # Don't fill bitmask if already terminated
         if self._terminated:
             return None
         
-        from outlines_core.kernels.mlx import fill_next_token_bitmask
+        # Check for errors in matcher
+        if self.matcher.is_error():
+            error_msg = self.matcher.get_error()
+            logger.error(f"[MEMORY TRACE] ❌ LLGuidance matcher in error state: {error_msg}")
+            self._terminated = True
+            return None
+        
+        from llguidance.mlx import fill_next_token_bitmask
         bitmask = self.get_bitmask()
         # If bitmask allocation failed, get_bitmask() returns None
         if bitmask is None:
             return None
         
-        fill_next_token_bitmask(self.guide, bitmask)
+        # LLGuidance fills bitmask in-place (index=0 for single batch)
+        # fill_next_token_bitmask expects numpy array (NDArray[np.int32])
+        # allocate_token_bitmask returns numpy array, so this should work
+        fill_next_token_bitmask(self.matcher, bitmask, index=0)
         return bitmask
     
     def accept_token(self, token_id: int) -> None:
         """Accept a token and advance the grammar state.
         
-        IMPORTANT: Do NOT advance if guide is already finished or terminated, even if it accepts tokens.
-        This prevents the guide from restarting/continuing after JSON completion.
+        IMPORTANT: Do NOT advance if matcher is already stopped or terminated.
+        This prevents the matcher from continuing after JSON completion.
         """
         # Never advance if we've already been terminated
         if self._terminated:
             return
         
-        # Only advance if NOT finished - once finished, we should stop
-        # The accepts_tokens check was allowing continuation after completion
-        if not self.guide.is_finished():
-            self.guide.advance(token_id=token_id, return_tokens=False)
+        # Check for errors
+        if self.matcher.is_error():
+            error_msg = self.matcher.get_error()
+            logger.warning(f"LLGuidance matcher in error state: {error_msg}")
+            self._terminated = True
+            return
+        
+        # Only advance if NOT stopped - once stopped, we should stop
+        if not self.matcher.is_stopped():
+            success = self.matcher.consume_token(token_id)
+            if not success:
+                logger.warning(f"Failed to consume token {token_id} in grammar matcher")
+                # Mark as terminated if token consumption fails
+                self._terminated = True
         else:
-            # Guide is finished - mark as terminated to prevent further advancement
+            # Matcher is stopped - mark as terminated to prevent further advancement
             self._terminated = True
     
     def is_terminated(self) -> bool:
@@ -128,54 +151,39 @@ class GrammarState:
         Once terminated, always returns True to prevent duplication.
         """
         # If we've already been terminated, always return True
-        # This prevents the guide from resetting/continuing after completion
+        # This prevents the matcher from resetting/continuing after completion
         if self._terminated:
             return True
         
-        # Primary check: is the guide finished?
-        if not self.guide.is_finished():
-            return False
+        # Check for errors
+        if self.matcher.is_error():
+            self._terminated = True
+            return True
         
-        # When finished, verify we're in a final accepting state of the FSM
-        # This ensures we've completed a valid JSON structure
-        try:
-            current_state = self.guide.get_state()
-            is_final = self.index.is_final_state(current_state)
-            
-            if is_final:
-                # We're in a final state - mark as terminated and return True
-                # Once terminated, we'll always return True on subsequent checks
-                self._terminated = True
-                return True
-            
-            # If guide is finished but not in final state, still mark as terminated
-            # This is a safety measure - if the guide says it's finished, we should stop
-            # The issue was that we were returning False here, allowing continuation
+        # LLGuidance: check if matcher is in accepting state (can terminate) or stopped
+        # is_accepting() = can terminate now (complete valid output)
+        # is_stopped() = won't accept more tokens (except EOS)
+        if self.matcher.is_accepting() or self.matcher.is_stopped():
+            # Mark as terminated to prevent further generation
             self._terminated = True
             logger.debug(
-                f"Guide finished but not in final state - marking as terminated anyway. "
-                f"state={current_state}, is_final={is_final}"
+                f"Grammar terminated: is_accepting={self.matcher.is_accepting()}, "
+                f"is_stopped={self.matcher.is_stopped()}"
             )
             return True
-        except Exception as e:
-            # Fallback: if we can't check final state, trust is_finished()
-            # Since guide.is_finished() returned True, mark as terminated
-            self._terminated = True
-            logger.debug(
-                f"Could not verify final state: {e}, using is_finished()={self.guide.is_finished()}, "
-                f"marking as terminated"
-            )
-            return True
+        
+        return False
 
 
 class Sampler:
     """
     Handles the transformation of logits into tokens based on a DecodingConfig.
     Wraps mlx_lm's make_sampler for consistent sampling behavior.
-    Supports structured output via grammar-constrained generation using Outlines.
+    Supports structured output via grammar-constrained generation using LLGuidance.
     """
 
-    # Cache for compiled vocabulary to avoid recomputing per request
+    # Cache for compiled LLTokenizer to avoid recomputing per request
+    # Creating LLTokenizer from HuggingFace tokenizer is expensive (~1s), so we cache it
     _vocabulary_cache: Dict[int, Any] = {}
 
     def __init__(self):
@@ -183,72 +191,67 @@ class Sampler:
         pass
 
     @staticmethod
-    def _get_or_create_vocabulary(tokenizer, vocab_size: int):
-        """Get or create Outlines Vocabulary from tokenizer.
+    def _get_or_create_lltokenizer(tokenizer, vocab_size: int):
+        """Get or create LLGuidance LLTokenizer from HuggingFace tokenizer.
         
-        Caches vocabulary by tokenizer to avoid recomputation.
-        Validates that vocab_size matches tokenizer's actual vocabulary size.
+        Caches tokenizer by tokenizer object to avoid recomputation.
+        This is an expensive operation (~1s), so caching is important.
         
         Args:
-            tokenizer: HuggingFace tokenizer
+            tokenizer: HuggingFace tokenizer (must be PreTrainedTokenizerFast)
             vocab_size: Expected vocabulary size (from model logits or tokenizer.vocab_size)
+            
+        Returns:
+            LLTokenizer instance or None if creation fails
         """
         cache_key = id(tokenizer)
         if cache_key in Sampler._vocabulary_cache:
             return Sampler._vocabulary_cache[cache_key]
         
         try:
-            from outlines_core import Vocabulary
+            import llguidance.hf
             
-            # Get vocabulary dict from tokenizer
-            vocab = tokenizer.get_vocab()
-            actual_vocab_size = len(vocab)
+            # Validate tokenizer type
+            from transformers import PreTrainedTokenizerFast
+            if not isinstance(tokenizer, PreTrainedTokenizerFast):
+                logger.warning(
+                    f"Tokenizer is not PreTrainedTokenizerFast (got {type(tokenizer)}). "
+                    f"LLGuidance requires fast tokenizers. Attempting to use anyway..."
+                )
+            
+            # Get actual vocab size from tokenizer
+            actual_vocab_size = getattr(tokenizer, 'vocab_size', len(tokenizer.get_vocab()))
             
             # Validate vocab_size matches actual tokenizer vocab size
-            # This is important for bitmask allocation - it must match logits shape
             if vocab_size != actual_vocab_size:
                 logger.warning(
                     f"Vocab size mismatch: expected {vocab_size} (from model/logits) "
                     f"but tokenizer has {actual_vocab_size} tokens. "
-                    f"Using model vocab_size {vocab_size} for bitmask allocation."
+                    f"Using model vocab_size {vocab_size} for LLGuidance."
                 )
             
-            eos_token_id = tokenizer.eos_token_id
-            eos_token = tokenizer.eos_token or tokenizer.decode([eos_token_id])
+            # Get EOS token ID
+            eos_token_id = getattr(tokenizer, 'eos_token_id', None)
             
-            # Build formatted vocabulary for Outlines
-            # Need to convert token strings to their actual string representation
-            formatted_vocab = {}
-            for token, token_id in vocab.items():
-                try:
-                    # Convert token to its string representation
-                    # This handles special tokens like spacing tokens
-                    token_as_str = tokenizer.convert_tokens_to_string([token])
-                    if token_as_str not in formatted_vocab:
-                        formatted_vocab[token_as_str] = [token_id]
-                    else:
-                        formatted_vocab[token_as_str].append(token_id)
-                except Exception:
-                    # Fallback: use token as-is
-                    if token not in formatted_vocab:
-                        formatted_vocab[token] = [token_id]
-                    else:
-                        formatted_vocab[token].append(token_id)
-            
-            # Remove EOS token from vocab (Outlines handles it separately)
-            formatted_vocab.pop(eos_token, None)
-            
-            vocabulary = Vocabulary(eos_token_id, formatted_vocab)
-            Sampler._vocabulary_cache[cache_key] = vocabulary
+            # Create LLTokenizer from HuggingFace tokenizer
+            # This serializes the tokenizer and is expensive (~1s), so we cache it
+            logger.debug(f"[MEMORY TRACE] Creating LLGuidance tokenizer (this may take ~1s)...")
+            ll_tokenizer = llguidance.hf.from_tokenizer(
+                tokenizer,
+                n_vocab=vocab_size,
+                eos_token=eos_token_id,
+                slices=llguidance.LLTokenizer.json_slices()  # Optimize for JSON schemas
+            )
+            Sampler._vocabulary_cache[cache_key] = ll_tokenizer
             
             logger.debug(
-                f"Created Outlines vocabulary: {len(formatted_vocab)} entries, "
-                f"vocab_size={vocab_size}, actual_tokenizer_size={actual_vocab_size}"
+                f"Created LLGuidance tokenizer: vocab_size={vocab_size}, "
+                f"actual_tokenizer_size={actual_vocab_size}, eos_token_id={eos_token_id}"
             )
-            return vocabulary
+            return ll_tokenizer
             
         except Exception as e:
-            logger.warning(f"Failed to create Outlines vocabulary: {e}")
+            logger.warning(f"Failed to create LLGuidance tokenizer: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             return None
@@ -257,7 +260,8 @@ class Sampler:
     def create_grammar_state(json_schema: str, tokenizer, model_vocab_size: Optional[int] = None) -> Optional[GrammarState]:
         """Create a grammar state for JSON schema constrained generation.
         
-        Uses Outlines to compile JSON schema into an FSM-based grammar guide.
+        Uses LLGuidance to compile JSON schema into a grammar matcher.
+        LLGuidance computes masks dynamically, avoiding large pre-allocations.
         
         Args:
             json_schema: JSON schema string to constrain generation
@@ -271,33 +275,24 @@ class Sampler:
             return None
             
         try:
-            from outlines_core import Index, Guide
-            from outlines_core.outlines_core import json_schema as oc_json_schema
-            from outlines_core.kernels.mlx import allocate_token_bitmask
+            from llguidance.mlx import LLMatcher, allocate_token_bitmask
             
             # Get vocab_size: prefer model_vocab_size (from logits shape) over tokenizer.vocab_size
             #   - model_vocab_size comes from logits.shape[-1] (most accurate, matches actual model)
             #   - tokenizer.vocab_size is fallback (may differ if model was extended)
-            # The vocab_size is critical for bitmask allocation - must match logits shape
             vocab_size = model_vocab_size or getattr(tokenizer, 'vocab_size', None)
             if vocab_size is None:
                 logger.warning("Could not determine vocab size for grammar state")
                 return None
             
-            # Estimate bitmask size and warn if potentially problematic
-            # Bitmask is typically vocab_size * sizeof(bool) or similar
-            # For very large vocabs (100k+), this can be 10GB+
-            estimated_bitmask_size_gb = (vocab_size * 4) / (1024 ** 3)  # Rough estimate: 4 bytes per token
+            # LLGuidance uses packed bitmasks - much smaller than full vocab arrays
+            # Bitmask size: (batch_size, (vocab_size + 31) // 32) * 4 bytes
+            bitmask_size_bytes = ((vocab_size + 31) // 32) * 4
+            bitmask_size_mb = bitmask_size_bytes / (1024 ** 2)
             logger.info(
-                f"[MEMORY TRACE] Creating grammar state: vocab_size={vocab_size}, "
-                f"estimated_bitmask_size={estimated_bitmask_size_gb:.2f}GB"
+                f"[MEMORY TRACE] Creating LLGuidance grammar state: vocab_size={vocab_size}, "
+                f"bitmask_size={bitmask_size_mb:.2f}MB (packed format, no large pre-allocation)"
             )
-            if estimated_bitmask_size_gb > 5.0:  # Warn if > 5GB
-                logger.warning(
-                    f"[MEMORY TRACE] ⚠️ Large vocabulary size ({vocab_size}) will require ~{estimated_bitmask_size_gb:.1f}GB "
-                    f"for grammar bitmask. This may cause memory allocation errors. "
-                    f"Consider using tool_choice='auto' instead of 'required'."
-                )
             
             # Log which source we used for debugging
             if model_vocab_size:
@@ -306,47 +301,57 @@ class Sampler:
                 tokenizer_vocab_size = getattr(tokenizer, 'vocab_size', None)
                 logger.debug(f"Using tokenizer.vocab_size={vocab_size} (fallback)")
             
-            # Build regex pattern from JSON schema
-            logger.debug(f"[MEMORY TRACE] Building regex pattern from JSON schema...")
-            regex_pattern = oc_json_schema.build_regex_from_schema(json_schema)
-            logger.debug(f"[MEMORY TRACE] Built regex from JSON schema (length: {len(regex_pattern)})")
-            
-            # Get or create vocabulary
-            logger.debug(f"[MEMORY TRACE] Getting/creating vocabulary for vocab_size={vocab_size}...")
-            vocabulary = Sampler._get_or_create_vocabulary(tokenizer, vocab_size)
-            if vocabulary is None:
-                logger.warning("[MEMORY TRACE] ❌ Failed to create vocabulary for grammar state")
+            # Get or create LLTokenizer (cached, expensive operation ~1s)
+            logger.debug(f"[MEMORY TRACE] Getting/creating LLGuidance tokenizer...")
+            ll_tokenizer = Sampler._get_or_create_lltokenizer(tokenizer, vocab_size)
+            if ll_tokenizer is None:
+                logger.warning("[MEMORY TRACE] ❌ Failed to create LLGuidance tokenizer")
                 return None
-            logger.debug(f"[MEMORY TRACE] Vocabulary created successfully")
+            logger.debug(f"[MEMORY TRACE] LLTokenizer created/retrieved successfully")
             
-            # Create Index from regex and vocabulary
-            logger.debug(f"[MEMORY TRACE] Creating Outlines Index from regex and vocabulary...")
-            index = Index(regex_pattern, vocabulary)
-            logger.debug(f"[MEMORY TRACE] Index created successfully")
+            # Create grammar from JSON schema
+            logger.debug(f"[MEMORY TRACE] Creating grammar from JSON schema...")
+            grammar = LLMatcher.grammar_from_json_schema(json_schema)
+            logger.debug(f"[MEMORY TRACE] Grammar created from JSON schema")
             
-            # Create Guide from Index
-            logger.debug(f"[MEMORY TRACE] Creating Outlines Guide from Index...")
-            guide = Guide(index)
-            logger.debug(f"[MEMORY TRACE] Guide created successfully")
+            # Validate grammar (optional but recommended)
+            validation_result = LLMatcher.validate_grammar(grammar, ll_tokenizer)
+            if validation_result:
+                # Check if it's a warning or error
+                if "WARNING:" in validation_result:
+                    logger.warning(f"Grammar validation warning: {validation_result}")
+                else:
+                    logger.error(f"Grammar validation failed: {validation_result}")
+                    return None
+            
+            # Create LLMatcher from tokenizer and grammar
+            logger.debug(f"[MEMORY TRACE] Creating LLMatcher...")
+            matcher = LLMatcher(ll_tokenizer, grammar, log_level=1)
+            logger.debug(f"[MEMORY TRACE] LLMatcher created successfully")
+            
+            # Check for errors
+            if matcher.is_error():
+                error_msg = matcher.get_error()
+                logger.error(f"[MEMORY TRACE] ❌ LLMatcher creation failed: {error_msg}")
+                return None
             
             # Get EOS token ID for forced termination when grammar completes
             eos_token_id = getattr(tokenizer, 'eos_token_id', None)
             
             logger.info(
-                f"[MEMORY TRACE] ✅ Successfully created Outlines grammar state: "
+                f"[MEMORY TRACE] ✅ Successfully created LLGuidance grammar state: "
                 f"vocab_size={vocab_size}, eos_token_id={eos_token_id}, "
-                f"bitmask will be allocated lazily on first use"
+                f"bitmask will be allocated lazily on first use (packed format, ~{bitmask_size_mb:.2f}MB)"
             )
             return GrammarState(
-                guide=guide,
-                index=index,
+                matcher=matcher,
                 bitmask_allocator=allocate_token_bitmask,
                 vocab_size=vocab_size,
                 eos_token_id=eos_token_id
             )
             
         except ImportError as e:
-            logger.warning(f"Outlines not installed or import error: {e}")
+            logger.warning(f"LLGuidance not installed or import error: {e}")
             return None
         except Exception as e:
             logger.warning(f"Failed to create grammar state: {e}")
@@ -366,7 +371,7 @@ class Sampler:
         Sample a token from logits using the provided configuration.
         If grammar_state is provided, applies grammar constraints before sampling.
         
-        Uses Outlines' FSM-based approach for constrained generation.
+        Uses LLGuidance's dynamic mask computation for constrained generation.
         """
         sampler_fn = make_sampler(
             temp=config.temperature,
@@ -378,13 +383,51 @@ class Sampler:
             else 1,
         )
         ndim = getattr(logits, "ndim", None)
+        original_shape = getattr(logits, "shape", "unknown")
+        logger.debug(
+            f"[MEMORY TRACE] Extracting logits: original_shape={original_shape}, ndim={ndim}"
+        )
+        
+        # Store original shape for error reporting
+        _original_logits_shape = original_shape
+        
         if ndim == 3:
-            v = logits[:, -1, :]
-            v = v[0]
+            # Extract last token from sequence: (batch, seq_len, vocab) -> (vocab,)
+            # CRITICAL: Create a proper copy, not a view, to avoid memory allocation issues
+            # Views can cause Metal to try allocating for the full tensor
+            # Use mx.array() to ensure we get a new array, not a view
+            last_token = logits[:, -1, :]  # Shape: (batch, vocab)
+            v = mx.array(last_token[0])  # Extract batch[0] and create new array
+            # Double-check: ensure v is a proper 1D array with correct size
+            if v.ndim != 1:
+                v = mx.reshape(v, (-1,))
+            logger.debug(
+                f"[MEMORY TRACE] Extracted from 3D: v.shape={v.shape}, "
+                f"v.nbytes={v.nbytes / (1024**2):.2f}MB, "
+                f"expected_vocab_size={logits.shape[-1]}"
+            )
+            # Verify we got the right size
+            if len(v) != logits.shape[-1]:
+                logger.error(
+                    f"[MEMORY TRACE] ❌ Size mismatch: extracted {len(v)} tokens, "
+                    f"expected {logits.shape[-1]}"
+                )
         elif ndim == 2:
-            v = logits[-1]
+            v = mx.array(logits[-1])  # Create copy, not view
+            if v.ndim != 1:
+                v = mx.reshape(v, (-1,))
+            logger.debug(
+                f"[MEMORY TRACE] Extracted from 2D: v.shape={v.shape}, "
+                f"v.nbytes={v.nbytes / (1024**2):.2f}MB"
+            )
         else:
-            v = logits
+            v = mx.array(logits) if not isinstance(logits, mx.array) else logits
+            if v.ndim != 1:
+                v = mx.reshape(v, (-1,))
+            logger.debug(
+                f"[MEMORY TRACE] Using as-is: v.shape={v.shape}, "
+                f"v.nbytes={v.nbytes / (1024**2):.2f}MB"
+            )
 
         # Check termination BEFORE generating token to prevent extra tokens
         grammar_terminated_before = False
@@ -402,9 +445,11 @@ class Sampler:
                 f"terminated={grammar_state._terminated}"
             )
             try:
-                from outlines_core.kernels.mlx import apply_token_bitmask
+                # Note: We skip llguidance.mlx.apply_token_bitmask due to Metal kernel allocation bug
+                # Instead, we use LLGuidance's NumPy-based approach directly (see below)
                 
                 # Fill bitmask with allowed tokens for current grammar state
+                # LLGuidance computes masks dynamically - no large pre-allocation
                 logger.debug(f"[MEMORY TRACE] Calling fill_next_token_bitmask()...")
                 bitmask = grammar_state.fill_next_token_bitmask()
                 bitmask_info = "None" if bitmask is None else f"shape={getattr(bitmask, 'shape', 'unknown')}"
@@ -416,6 +461,7 @@ class Sampler:
                 # This can happen if:
                 # 1. Grammar reached terminal state (normal termination)
                 # 2. Bitmask allocation failed due to insufficient memory (fallback to non-grammar)
+                # 3. Matcher is in error state
                 if bitmask is None:
                     if grammar_state._terminated:
                         # Normal termination - mask all tokens except EOS
@@ -428,19 +474,125 @@ class Sampler:
                             v = mx.full_like(v, float('-inf'))
                         logger.debug("Grammar terminated during bitmask fill - masking all tokens except EOS")
                     else:
-                        # Allocation failed - fall back to non-grammar generation
+                        # Allocation failed or matcher error - fall back to non-grammar generation
                         logger.warning(
-                            "Grammar bitmask allocation failed - falling back to non-grammar generation. "
+                            "Grammar bitmask allocation failed or matcher error - falling back to non-grammar generation. "
                             "This may result in less reliable tool calling."
                         )
                         # Continue without grammar constraints (model will generate freely)
                         # Don't set grammar_terminated - let it continue as regular generation
                 else:
                     # Apply bitmask to logits (sets disallowed tokens to -inf)
-                    # Outlines MLX kernel expects 2D input [batch, vocab]
-                    v_2d = v[None, :] if v.ndim == 1 else v
-                    v_masked = apply_token_bitmask(v_2d, bitmask)
-                    v = v_masked[0] if v_masked.ndim == 2 else v_masked
+                    # We use NumPy-based approach to avoid Metal kernel allocation bug
+                    
+                    # Log detailed info before applying bitmask
+                    v_size_mb = (v.size * v.itemsize) / (1024 ** 2) if hasattr(v, 'size') and hasattr(v, 'itemsize') else 0
+                    bitmask_size_mb = bitmask.nbytes / (1024 ** 2) if hasattr(bitmask, 'nbytes') else 0
+                    
+                    # Verify v is 1D with correct vocab size
+                    if v.ndim != 1:
+                        logger.error(
+                            f"[MEMORY TRACE] ❌ Invalid logits shape: "
+                            f"expected 1D (vocab,), got {v.ndim}D with shape {v.shape}"
+                        )
+                        # Try to flatten
+                        if v.ndim > 1:
+                            v = mx.reshape(v, (-1,))
+                        else:
+                            logger.warning(f"[MEMORY TRACE] Cannot reshape logits, skipping grammar constraint")
+                            # Continue without grammar - better than crashing
+                            pass
+                    
+                    # Verify bitmask shape matches expected format
+                    # LLGuidance bitmask should be (batch, (vocab+31)//32) packed format
+                    expected_bitmask_words = (grammar_state.vocab_size + 31) // 32
+                    if bitmask.shape[1] != expected_bitmask_words:
+                        logger.warning(
+                            f"[MEMORY TRACE] ⚠️ Bitmask shape mismatch: "
+                            f"expected (1, {expected_bitmask_words}), got {bitmask.shape}"
+                        )
+                    
+                    # CRITICAL: Log everything before converting to NumPy
+                    logger.info(
+                        f"[MEMORY TRACE] ⚠️ About to apply NumPy-based bitmask: "
+                        f"v.shape={v.shape}, v.ndim={v.ndim}, "
+                        f"v.nbytes={v.nbytes / (1024**2):.2f}MB, "
+                        f"v.dtype={v.dtype if hasattr(v, 'dtype') else 'unknown'}, "
+                        f"bitmask.shape={bitmask.shape}, bitmask.nbytes={bitmask.nbytes / (1024**2):.2f}MB, "
+                        f"original_logits_shape={_original_logits_shape}"
+                    )
+                    
+                    # CRITICAL CHECK: Verify v is exactly (vocab_size,)
+                    expected_v_shape = (grammar_state.vocab_size,)
+                    if v.shape != expected_v_shape:
+                        logger.error(
+                            f"[MEMORY TRACE] ❌❌❌ CRITICAL: v shape mismatch! "
+                            f"Expected {expected_v_shape}, got {v.shape}. "
+                            f"Falling back to non-grammar generation."
+                        )
+                        # Don't proceed with wrong shape
+                        raise ValueError(
+                            f"v shape {v.shape} != expected {expected_v_shape}"
+                        )
+                    
+                    # PRODUCTION FIX: LLGuidance's apply_token_bitmask Metal kernel has a bug where it tries to allocate
+                    # ~9.5GB even with correct shapes. We'll use LLGuidance's production-ready NumPy approach directly.
+                    # This is based on llguidance.numpy.apply_token_bitmask_inplace_kernel which is used in production.
+                    # We skip the Metal kernel entirely since it's known to be buggy with large vocabularies.
+                    logger.info(
+                        f"[MEMORY TRACE] Using LLGuidance's production-ready NumPy-based bitmask approach "
+                        f"(skipping Metal kernel due to known allocation bug)"
+                    )
+                    import numpy as np
+                    
+                    # CRITICAL: Convert v (1D) to NumPy FIRST, then reshape, to avoid Metal allocation issues
+                    # Converting v_2d (which is a view) to NumPy can trigger Metal to allocate for the full tensor
+                    # By converting v (which is already a copy) first, we avoid this issue
+                    if hasattr(v, 'numpy'):
+                        # Convert 1D array to NumPy first (v is already a copy, so this is safe)
+                        logits_1d_np = np.array(v, dtype=np.float32)
+                        # Then reshape to 2D: (vocab,) -> (1, vocab)
+                        logits_np = logits_1d_np[None, :]  # Add batch dimension
+                    elif isinstance(v, np.ndarray):
+                        logits_np = v[None, :] if v.ndim == 1 else v.copy()
+                    else:
+                        logits_np = np.array(v, dtype=np.float32)
+                        if logits_np.ndim == 1:
+                            logits_np = logits_np[None, :]
+                    
+                    # Convert bitmask to NumPy (bitmask is small, so this is safe)
+                    if hasattr(bitmask, 'numpy'):
+                        bitmask_np = np.array(bitmask, dtype=np.int32)  # Convert directly, no copy needed (small)
+                    elif isinstance(bitmask, np.ndarray):
+                        bitmask_np = bitmask.astype(np.int32)
+                    else:
+                        bitmask_np = np.array(bitmask, dtype=np.int32)
+                    
+                    # Ensure correct shapes (same as LLGuidance's apply_token_bitmask_inplace)
+                    if logits_np.ndim == 1:
+                        logits_np = np.expand_dims(logits_np, axis=0)
+                    if bitmask_np.ndim == 1:
+                        bitmask_np = np.expand_dims(bitmask_np, axis=0)
+                    
+                    # Apply LLGuidance's production-ready bitmask algorithm
+                    # Based on llguidance.numpy.apply_token_bitmask_inplace_kernel
+                    # This expands the packed mask and extracts bits efficiently
+                    mask_expanded = np.repeat(bitmask_np, 32, axis=1)  # Expand packed mask: (1, 4748) -> (1, 151936)
+                    bit_indices = np.tile(np.arange(32, dtype=np.int32), bitmask_np.shape[1])  # [0,1,2,...,31,0,1,2,...,31,...]
+                    bit_masks = (mask_expanded >> bit_indices) & 1  # Extract each bit: (1, 151936) boolean array
+                    bit_masks = bit_masks[:, :logits_np.shape[1]]  # Trim to match vocab size exactly
+                    
+                    # Apply mask: set disallowed tokens to -inf (same as LLGuidance)
+                    logits_np[bit_masks == 0] = -np.inf
+                    
+                    # Convert back to MLX array
+                    v = mx.array(logits_np[0] if logits_np.shape[0] == 1 else logits_np)
+                    
+                    allowed_count = int(bit_masks.sum())
+                    logger.info(
+                        f"[MEMORY TRACE] ✅ LLGuidance NumPy-based bitmask applied successfully: "
+                        f"allowed_tokens={allowed_count}/{logits_np.shape[1]}"
+                    )
             except (MemoryError, RuntimeError) as e:
                 error_msg = str(e)
                 logger.error(
@@ -490,7 +642,8 @@ class Sampler:
             logger.debug(
                 f"Generated token_id={token_id}, grammar_terminated_before={grammar_terminated_before}, "
                 f"_terminated={getattr(grammar_state, '_terminated', False)}, "
-                f"guide.is_finished()={grammar_state.guide.is_finished()}"
+                f"is_accepting={grammar_state.matcher.is_accepting()}, "
+                f"is_stopped={grammar_state.matcher.is_stopped()}"
             )
         
         # Update grammar state with accepted token and check termination
@@ -504,21 +657,12 @@ class Sampler:
                 # This should return True when we've generated a complete valid JSON
                 if grammar_state.is_terminated():
                     grammar_terminated = True
-                    try:
-                        current_state = grammar_state.guide.get_state()
-                        is_final = grammar_state.index.is_final_state(current_state)
-                        logger.info(
-                            f"Grammar terminated after token: token_id={token_id}, "
-                            f"guide.is_finished()={grammar_state.guide.is_finished()}, "
-                            f"is_final_state={is_final}, state={current_state}, "
-                            f"_terminated={getattr(grammar_state, '_terminated', False)}"
-                        )
-                    except Exception:
-                        logger.info(
-                            f"Grammar terminated after token: token_id={token_id}, "
-                            f"guide.is_finished()={grammar_state.guide.is_finished()}, "
-                            f"_terminated={getattr(grammar_state, '_terminated', False)}"
-                        )
+                    logger.info(
+                        f"Grammar terminated after token: token_id={token_id}, "
+                        f"is_accepting={grammar_state.matcher.is_accepting()}, "
+                        f"is_stopped={grammar_state.matcher.is_stopped()}, "
+                        f"_terminated={getattr(grammar_state, '_terminated', False)}"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to accept token in grammar: {e}")
                 import traceback
