@@ -120,6 +120,12 @@ class ChatParams(BaseModel):
         "This field is ignored - tools are always available when MCP is configured.",
         deprecated=True,
     )
+    force_tool_usage: bool = Field(
+        default=False,
+        description="When True and MCP tools are auto-injected, uses tool_choice='required' "
+        "instead of 'auto' for grammar-constrained generation (more reliable tool calling). "
+        "When False, uses 'auto' allowing the model to choose whether to use tools.",
+    )
     top_logprobs: int = Field(default=0, ge=0, le=20)
     top_p: float = Field(default=1.0, ge=0, le=1)
     verbosity: Literal["low", "medium", "high"] = Field(default="medium")  # TODO: used?

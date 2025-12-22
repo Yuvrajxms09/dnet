@@ -9,9 +9,10 @@ import asyncio
 import time
 import uuid
 import json
+from json import JSONDecodeError, JSONDecoder
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Tuple
 from dnet.core.tensor import to_bytes
 
 from .models import (
@@ -148,6 +149,32 @@ async def azip(*async_iterables):
             yield results
         except StopAsyncIteration:
             break
+
+
+def partial_json_loads(input_str: str) -> Tuple[Any, int]:
+    """
+    Parse JSON from string, handling cases where there's extra data after valid JSON.
+    Similar to vLLM's implementation but simplified for our use case.
+    
+    Returns:
+        Tuple of (parsed_json, end_index) where end_index is where the JSON ended
+    """
+    try:
+        # Try normal parsing first
+        return (json.loads(input_str), len(input_str))
+    except JSONDecodeError as e:
+        # If error is due to extra data, use raw_decode to extract just the JSON
+        if "Extra data" in str(e) or "Expecting" in str(e):
+            try:
+                decoder = JSONDecoder()
+                parsed, end_idx = decoder.raw_decode(input_str)
+                return (parsed, end_idx)
+            except (JSONDecodeError, ValueError):
+                # If raw_decode also fails, re-raise original error
+                raise e
+        else:
+            # Re-raise if it's a different kind of JSON error
+            raise e
 
 
 class InferenceManager:
@@ -312,23 +339,48 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
             func = tc.get("function", {})
             tool_name = func.get("name", "")
             
-            # Parse arguments
+            # Parse arguments with robust error handling
             args_raw = func.get("arguments", "{}")
             if isinstance(args_raw, str):
                 try:
-                    arguments = json.loads(args_raw)
-                except json.JSONDecodeError:
+                    # Use partial_json_loads to handle malformed JSON with extra data
+                    parsed, _ = partial_json_loads(args_raw)
+                    arguments = parsed if isinstance(parsed, dict) else {}
+                except (JSONDecodeError, ValueError) as e:
                     arguments = {}
                     _log_tool_execution(
                         "warning",
-                        f"Failed to parse tool arguments: {args_raw[:100]}",
+                        f"Failed to parse tool arguments as JSON: {str(e)}. Raw: {args_raw[:100]}",
                         tool_name=tool_name,
                         tool_id=tool_id,
                         round_num=round_num,
                         error_type="json_parse_error",
                     )
-            else:
+            elif isinstance(args_raw, dict):
                 arguments = args_raw
+            else:
+                # Unexpected type
+                arguments = {}
+                _log_tool_execution(
+                    "warning",
+                    f"Tool arguments is unexpected type {type(args_raw).__name__}, using empty dict",
+                    tool_name=tool_name,
+                    tool_id=tool_id,
+                    round_num=round_num,
+                    error_type="invalid_type",
+                )
+            
+            # Filter out None values - MCP servers may not accept undefined/None
+            # Keep empty strings and other falsy values as they might be valid
+            arguments = {k: v for k, v in arguments.items() if v is not None}
+            
+            # Log arguments for debugging (truncate long values)
+            if arguments:
+                args_preview = {k: (str(v)[:100] + "..." if len(str(v)) > 100 else v) 
+                               for k, v in arguments.items()}
+                logger.debug(f"Tool {tool_name} arguments: {args_preview}")
+            else:
+                logger.debug(f"Tool {tool_name} called with empty arguments")
 
             _log_tool_execution(
                 "info",
@@ -636,8 +688,11 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
         # Parse tool calls from generated text
         tool_calls = None
         has_tool_calls_json = '"tool_calls"' in final_text and "{" in final_text
+        # Attempt parsing if:
+        # 1. Grammar constraint was used (tool_choice="required")
+        # 2. Tools are available and tool_calls JSON is detected (tool_choice="auto" or None)
         should_attempt_parse = use_tool_grammar or (
-            req.tools and req.tool_choice == "auto" and has_tool_calls_json
+            req.tools and has_tool_calls_json
         )
 
         if should_attempt_parse and final_text:
@@ -649,23 +704,156 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
                     clean_text = clean_text.split(eos_pattern)[0].strip()
                     break
             
-            # Handle Qwen3 <think> tags
+            # Handle Qwen3 <think> tags - extract text after closing tag
             if "</think>" in clean_text:
                 clean_text = clean_text.split("</think>")[-1].strip()
+            
+            # Handle <think> opening tag if present
+            if "<think>" in clean_text:
+                # If we have both tags, we already handled closing tag above
+                # If only opening tag, remove everything before it
+                if "</think>" not in final_text:
+                    clean_text = clean_text.split("<think>")[-1].strip()
 
-            try:
-                parsed = json.loads(clean_text)
-                if isinstance(parsed, dict) and "tool_calls" in parsed:
-                    tool_calls = parsed["tool_calls"]
-                    if tool_calls and isinstance(tool_calls, list):
-                        completion_reason = ChatCompletionReason.TOOL_CALLS
-                        tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
-                        logger.info(f"Parsed {len(tool_calls)} tool call(s): {tool_names}")
-                    else:
-                        tool_calls = None
-            except json.JSONDecodeError:
-                if use_tool_grammar:
-                    logger.error(f"Failed to parse tool call JSON: {clean_text[:200]}")
+            # Robust JSON extraction: find the JSON object in text
+            # This handles cases where there's extra text before/after the JSON
+            # Inspired by vLLM's robust parsing patterns but adapted for JSON format
+            json_text = None
+            max_search_length = 50000  # Safety limit to prevent excessive processing
+            
+            # Safety check: limit processing for very long texts
+            search_text = clean_text[:max_search_length] if len(clean_text) > max_search_length else clean_text
+            if len(clean_text) > max_search_length:
+                logger.debug(f"Text length ({len(clean_text)}) exceeds max search length, truncating for JSON extraction")
+            
+            if "{" in search_text and '"tool_calls"' in search_text:
+                # Strategy 1: Look for {"tool_calls" pattern first (most reliable)
+                tool_calls_pattern = '{"tool_calls"'
+                start_idx = search_text.find(tool_calls_pattern)
+                if start_idx >= 0:
+                    # Find matching closing brace, accounting for nested braces in strings
+                    # We need to track braces but ignore them when inside strings
+                    brace_count = 0
+                    in_string = False
+                    escape_next = False
+                    end_idx = start_idx
+                    
+                    for i in range(start_idx, min(len(search_text), start_idx + 10000)):  # Limit scan distance
+                        char = search_text[i]
+                        
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        
+                        if char == '\\':
+                            escape_next = True
+                            continue
+                        
+                        if char == '"' and not escape_next:
+                            in_string = not in_string
+                            continue
+                        
+                        if not in_string:
+                            if char == "{":
+                                brace_count += 1
+                            elif char == "}":
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end_idx = i + 1
+                                    json_text = search_text[start_idx:end_idx]
+                                    break
+                    
+                    # If we found a complete JSON object, validate it
+                    if json_text:
+                        try:
+                            # Quick validation - try parsing just to check structure
+                            test_parse, _ = partial_json_loads(json_text)
+                            if not isinstance(test_parse, dict) or "tool_calls" not in test_parse:
+                                json_text = None  # Invalid, try other strategies
+                        except (JSONDecodeError, ValueError):
+                            json_text = None  # Invalid, try other strategies
+                
+                # Strategy 2: If pattern search failed, try finding first { and matching brace
+                if not json_text and "{" in search_text:
+                    start_idx = search_text.find("{")
+                    if start_idx >= 0:
+                        # Same brace matching logic as above
+                        brace_count = 0
+                        in_string = False
+                        escape_next = False
+                        end_idx = start_idx
+                        
+                        for i in range(start_idx, min(len(search_text), start_idx + 10000)):
+                            char = search_text[i]
+                            
+                            if escape_next:
+                                escape_next = False
+                                continue
+                            
+                            if char == '\\':
+                                escape_next = True
+                                continue
+                            
+                            if char == '"' and not escape_next:
+                                in_string = not in_string
+                                continue
+                            
+                            if not in_string:
+                                if char == "{":
+                                    brace_count += 1
+                                elif char == "}":
+                                    brace_count -= 1
+                                    if brace_count == 0:
+                                        end_idx = i + 1
+                                        json_text = search_text[start_idx:end_idx]
+                                        break
+                        
+                        # Validate extracted JSON
+                        if json_text:
+                            try:
+                                test_parse, _ = partial_json_loads(json_text)
+                                if not isinstance(test_parse, dict) or "tool_calls" not in test_parse:
+                                    json_text = None
+                            except (JSONDecodeError, ValueError):
+                                json_text = None
+
+            # Try parsing the extracted JSON using robust parsing
+            if json_text:
+                try:
+                    # Use partial_json_loads to handle extra data after JSON
+                    parsed, _ = partial_json_loads(json_text)
+                    if isinstance(parsed, dict) and "tool_calls" in parsed:
+                        tool_calls = parsed["tool_calls"]
+                        if tool_calls and isinstance(tool_calls, list):
+                            completion_reason = ChatCompletionReason.TOOL_CALLS
+                            tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                            logger.info(f"Parsed {len(tool_calls)} tool call(s): {tool_names}")
+                        else:
+                            tool_calls = None
+                            logger.debug(f"Parsed tool_calls but it's not a valid list: {tool_calls}")
+                except (JSONDecodeError, ValueError) as e:
+                    # Always log parsing errors for observability
+                    logger.warning(
+                        f"Failed to parse tool call JSON (attempted extraction): {str(e)}. "
+                        f"Extracted text: {json_text[:200]}"
+                    )
+                    # Fallback: try parsing the entire clean_text with partial_json_loads
+                    try:
+                        parsed, _ = partial_json_loads(clean_text)
+                        if isinstance(parsed, dict) and "tool_calls" in parsed:
+                            tool_calls = parsed["tool_calls"]
+                            if tool_calls and isinstance(tool_calls, list):
+                                completion_reason = ChatCompletionReason.TOOL_CALLS
+                                tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                                logger.info(f"Parsed {len(tool_calls)} tool call(s) via fallback: {tool_names}")
+                            else:
+                                tool_calls = None
+                    except (JSONDecodeError, ValueError):
+                        logger.debug(f"Fallback JSON parse also failed. Clean text: {clean_text[:300]}")
+            else:
+                # No JSON object found in text
+                if has_tool_calls_json:
+                    logger.debug(f"Detected 'tool_calls' in text but couldn't extract JSON object. Text: {clean_text[:300]}")
 
         # Build metrics
         metrics_dict = None
@@ -747,10 +935,16 @@ IMPORTANT: Use the exact parameter names shown in parentheses above. For example
         if mcp_enabled and not req.tools:  
             mcp_tools = self.mcp_provider.get_tools()
             if mcp_tools:
-                logger.info(f"MCP tools auto-injected: {len(mcp_tools)} tools (tool_choice=auto, like Ollama)")
+                # Use "required" for grammar-constrained generation if force_tool_usage is True
+                # This ensures reliable JSON parsing and tool calling
+                tool_choice_value = "required" if req.force_tool_usage else "auto"
+                logger.info(
+                    f"MCP tools auto-injected: {len(mcp_tools)} tools "
+                    f"(tool_choice={tool_choice_value}, force_tool_usage={req.force_tool_usage})"
+                )
                 working_req = req.model_copy(update={
                     "tools": mcp_tools,
-                    "tool_choice": "auto",  
+                    "tool_choice": tool_choice_value,
                 })
             else:
                 logger.debug("MCP enabled but no tools available")

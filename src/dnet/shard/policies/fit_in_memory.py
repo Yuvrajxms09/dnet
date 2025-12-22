@@ -10,6 +10,8 @@ import numpy as np
 from dnet.utils.serialization import mlx_dtype_map
 from dnet.utils.time import utc_epoch_now
 from .base import register_policy, ComputePolicy
+import time
+import gc
 
 
 @register_policy("fit")
@@ -17,9 +19,80 @@ class FitInMemoryPolicy(ComputePolicy):
     """Everything fits - no offloading needed"""
     
     # Cache grammar states by nonce to maintain state across token generations
-    # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
-    # See: _kv_by_nonce pattern in runtime.py
+    # TTL-based cleanup prevents memory growth (similar to _kv_by_nonce pattern in runtime.py)
     _grammar_states: dict = {}
+    _grammar_states_last_seen: dict = {}  # Track last access time for TTL cleanup
+    _grammar_states_ttl_s: float = 300.0  # 5 minutes TTL for grammar states
+
+    @staticmethod
+    def _cleanup_grammar_state(nonce: str) -> None:
+        """Clean up a single grammar state by nonce.
+        
+        Production-ready cleanup that:
+        1. Clears bitmask to free memory immediately
+        2. Removes from cache
+        3. Removes from last_seen tracking
+        4. Forces GC for large allocations
+        """
+        logger.info(f"[MEMORY TRACE] Starting cleanup for grammar state nonce={nonce}")
+        bitmask_size = None
+        if nonce in FitInMemoryPolicy._grammar_states:
+            try:
+                grammar_state = FitInMemoryPolicy._grammar_states[nonce]
+                # Log bitmask info before cleanup
+                if hasattr(grammar_state, '_bitmask') and grammar_state._bitmask is not None:
+                    if hasattr(grammar_state._bitmask, 'nbytes'):
+                        bitmask_size = grammar_state._bitmask.nbytes / (1024 ** 3)  # GB
+                    logger.info(
+                        f"[MEMORY TRACE] Clearing bitmask: "
+                        f"vocab_size={getattr(grammar_state, 'vocab_size', 'unknown')}, "
+                        f"bitmask_size={bitmask_size:.2f}GB" if bitmask_size else f"bitmask_size=unknown"
+                    )
+                    grammar_state._bitmask = None
+                else:
+                    logger.debug(f"[MEMORY TRACE] No bitmask to clear (was None or doesn't exist)")
+                
+                logger.debug(f"[MEMORY TRACE] Removing grammar state from cache...")
+                del FitInMemoryPolicy._grammar_states[nonce]
+            except Exception as e:
+                logger.error(
+                    f"[MEMORY TRACE] ❌ Error cleaning up grammar state for nonce {nonce}: {e}"
+                )
+                logger.warning(f"Error cleaning up grammar state for nonce {nonce}: {e}")
+            finally:
+                # Always remove from tracking dicts
+                FitInMemoryPolicy._grammar_states_last_seen.pop(nonce, None)
+                logger.debug(f"[MEMORY TRACE] Running garbage collection...")
+                # Force GC for large grammar states (bitmasks can be 10GB+)
+                gc.collect()
+                logger.debug(f"[MEMORY TRACE] Clearing MLX cache...")
+                # Clear MLX cache to free memory immediately (bitmasks are MLX arrays)
+                mx.clear_cache()
+                logger.info(
+                    f"[MEMORY TRACE] ✅ Grammar state cleanup completed for nonce={nonce}"
+                    + (f", freed ~{bitmask_size:.2f}GB" if bitmask_size else "")
+                )
+        else:
+            logger.debug(f"[MEMORY TRACE] Grammar state not found in cache for nonce={nonce}")
+    
+    @staticmethod
+    def _cleanup_expired_grammar_states() -> None:
+        """TTL-based cleanup of expired grammar states.
+        
+        Removes grammar states that haven't been accessed within TTL window.
+        This prevents memory leaks from orphaned states.
+        """
+        now = time.perf_counter()
+        ttl = FitInMemoryPolicy._grammar_states_ttl_s
+        expired_nonces = [
+            nonce for nonce, last_seen in FitInMemoryPolicy._grammar_states_last_seen.items()
+            if (now - last_seen) > ttl
+        ]
+        
+        if expired_nonces:
+            logger.debug(f"Cleaning up {len(expired_nonces)} expired grammar states (TTL={ttl}s)")
+            for nonce in expired_nonces:
+                FitInMemoryPolicy._cleanup_grammar_state(nonce)
 
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
         self._mode = "fit"
@@ -159,12 +232,20 @@ class FitInMemoryPolicy(ComputePolicy):
                             grammar_state = None
                             if grammar_schema:
                                 nonce = msg.nonce
+                                
+                                # Periodic TTL-based cleanup (run every ~100 requests to avoid overhead)
+                                import random
+                                if random.random() < 0.01:  # 1% chance per request
+                                    FitInMemoryPolicy._cleanup_expired_grammar_states()
+                                
                                 if nonce in FitInMemoryPolicy._grammar_states:
                                     grammar_state = FitInMemoryPolicy._grammar_states[nonce]
+                                    # Update last seen time
+                                    FitInMemoryPolicy._grammar_states_last_seen[nonce] = time.perf_counter()
                                     # Check if grammar state was already terminated - if so, don't reuse it
                                     if grammar_state is not None and getattr(grammar_state, '_terminated', False):
                                         logger.info(f"Grammar state for nonce {nonce} already terminated, removing from cache - this should not happen!")
-                                        del FitInMemoryPolicy._grammar_states[nonce]
+                                        FitInMemoryPolicy._cleanup_grammar_state(nonce)
                                         grammar_state = None
                                     else:
                                         logger.debug(f"Reusing grammar state for nonce {nonce}, _terminated={getattr(grammar_state, '_terminated', False) if grammar_state else None}")
@@ -177,13 +258,25 @@ class FitInMemoryPolicy(ComputePolicy):
                                         grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
                                         if grammar_state:
                                             FitInMemoryPolicy._grammar_states[nonce] = grammar_state
+                                            FitInMemoryPolicy._grammar_states_last_seen[nonce] = time.perf_counter()
                             
+                            logger.debug(
+                                f"[MEMORY TRACE] Calling Sampler.sample(): "
+                                f"logits_shape={y.shape if hasattr(y, 'shape') else 'unknown'}, "
+                                f"grammar_state={'available' if grammar_state else 'None'}, "
+                                f"grammar_terminated={getattr(grammar_state, '_terminated', None) if grammar_state else None}"
+                            )
                             result = Sampler.sample(
                                 logits=y,
                                 config=decoding_config,
                                 req_logprobs=msg.req_logprobs,
                                 req_top_logprobs=msg.req_top_logprobs,
                                 grammar_state=grammar_state,
+                            )
+                            logger.debug(
+                                f"[MEMORY TRACE] Sampler.sample() completed: "
+                                f"token_id={result.token_id}, "
+                                f"grammar_terminated={result.grammar_terminated}"
                             )
 
                             token_id = result.token_id
@@ -194,17 +287,74 @@ class FitInMemoryPolicy(ComputePolicy):
                             # Clean up grammar state from cache if terminated
                             if grammar_terminated and grammar_state is not None and grammar_schema:
                                 nonce = msg.nonce
-                                if nonce in FitInMemoryPolicy._grammar_states:
-                                    logger.info(f"Removing terminated grammar state for nonce {nonce}, token_id={token_id}")
-                                    del FitInMemoryPolicy._grammar_states[nonce]
-                                else:
-                                    logger.warning(f"Grammar terminated but state not found in cache for nonce {nonce}")
+                                logger.info(
+                                    f"[MEMORY TRACE] ===== Cleaning up terminated grammar state ====="
+                                    f"nonce={nonce}, token_id={token_id}"
+                                )
+                                logger.debug(f"[MEMORY TRACE] Calling _cleanup_grammar_state()...")
+                                FitInMemoryPolicy._cleanup_grammar_state(nonce)
+                                logger.debug(f"[MEMORY TRACE] Grammar state cleaned up, clearing MLX cache...")
+                                # Clear MLX cache immediately after cleanup to free memory for subsequent operations
+                                # This prevents allocation errors when creating output messages
+                                mx.clear_cache()
+                                logger.info(f"[MEMORY TRACE] ✅ Grammar cleanup and cache clear completed")
 
+                        except MemoryError as e:
+                            logger.error(
+                                f"[MEMORY TRACE] ❌❌❌ MemoryError caught in end-shard sampling: {e}"
+                            )
+                            logger.error(
+                                f"[MEMORY TRACE] Error context: nonce={msg.nonce}, "
+                                f"grammar_state={'exists' if grammar_state else 'None'}, "
+                                f"grammar_schema={'exists' if grammar_schema else 'None'}, "
+                                f"logits_shape={y.shape if hasattr(y, 'shape') else 'unknown'}"
+                            )
+                            logger.error(
+                                f"End-shard sampling failed due to memory error: {e}. "
+                                f"Attempting to clean up grammar state for nonce {msg.nonce}"
+                            )
+                            # Try to clean up grammar state on memory error
+                            FitInMemoryPolicy._cleanup_grammar_state(msg.nonce)
+                            self.runtime.input_pool.release(msg.pool_id)
+                            return
                         except Exception as e:
-                            logger.error("End-shard sampling failed: %s", e)
+                            error_msg = str(e)
+                            logger.error(
+                                f"[MEMORY TRACE] ❌❌❌ Exception caught in end-shard sampling: "
+                                f"type={type(e).__name__}, error={error_msg}"
+                            )
+                            logger.error(
+                                f"[MEMORY TRACE] Error context: nonce={msg.nonce}, "
+                                f"grammar_state={'exists' if grammar_state else 'None'}, "
+                                f"grammar_schema={'exists' if grammar_schema else 'None'}, "
+                                f"logits_shape={y.shape if hasattr(y, 'shape') else 'unknown'}"
+                            )
+                            # Check if it's a memory allocation error
+                            if "allocate" in error_msg.lower() or "memory" in error_msg.lower():
+                                logger.error(
+                                    f"[MEMORY TRACE] Detected memory-related error, cleaning up grammar state"
+                                )
+                                logger.error(
+                                    f"End-shard sampling failed due to memory issue: {e}. "
+                                    f"This may be related to grammar-constrained generation. "
+                                    f"Consider using tool_choice='auto' instead of 'required' for large vocabularies."
+                                )
+                                # Try to clean up grammar state
+                                FitInMemoryPolicy._cleanup_grammar_state(msg.nonce)
+                            else:
+                                logger.error("End-shard sampling failed: %s", e)
                             self.runtime.input_pool.release(msg.pool_id)
                             return
 
+                            logger.debug(
+                                f"[MEMORY TRACE] Creating output ActivationMessage: "
+                                f"shape={x.shape}, dtype={self.runtime._wire_mx_dtype}"
+                            )
+                            logger.debug(
+                                f"[MEMORY TRACE] Creating output ActivationMessage: "
+                                f"shape={x.shape}, dtype={self.runtime._wire_mx_dtype}, "
+                                f"token_id={token_id}, grammar_terminated={grammar_terminated}"
+                            )
                         output_msg = ActivationMessage(
                             nonce=msg.nonce,
                             layer_id=last_layer,
@@ -221,6 +371,8 @@ class FitInMemoryPolicy(ComputePolicy):
                             top_logprobs=top_logprobs,
                             grammar_terminated=grammar_terminated,
                         )
+                        logger.debug(f"[MEMORY TRACE] ✅ Output message created successfully")
+                        logger.debug(f"[MEMORY TRACE] Output message created successfully")
                     else:
                         output_msg = ActivationMessage(
                             nonce=msg.nonce,

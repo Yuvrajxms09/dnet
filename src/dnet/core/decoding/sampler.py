@@ -33,15 +33,57 @@ class GrammarState:
         self._terminated = False  # Track termination state - once True, always True
     
     def get_bitmask(self):
-        """Get or create the token bitmask."""
+        """Get or create the token bitmask.
+        
+        Returns None if allocation fails (memory insufficient).
+        """
         if self._bitmask is None:
-            self._bitmask = self.bitmask_allocator(self.vocab_size)
+            # Estimate bitmask size for logging
+            estimated_size_gb = (self.vocab_size * 4) / (1024 ** 3)  # Rough estimate
+            logger.info(
+                f"[MEMORY TRACE] Attempting to allocate grammar bitmask: "
+                f"vocab_size={self.vocab_size}, estimated_size={estimated_size_gb:.2f}GB"
+            )
+            
+            try:
+                logger.debug(f"[MEMORY TRACE] Calling bitmask_allocator for vocab_size={self.vocab_size}")
+                self._bitmask = self.bitmask_allocator(self.vocab_size)
+                # Get actual size if possible
+                if hasattr(self._bitmask, 'nbytes'):
+                    actual_size_gb = self._bitmask.nbytes / (1024 ** 3)
+                    logger.info(
+                        f"[MEMORY TRACE] Bitmask allocated successfully: "
+                        f"actual_size={actual_size_gb:.2f}GB, shape={getattr(self._bitmask, 'shape', 'unknown')}"
+                    )
+                else:
+                    logger.info(f"[MEMORY TRACE] Bitmask allocated successfully (size unknown)")
+            except (MemoryError, RuntimeError) as e:
+                error_msg = str(e)
+                logger.error(
+                    f"[MEMORY TRACE] ❌ Bitmask allocation FAILED: "
+                    f"vocab_size={self.vocab_size}, error={error_msg}, "
+                    f"estimated_size={estimated_size_gb:.2f}GB"
+                )
+                if "allocate" in error_msg.lower() or "memory" in error_msg.lower() or "out of memory" in error_msg.lower():
+                    logger.error(
+                        f"Failed to allocate bitmask for grammar state (vocab_size={self.vocab_size}): {e}. "
+                        f"This usually means insufficient memory for grammar-constrained generation. "
+                        f"Consider using tool_choice='auto' instead of 'required'."
+                    )
+                    # Mark as terminated to prevent further attempts
+                    self._terminated = True
+                    return None
+                else:
+                    # Re-raise if it's a different error
+                    raise
+        else:
+            logger.debug(f"[MEMORY TRACE] Reusing existing bitmask (already allocated)")
         return self._bitmask
     
     def fill_next_token_bitmask(self):
         """Fill bitmask with allowed tokens for current state.
         
-        Returns None if already terminated to prevent further token generation.
+        Returns None if already terminated or if bitmask allocation failed.
         """
         # Don't fill bitmask if already terminated
         if self._terminated:
@@ -49,6 +91,10 @@ class GrammarState:
         
         from outlines_core.kernels.mlx import fill_next_token_bitmask
         bitmask = self.get_bitmask()
+        # If bitmask allocation failed, get_bitmask() returns None
+        if bitmask is None:
+            return None
+        
         fill_next_token_bitmask(self.guide, bitmask)
         return bitmask
     
@@ -238,6 +284,21 @@ class Sampler:
                 logger.warning("Could not determine vocab size for grammar state")
                 return None
             
+            # Estimate bitmask size and warn if potentially problematic
+            # Bitmask is typically vocab_size * sizeof(bool) or similar
+            # For very large vocabs (100k+), this can be 10GB+
+            estimated_bitmask_size_gb = (vocab_size * 4) / (1024 ** 3)  # Rough estimate: 4 bytes per token
+            logger.info(
+                f"[MEMORY TRACE] Creating grammar state: vocab_size={vocab_size}, "
+                f"estimated_bitmask_size={estimated_bitmask_size_gb:.2f}GB"
+            )
+            if estimated_bitmask_size_gb > 5.0:  # Warn if > 5GB
+                logger.warning(
+                    f"[MEMORY TRACE] ⚠️ Large vocabulary size ({vocab_size}) will require ~{estimated_bitmask_size_gb:.1f}GB "
+                    f"for grammar bitmask. This may cause memory allocation errors. "
+                    f"Consider using tool_choice='auto' instead of 'required'."
+                )
+            
             # Log which source we used for debugging
             if model_vocab_size:
                 logger.debug(f"Using model_vocab_size={vocab_size} (from logits shape)")
@@ -246,25 +307,36 @@ class Sampler:
                 logger.debug(f"Using tokenizer.vocab_size={vocab_size} (fallback)")
             
             # Build regex pattern from JSON schema
+            logger.debug(f"[MEMORY TRACE] Building regex pattern from JSON schema...")
             regex_pattern = oc_json_schema.build_regex_from_schema(json_schema)
-            logger.debug(f"Built regex from JSON schema (length: {len(regex_pattern)})")
+            logger.debug(f"[MEMORY TRACE] Built regex from JSON schema (length: {len(regex_pattern)})")
             
             # Get or create vocabulary
+            logger.debug(f"[MEMORY TRACE] Getting/creating vocabulary for vocab_size={vocab_size}...")
             vocabulary = Sampler._get_or_create_vocabulary(tokenizer, vocab_size)
             if vocabulary is None:
-                logger.warning("Failed to create vocabulary for grammar state")
+                logger.warning("[MEMORY TRACE] ❌ Failed to create vocabulary for grammar state")
                 return None
+            logger.debug(f"[MEMORY TRACE] Vocabulary created successfully")
             
             # Create Index from regex and vocabulary
+            logger.debug(f"[MEMORY TRACE] Creating Outlines Index from regex and vocabulary...")
             index = Index(regex_pattern, vocabulary)
+            logger.debug(f"[MEMORY TRACE] Index created successfully")
             
             # Create Guide from Index
+            logger.debug(f"[MEMORY TRACE] Creating Outlines Guide from Index...")
             guide = Guide(index)
+            logger.debug(f"[MEMORY TRACE] Guide created successfully")
             
             # Get EOS token ID for forced termination when grammar completes
             eos_token_id = getattr(tokenizer, 'eos_token_id', None)
             
-            logger.debug("Successfully created Outlines grammar state")
+            logger.info(
+                f"[MEMORY TRACE] ✅ Successfully created Outlines grammar state: "
+                f"vocab_size={vocab_size}, eos_token_id={eos_token_id}, "
+                f"bitmask will be allocated lazily on first use"
+            )
             return GrammarState(
                 guide=guide,
                 index=index,
@@ -323,31 +395,74 @@ class Sampler:
         
         # Apply grammar-constrained logits processing if available
         if grammar_state is not None and not grammar_terminated_before:
+            logger.debug(
+                f"[MEMORY TRACE] Applying grammar constraints: "
+                f"vocab_size={grammar_state.vocab_size}, "
+                f"bitmask_allocated={grammar_state._bitmask is not None}, "
+                f"terminated={grammar_state._terminated}"
+            )
             try:
                 from outlines_core.kernels.mlx import apply_token_bitmask
                 
                 # Fill bitmask with allowed tokens for current grammar state
+                logger.debug(f"[MEMORY TRACE] Calling fill_next_token_bitmask()...")
                 bitmask = grammar_state.fill_next_token_bitmask()
+                bitmask_info = "None" if bitmask is None else f"shape={getattr(bitmask, 'shape', 'unknown')}"
+                logger.debug(
+                    f"[MEMORY TRACE] fill_next_token_bitmask() returned: bitmask={bitmask_info}"
+                )
                 
-                # If bitmask is None, grammar was terminated during bitmask fill
-                # This shouldn't happen if we checked is_terminated() first, but be defensive
+                # If bitmask is None, grammar was terminated or allocation failed
+                # This can happen if:
+                # 1. Grammar reached terminal state (normal termination)
+                # 2. Bitmask allocation failed due to insufficient memory (fallback to non-grammar)
                 if bitmask is None:
-                    grammar_terminated_before = True
-                    # Mask all tokens except EOS to prevent further generation
-                    eos_token_id = getattr(grammar_state, '_eos_token_id', None)
-                    if eos_token_id is not None and eos_token_id < len(v):
-                        v = mx.full_like(v, float('-inf'))
-                        v[eos_token_id] = 0.0
+                    if grammar_state._terminated:
+                        # Normal termination - mask all tokens except EOS
+                        grammar_terminated_before = True
+                        eos_token_id = getattr(grammar_state, '_eos_token_id', None)
+                        if eos_token_id is not None and eos_token_id < len(v):
+                            v = mx.full_like(v, float('-inf'))
+                            v[eos_token_id] = 0.0
+                        else:
+                            v = mx.full_like(v, float('-inf'))
+                        logger.debug("Grammar terminated during bitmask fill - masking all tokens except EOS")
                     else:
-                        v = mx.full_like(v, float('-inf'))
-                    logger.debug("Grammar terminated during bitmask fill - masking all tokens except EOS")
+                        # Allocation failed - fall back to non-grammar generation
+                        logger.warning(
+                            "Grammar bitmask allocation failed - falling back to non-grammar generation. "
+                            "This may result in less reliable tool calling."
+                        )
+                        # Continue without grammar constraints (model will generate freely)
+                        # Don't set grammar_terminated - let it continue as regular generation
                 else:
                     # Apply bitmask to logits (sets disallowed tokens to -inf)
                     # Outlines MLX kernel expects 2D input [batch, vocab]
                     v_2d = v[None, :] if v.ndim == 1 else v
                     v_masked = apply_token_bitmask(v_2d, bitmask)
                     v = v_masked[0] if v_masked.ndim == 2 else v_masked
-                
+            except (MemoryError, RuntimeError) as e:
+                error_msg = str(e)
+                logger.error(
+                    f"[MEMORY TRACE] ❌❌❌ Exception in grammar-constrained generation: "
+                    f"type={type(e).__name__}, error={error_msg}"
+                )
+                logger.error(
+                    f"[MEMORY TRACE] Error context: grammar_state exists, "
+                    f"vocab_size={grammar_state.vocab_size if grammar_state else 'N/A'}, "
+                    f"bitmask_allocated={grammar_state._bitmask is not None if grammar_state else 'N/A'}, "
+                    f"logits_shape={v.shape if hasattr(v, 'shape') else 'unknown'}"
+                )
+                if "allocate" in error_msg.lower() or "memory" in error_msg.lower():
+                    logger.error(
+                        f"Memory error during grammar-constrained generation: {e}. "
+                        f"Falling back to non-grammar generation."
+                    )
+                    # Continue without grammar - model will generate freely
+                    # This is better than failing completely
+                else:
+                    # Re-raise if it's a different error
+                    raise
             except Exception as e:
                 logger.warning(f"Failed to apply grammar mask: {e}")
                 import traceback

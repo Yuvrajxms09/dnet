@@ -14,6 +14,7 @@ from dnet.utils.repack import ensure_repacked_for_layers
 from dnet.utils.model import get_model_metadata
 import time
 import asyncio
+import gc
 
 
 @register_policy("offload")
@@ -25,9 +26,80 @@ class OffloadPolicy(ComputePolicy):
     """
     
     # Cache grammar states by nonce to maintain state across token generations
-    # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
-    # See: _kv_by_nonce pattern in runtime.py
+    # TTL-based cleanup prevents memory growth (similar to _kv_by_nonce pattern in runtime.py)
     _grammar_states: dict = {}
+    _grammar_states_last_seen: dict = {}  # Track last access time for TTL cleanup
+    _grammar_states_ttl_s: float = 300.0  # 5 minutes TTL for grammar states
+
+    @staticmethod
+    def _cleanup_grammar_state(nonce: str) -> None:
+        """Clean up a single grammar state by nonce.
+        
+        Production-ready cleanup that:
+        1. Clears bitmask to free memory immediately
+        2. Removes from cache
+        3. Removes from last_seen tracking
+        4. Forces GC for large allocations
+        """
+        logger.info(f"[MEMORY TRACE] Starting cleanup for grammar state nonce={nonce}")
+        if nonce in OffloadPolicy._grammar_states:
+            try:
+                grammar_state = OffloadPolicy._grammar_states[nonce]
+                # Log bitmask info before cleanup
+                bitmask_size = None
+                if hasattr(grammar_state, '_bitmask') and grammar_state._bitmask is not None:
+                    if hasattr(grammar_state._bitmask, 'nbytes'):
+                        bitmask_size = grammar_state._bitmask.nbytes / (1024 ** 3)  # GB
+                    logger.info(
+                        f"[MEMORY TRACE] Clearing bitmask: "
+                        f"vocab_size={getattr(grammar_state, 'vocab_size', 'unknown')}, "
+                        f"bitmask_size={bitmask_size:.2f}GB" if bitmask_size else f"bitmask_size=unknown"
+                    )
+                    grammar_state._bitmask = None
+                else:
+                    logger.debug(f"[MEMORY TRACE] No bitmask to clear (was None or doesn't exist)")
+                
+                logger.debug(f"[MEMORY TRACE] Removing grammar state from cache...")
+                del OffloadPolicy._grammar_states[nonce]
+            except Exception as e:
+                logger.error(
+                    f"[MEMORY TRACE] ❌ Error cleaning up grammar state for nonce {nonce}: {e}"
+                )
+                logger.warning(f"Error cleaning up grammar state for nonce {nonce}: {e}")
+            finally:
+                # Always remove from tracking dicts
+                OffloadPolicy._grammar_states_last_seen.pop(nonce, None)
+                logger.debug(f"[MEMORY TRACE] Running garbage collection...")
+                # Force GC for large grammar states (bitmasks can be 10GB+)
+                gc.collect()
+                logger.debug(f"[MEMORY TRACE] Clearing MLX cache...")
+                # Clear MLX cache to free memory immediately (bitmasks are MLX arrays)
+                mx.clear_cache()
+                logger.info(
+                    f"[MEMORY TRACE] ✅ Grammar state cleanup completed for nonce={nonce}"
+                    + (f", freed ~{bitmask_size:.2f}GB" if bitmask_size else "")
+                )
+        else:
+            logger.debug(f"[MEMORY TRACE] Grammar state not found in cache for nonce={nonce}")
+    
+    @staticmethod
+    def _cleanup_expired_grammar_states() -> None:
+        """TTL-based cleanup of expired grammar states.
+        
+        Removes grammar states that haven't been accessed within TTL window.
+        This prevents memory leaks from orphaned states.
+        """
+        now = time.perf_counter()
+        ttl = OffloadPolicy._grammar_states_ttl_s
+        expired_nonces = [
+            nonce for nonce, last_seen in OffloadPolicy._grammar_states_last_seen.items()
+            if (now - last_seen) > ttl
+        ]
+        
+        if expired_nonces:
+            logger.debug(f"Cleaning up {len(expired_nonces)} expired grammar states (TTL={ttl}s)")
+            for nonce in expired_nonces:
+                OffloadPolicy._cleanup_grammar_state(nonce)
 
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
         local_count = max(1, len(self.runtime.assigned_layers))
@@ -352,21 +424,49 @@ class OffloadPolicy(ComputePolicy):
                             grammar_state = None
                             if grammar_schema:
                                 nonce = msg.nonce
+                                
+                                # Periodic TTL-based cleanup (run every ~100 requests to avoid overhead)
+                                import random
+                                if random.random() < 0.01:  # 1% chance per request
+                                    OffloadPolicy._cleanup_expired_grammar_states()
+                                
                                 if nonce in OffloadPolicy._grammar_states:
                                     grammar_state = OffloadPolicy._grammar_states[nonce]
+                                    # Update last seen time
+                                    OffloadPolicy._grammar_states_last_seen[nonce] = time.perf_counter()
                                     # Check if grammar state was already terminated - if so, don't reuse it
                                     if grammar_state is not None and getattr(grammar_state, '_terminated', False):
                                         logger.debug(f"Grammar state for nonce {nonce} already terminated, removing from cache")
-                                        del OffloadPolicy._grammar_states[nonce]
+                                        OffloadPolicy._cleanup_grammar_state(nonce)
                                         grammar_state = None
                                 
                                 if grammar_state is None:
+                                    logger.debug(f"Creating new grammar state for nonce {nonce}")
+                                    # Clear MLX cache before creating grammar state to free memory
+                                    # Grammar bitmasks can be 10GB+, so we need available memory
+                                    mx.clear_cache()
+                                    gc.collect()
+                                    
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
                                     model_vocab_size = y.shape[-1] if hasattr(y, 'shape') else None
                                     if tokenizer:
-                                        grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
-                                        if grammar_state:
-                                            OffloadPolicy._grammar_states[nonce] = grammar_state
+                                        try:
+                                            grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
+                                            if grammar_state:
+                                                OffloadPolicy._grammar_states[nonce] = grammar_state
+                                                OffloadPolicy._grammar_states_last_seen[nonce] = time.perf_counter()
+                                        except (MemoryError, RuntimeError) as e:
+                                            error_msg = str(e).lower()
+                                            if "allocate" in error_msg or "memory" in error_msg:
+                                                logger.error(
+                                                    f"Failed to create grammar state due to memory error: {e}. "
+                                                    f"Falling back to non-grammar generation. "
+                                                    f"Consider using tool_choice='auto' instead of 'required'."
+                                                )
+                                                # Continue without grammar - will use regular generation
+                                                grammar_state = None
+                                            else:
+                                                raise
 
                             result = Sampler.sample(
                                 logits=y,
@@ -384,12 +484,34 @@ class OffloadPolicy(ComputePolicy):
                             # Clean up grammar state from cache if terminated
                             if grammar_terminated and grammar_state is not None and grammar_schema:
                                 nonce = msg.nonce
-                                if nonce in OffloadPolicy._grammar_states:
-                                    logger.debug(f"Removing terminated grammar state for nonce {nonce}")
-                                    del OffloadPolicy._grammar_states[nonce]
+                                logger.debug(f"Removing terminated grammar state for nonce {nonce}")
+                                OffloadPolicy._cleanup_grammar_state(nonce)
+                                # Clear MLX cache immediately after cleanup to free memory for subsequent operations
+                                # This prevents allocation errors when creating output messages
+                                mx.clear_cache()
 
+                        except MemoryError as e:
+                            logger.error(
+                                f"End-shard sampling failed due to memory error: {e}. "
+                                f"Attempting to clean up grammar state for nonce {msg.nonce}"
+                            )
+                            # Try to clean up grammar state on memory error
+                            OffloadPolicy._cleanup_grammar_state(msg.nonce)
+                            self.runtime.input_pool.release(msg.pool_id)
+                            return
                         except Exception as e:
-                            logger.error("End-shard sampling failed: %s", e)
+                            error_msg = str(e)
+                            # Check if it's a memory allocation error
+                            if "allocate" in error_msg.lower() or "memory" in error_msg.lower():
+                                logger.error(
+                                    f"End-shard sampling failed due to memory issue: {e}. "
+                                    f"This may be related to grammar-constrained generation. "
+                                    f"Consider using tool_choice='auto' instead of 'required' for large vocabularies."
+                                )
+                                # Try to clean up grammar state
+                                OffloadPolicy._cleanup_grammar_state(msg.nonce)
+                            else:
+                                logger.error("End-shard sampling failed: %s", e)
                             self.runtime.input_pool.release(msg.pool_id)
                             return
 
