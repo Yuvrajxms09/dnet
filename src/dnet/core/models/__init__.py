@@ -5,6 +5,8 @@ from typing import Any, List, Optional
 from dnet.utils.loader import subclass_where
 from .base import BaseRingModel
 from .deepseek_v2 import DeepseekV2RingModel
+from .deepseek_v3 import DeepseekV3RingModel
+from .deepseek_v32 import DeepseekV32RingModel
 from .llama import LlamaRingModel
 from .gpt_oss import GptOssRingModel
 from .qwen3 import Qwen3RingModel
@@ -38,6 +40,8 @@ def get_ring_model(
 __all__ = [
     "BaseRingModel",
     "DeepseekV2RingModel",
+    "DeepseekV3RingModel",
+    "DeepseekV32RingModel",
     "LlamaRingModel",
     "GptOssRingModel",
     "Qwen3RingModel",

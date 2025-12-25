@@ -172,6 +172,30 @@ model_catalog: dict[str, list[dict[str, Any]]] = {
             "quantization": "4bit",
             "alias": "hermes-4-405b",
         },
+        {
+            "id": "mlx-community/DeepSeek-V3-4bit",
+            "arch": "deepseek_v3",
+            "quantization": "4bit",
+            "alias": "deepseek-v3",
+        },
+        {
+            "id": "mlx-community/DeepSeek-V3.2_bf16",
+            "arch": "deepseek_v32",
+            "quantization": "bf16",
+            "alias": "deepseek-v3.2",
+        },
+        {
+            "id": "mlx-community/DeepSeek-V3.2-8bit",
+            "arch": "deepseek_v32",
+            "quantization": "8bit",
+            "alias": "deepseek-v3.2",
+        },
+        {
+            "id": "mlx-community/DeepSeek-V3.2-4bit",
+            "arch": "deepseek_v32",
+            "quantization": "4bit",
+            "alias": "deepseek-v3.2",
+        },
     ]
 }
 
