@@ -178,23 +178,55 @@ model_catalog: dict[str, list[dict[str, Any]]] = {
             "quantization": "4bit",
             "alias": "deepseek-v3",
         },
+# DeepSeek V3.2 models disabled - requires mlx-lm>=0.30.0
+# {
+#     "id": "mlx-community/DeepSeek-V3.2_bf16",
+#     "arch": "deepseek_v32",
+#     "quantization": "bf16",
+#     "alias": "deepseek-v3.2",
+# },
+# {
+#     "id": "mlx-community/DeepSeek-V3.2-8bit",
+#     "arch": "deepseek_v32",
+#     "quantization": "8bit",
+#     "alias": "deepseek-v3.2",
+# },
+# {
+#     "id": "mlx-community/DeepSeek-V3.2-4bit",
+#     "arch": "deepseek_v32",
+#     "quantization": "4bit",
+#     "alias": "deepseek-v3.2",
+# },
         {
-            "id": "mlx-community/DeepSeek-V3.2_bf16",
-            "arch": "deepseek_v32",
-            "quantization": "bf16",
-            "alias": "deepseek-v3.2",
-        },
-        {
-            "id": "mlx-community/DeepSeek-V3.2-8bit",
-            "arch": "deepseek_v32",
-            "quantization": "8bit",
-            "alias": "deepseek-v3.2",
-        },
-        {
-            "id": "mlx-community/DeepSeek-V3.2-4bit",
-            "arch": "deepseek_v32",
+            "id": "mlx-community/OLMo-2-0325-32B-Instruct-4bit",
+            "arch": "olmo2",
             "quantization": "4bit",
-            "alias": "deepseek-v3.2",
+            "alias": "olmo-2-32b-instruct",
+        },
+        {
+            "id": "mlx-community/OLMo-2-1124-13B-Instruct-8bit",
+            "arch": "olmo2",
+            "quantization": "8bit",
+            "alias": "olmo-2-13b-instruct",
+        },
+        {
+            "id": "mlx-community/OLMo-2-1124-13B-Instruct-4bit",
+            "arch": "olmo2",
+            "quantization": "4bit",
+            "alias": "olmo-2-13b-instruct",
+        },
+        {
+            "id": "mlx-community/OLMo-2-1124-7B-Instruct-8bit",
+            "arch": "olmo2",
+            "quantization": "8bit",
+            "alias": "olmo-2-7b-instruct",
+        },
+        {
+            "id": "mlx-community/OLMo-2-1124-7B-Instruct-4bit",
+            "arch": "olmo2",
+            "quantization": "4bit",
+            "alias": "olmo-2-7b-instruct",
+            "ci_test": True,
         },
     ]
 }

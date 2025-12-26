@@ -6,10 +6,11 @@ from dnet.utils.loader import subclass_where
 from .base import BaseRingModel
 from .deepseek_v2 import DeepseekV2RingModel
 from .deepseek_v3 import DeepseekV3RingModel
-from .deepseek_v32 import DeepseekV32RingModel
+# from .deepseek_v32 import DeepseekV32RingModel  # Disabled - requires mlx-lm>=0.30.0
 from .llama import LlamaRingModel
 from .gpt_oss import GptOssRingModel
 from .qwen3 import Qwen3RingModel
+from .olmo2 import Olmo2RingModel
 
 
 def get_ring_model(
@@ -41,9 +42,10 @@ __all__ = [
     "BaseRingModel",
     "DeepseekV2RingModel",
     "DeepseekV3RingModel",
-    "DeepseekV32RingModel",
+    # "DeepseekV32RingModel",  # Disabled - requires mlx-lm>=0.30.0
     "LlamaRingModel",
     "GptOssRingModel",
     "Qwen3RingModel",
+    "Olmo2RingModel",
     "get_ring_model",
 ]
