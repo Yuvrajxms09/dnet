@@ -11,6 +11,8 @@ from .llama import LlamaRingModel
 from .gpt_oss import GptOssRingModel
 from .qwen3 import Qwen3RingModel
 from .olmo2 import Olmo2RingModel
+from .glm47 import GLM47RingModel
+from .minimax_21 import MiniMax21RingModel
 
 
 def get_ring_model(
@@ -47,5 +49,7 @@ __all__ = [
     "GptOssRingModel",
     "Qwen3RingModel",
     "Olmo2RingModel",
+    "GLM47RingModel",
+    "MiniMax21RingModel",
     "get_ring_model",
 ]

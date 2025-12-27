@@ -228,6 +228,30 @@ model_catalog: dict[str, list[dict[str, Any]]] = {
             "alias": "olmo-2-7b-instruct",
             "ci_test": True,
         },
+        {
+            "id": "mlx-community/GLM-4.7-8bit",
+            "arch": "glm47",
+            "quantization": "8bit",
+            "alias": "glm-4.7",
+        },
+        {
+            "id": "mlx-community/GLM-4.7-4bit",
+            "arch": "glm47",
+            "quantization": "4bit",
+            "alias": "glm-4.7",
+        },
+        {
+            "id": "mlx-community/MiniMax-M2.1-8bit",
+            "arch": "minimax_21",
+            "quantization": "8bit",
+            "alias": "minimax-2.1",
+        },
+        {
+            "id": "mlx-community/MiniMax-M2.1-4bit",
+            "arch": "minimax_21",
+            "quantization": "4bit",
+            "alias": "minimax-2.1",
+        },
     ]
 }
 
