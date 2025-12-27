@@ -24,13 +24,9 @@ class ShardApiServicer(pb2_grpc.ShardApiServiceServicer):
             token_id = int(request.token_id)
             logprob = float(request.logprob)
             top_logprobs = dict(request.top_logprobs)
-            grammar_terminated = bool(request.grammar_terminated)
 
             result = TokenResult(
-                token_id=token_id,
-                logprob=logprob,
-                top_logprobs=top_logprobs,
-                grammar_terminated=grammar_terminated,
+                token_id=token_id, logprob=logprob, top_logprobs=top_logprobs
             )
 
             self.inference_manager.resolve_request(nonce, result)

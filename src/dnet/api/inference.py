@@ -1,8 +1,6 @@
 """Inference manager for dnet API server.
 
-Handles chat completions with optional:
-- Tool calling (prompt injection + grammar-constrained generation)
-- MCP tool execution (server-side tool execution loop)
+Handles chat completions with optional structured output generation using Outlines.
 """
 
 import asyncio
@@ -11,7 +9,8 @@ import uuid
 import json
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List
+from builtins import aiter, anext
 from dnet.core.tensor import to_bytes
 
 from .models import (
@@ -29,14 +28,6 @@ from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
 from dnet.utils.logger import logger
 
-# Optional MCP import - graceful degradation if not available
-try:
-    from .mcp_tools import MCPToolProvider
-    MCP_AVAILABLE = True
-except ImportError:
-    MCPToolProvider = None
-    MCP_AVAILABLE = False
-    logger.debug("MCP tools module not available")
 
 
 async def arange(count: int):
@@ -63,21 +54,13 @@ class InferenceManager:
         model_manager: ModelManager,
         grpc_port: int,
         adapter: ApiAdapterBase,
-        mcp_provider: Optional[Any] = None,  # MCPToolProvider, but Optional to avoid import issues
     ):
         self.cluster_manager = cluster_manager
         self.model_manager = model_manager
         self.grpc_port = grpc_port
         self.adapter = adapter
-        self.mcp_provider = mcp_provider
 
         self._api_callback_addr: str = ""
-        
-        # Log MCP status
-        if mcp_provider:
-            logger.info(f"InferenceManager initialized with MCP provider (enabled={getattr(mcp_provider, 'enabled', False)})")
-        else:
-            logger.debug("InferenceManager initialized without MCP provider")
 
     async def connect_to_ring(
         self, first_shard_ip: str, first_shard_port: int, api_callback_addr: str
@@ -89,140 +72,6 @@ class InferenceManager:
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = api_callback_addr
 
-    # =========================================================================
-    # Tool Calling Support
-    # =========================================================================
-
-    def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
-        """Format tools for prompt injection.
-        
-        Only injects tool names and short descriptions to keep prompt small.
-        Full schemas are used for grammar constraint, not prompt injection.
-        """
-        if not tools:
-            return ""
-
-        logger.debug(f"Formatting {len(tools)} tools for prompt injection")
-        
-        # Only include name and first sentence of description to keep prompt small
-        tool_summaries = []
-        for t in tools:
-            if t.get("type") == "function" and "function" in t:
-                func = t["function"]
-                name = func.get("name", "unknown")
-                desc = func.get("description", "")
-                # Truncate description to first sentence or 80 chars
-                short_desc = desc.split(".")[0][:80] if desc else ""
-                tool_summaries.append(f"- {name}: {short_desc}")
-        
-        tools_list = "\n".join(tool_summaries)
-
-        return f"""
-
-You have access to {len(tools)} tools. Use them ONLY when the user's request requires external data.
-For greetings or general questions, respond normally without tools.
-
-Available tools:
-{tools_list}
-
-To use a tool, respond with JSON:
-{{"tool_calls": [{{"id": "call_1", "type": "function", "function": {{"name": "<tool_name>", "arguments": "{{\\"param\\": \\"value\\"}}"}}}}]}}
-"""
-
-    def _build_tool_call_schema(self, tools: List[Dict[str, Any]]) -> Optional[str]:
-        """Build JSON schema for tool calls (used by Outlines for grammar constraint)."""
-        tool_names = []
-        for t in tools:
-            try:
-                if t.get("type") == "function" and "function" in t:
-                    func = t["function"]
-                    if isinstance(func, dict) and "name" in func:
-                        tool_names.append(func["name"])
-            except (KeyError, TypeError) as e:
-                logger.warning(f"Malformed tool definition, skipping: {e}")
-                continue
-
-        if not tool_names:
-            logger.warning("No valid tool names extracted from tools list")
-            return None
-
-        logger.debug(f"Building tool call schema for tools: {tool_names}")
-
-        schema = {
-            "type": "object",
-            "properties": {
-                "tool_calls": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "type": {"const": "function"},
-                            "function": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"enum": tool_names},
-                                    "arguments": {"type": "string"},
-                                },
-                                "required": ["name", "arguments"],
-                            },
-                        },
-                        "required": ["id", "type", "function"],
-                    },
-                }
-            },
-            "required": ["tool_calls"],
-        }
-
-        return json.dumps(schema)
-
-    # =========================================================================
-    # MCP Tool Execution
-    # =========================================================================
-
-    async def _execute_tool_calls(
-        self, tool_calls: List[Dict[str, Any]]
-    ) -> List[ChatMessage]:
-        """Execute tool calls via MCP and return tool result messages."""
-        if not self.mcp_provider or not getattr(self.mcp_provider, 'enabled', False):
-            logger.warning("MCP provider not available for tool execution")
-            return []
-
-        results = []
-        for tc in tool_calls:
-            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            
-            # Parse arguments
-            args_raw = func.get("arguments", "{}")
-            if isinstance(args_raw, str):
-                try:
-                    arguments = json.loads(args_raw)
-                except json.JSONDecodeError:
-                    arguments = {}
-                    logger.warning(f"Failed to parse tool arguments: {args_raw[:100]}")
-            else:
-                arguments = args_raw
-
-            logger.info(f"Executing MCP tool: {tool_name} with args: {arguments}")
-            
-            try:
-                result_text = await self.mcp_provider.execute(tool_name, arguments)
-                logger.info(f"Tool '{tool_name}' returned {len(result_text)} chars")
-            except Exception as e:
-                result_text = f"Error executing tool: {e}"
-                logger.error(f"Tool execution failed: {e}")
-
-            results.append(ChatMessage(
-                role="tool",
-                name=tool_name,
-                content=result_text,
-                tool_call_id=tool_id,
-            ))
-
-        return results
 
     # =========================================================================
     # Core Generation
@@ -230,8 +79,8 @@ To use a tool, respond with JSON:
 
     async def generate_stream(self, req: ChatRequestModel):
         """Generator for chat completion chunks."""
-        logger.debug(f"generate_stream called: model={req.model}, tools={len(req.tools) if req.tools else 0}")
-        
+        logger.debug(f"generate_stream called: model={req.model}")
+
         if not self.model_manager.tokenizer:
             raise RuntimeError(
                 "Inference manager not ready (ring not connected or tokenizer not loaded)"
@@ -239,60 +88,25 @@ To use a tool, respond with JSON:
 
         tokenizer = self.model_manager.tokenizer
 
-        # Prepare messages - inject tool descriptions if tools are provided
-        messages_for_prompt = req.messages.copy()
-        use_tool_grammar = False
-
-        if req.tools and req.tool_choice not in [None, "none"]:
-            logger.info(f"Tool calling enabled: {len(req.tools)} tools, tool_choice={req.tool_choice}")
-            tools_prompt = self._format_tools_for_prompt(req.tools)
-
-            # Find system message or prepend one
-            has_system = any(m.role == "system" for m in messages_for_prompt)
-
-            if has_system:
-                for i, msg in enumerate(messages_for_prompt):
-                    if msg.role == "system":
-                        messages_for_prompt[i] = ChatMessage(
-                            role="system", content=(msg.content or "") + tools_prompt
-                        )
-                        break
-            else:
-                messages_for_prompt.insert(
-                    0, ChatMessage(role="system", content=tools_prompt.strip())
-                )
-
-            # Only apply grammar constraint for "required"
-            if req.tool_choice == "required":
-                use_tool_grammar = True
-                logger.debug("tool_choice='required': applying grammar constraint")
-
         # Build prompt
         try:
             if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
                 # Convert messages to dict format
                 message_dicts = []
-                for m in messages_for_prompt:
+                for m in req.messages:
                     msg_dict = {"role": m.role, "content": m.content or ""}
-                    # Include tool-related fields for proper chat template
-                    if m.role == "tool" and m.name:
-                        msg_dict["name"] = m.name
-                    if m.role == "tool" and m.tool_call_id:
-                        msg_dict["tool_call_id"] = m.tool_call_id
-                    if m.role == "assistant" and m.tool_calls:
-                        msg_dict["tool_calls"] = m.tool_calls
                     message_dicts.append(msg_dict)
-                
+
                 prompt_text = tokenizer.apply_chat_template(
                     message_dicts,
                     add_generation_prompt=True,
                     tokenize=False,
                 )
             else:
-                prompt_text = "\n".join(m.content or "" for m in messages_for_prompt) + "\nAssistant:"
+                prompt_text = "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
         except Exception as e:
             logger.warning(f"Failed to apply chat template: {e}, using fallback")
-            prompt_text = "\n".join(m.content or "" for m in messages_for_prompt) + "\nAssistant:"
+            prompt_text = "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
 
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
@@ -304,17 +118,10 @@ To use a tool, respond with JSON:
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
 
-        # Get grammar JSON schema
+        # Get grammar JSON schema for structured output
         grammar_json_schema = None
 
-        if use_tool_grammar and req.tools:
-            tool_schema = self._build_tool_call_schema(req.tools)
-            if tool_schema:
-                grammar_json_schema = tool_schema
-                logger.info(f"Using Outlines tool call schema for {len(req.tools)} tools")
-            else:
-                use_tool_grammar = False
-        elif hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
+        if hasattr(req, "grammar_json_schema") and req.grammar_json_schema:
             grammar_json_schema = req.grammar_json_schema
         elif hasattr(req, "response_format") and req.response_format:
             if isinstance(req.response_format, dict):
@@ -428,10 +235,7 @@ To use a tool, respond with JSON:
             # Check grammar termination
             if getattr(result, "grammar_terminated", False):
                 logger.info("Grammar terminated signal received")
-                if use_tool_grammar:
-                    completion_reason = ChatCompletionReason.TOOL_CALLS
-                else:
-                    completion_reason = ChatCompletionReason.STOP
+                completion_reason = ChatCompletionReason.STOP
                 break
 
             y = mx.array([token], dtype=mx.int32)
@@ -439,39 +243,6 @@ To use a tool, respond with JSON:
         detokenizer.finalize()
         final_text = detokenizer.text
 
-        # Parse tool calls from generated text
-        tool_calls = None
-        has_tool_calls_json = '"tool_calls"' in final_text and "{" in final_text
-        should_attempt_parse = use_tool_grammar or (
-            req.tools and req.tool_choice == "auto" and has_tool_calls_json
-        )
-
-        if should_attempt_parse and final_text:
-            clean_text = final_text.strip()
-
-            # Remove special tokens
-            for eos_pattern in ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"]:
-                if eos_pattern in clean_text:
-                    clean_text = clean_text.split(eos_pattern)[0].strip()
-                    break
-
-            # Handle Qwen3 <think> tags
-            if "</think>" in clean_text:
-                clean_text = clean_text.split("</think>")[-1].strip()
-
-            try:
-                parsed = json.loads(clean_text)
-                if isinstance(parsed, dict) and "tool_calls" in parsed:
-                    tool_calls = parsed["tool_calls"]
-                    if tool_calls and isinstance(tool_calls, list):
-                        completion_reason = ChatCompletionReason.TOOL_CALLS
-                        tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
-                        logger.info(f"Parsed {len(tool_calls)} tool call(s): {tool_names}")
-                    else:
-                        tool_calls = None
-            except json.JSONDecodeError:
-                if use_tool_grammar:
-                    logger.error(f"Failed to parse tool call JSON: {clean_text[:200]}")
 
         # Build metrics
         metrics_dict = None
@@ -492,8 +263,7 @@ To use a tool, respond with JSON:
         # Build final message
         final_message = ChatMessage(
             role="assistant",
-            content=None if tool_calls else final_text,
-            tool_calls=tool_calls,
+            content=final_text,
         )
 
         # Final chunk
@@ -521,83 +291,10 @@ To use a tool, respond with JSON:
     # Chat Completions (with optional MCP tool execution loop)
     # =========================================================================
 
-    async def chat_completions(
-        self,
-        req: ChatRequestModel,
-        execute_tools: bool = True,
-        max_tool_rounds: int = 5,
-    ) -> ChatResponseModel:
-        """
-        Handles chat completion request (non-streaming).
-        
-        If MCP is enabled and execute_tools=True, will automatically execute
-        tool calls and feed results back to the model.
-        """
-        logger.debug(f"chat_completions called: model={req.model}, execute_tools={execute_tools}")
-        
-        # Check if MCP tool injection is needed
-        working_req = req
-        mcp_enabled = (
-            self.mcp_provider is not None 
-            and getattr(self.mcp_provider, 'enabled', False)
-        )
-        
-        # NOTE: We do NOT auto-inject MCP tools into requests.
-        # MCP tools are available for EXECUTION only - the client must explicitly
-        # include tools in their request if they want tool calling.
-        # This is the production-standard approach (same as OpenAI, Anthropic, etc.)
-        #
-        # To use MCP tools, client should:
-        # 1. Call GET /v1/mcp/tools to discover available tools
-        # 2. Include desired tools in the request's "tools" field
-        # 3. Server executes tool calls via MCP when model generates them
-
-        # Tool execution loop
-        current_messages = list(working_req.messages)
-        tool_round = 0
-        response = None
-
-        while tool_round < max_tool_rounds:
-            tool_round += 1
-            logger.debug(f"Tool round {tool_round}/{max_tool_rounds}")
-
-            # Generate response - use model_copy to preserve all fields correctly
-            loop_req = working_req.model_copy(update={
-                "messages": current_messages,
-                "stream": False,
-            })
-            response = await self._generate_single_completion(loop_req)
-
-            # Check if we need to execute tools
-            choice = response.choices[0]
-            should_execute = (
-                execute_tools
-                and mcp_enabled
-                and choice.finish_reason == ChatCompletionReason.TOOL_CALLS
-                and choice.message
-                and choice.message.tool_calls
-            )
-
-            if should_execute:
-                tool_calls = choice.message.tool_calls
-                logger.info(f"Executing {len(tool_calls)} tool call(s) in round {tool_round}")
-
-                # Add assistant message with tool calls to conversation
-                current_messages.append(choice.message)
-
-                # Execute tools and add results
-                tool_results = await self._execute_tool_calls(tool_calls)
-                current_messages.extend(tool_results)
-
-                # Continue loop for next response
-                continue
-
-            # No tool calls or execution disabled - return response
-            return response
-
-        # Max rounds reached
-        logger.warning(f"Max tool rounds ({max_tool_rounds}) reached")
-        return response
+    async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
+        """Handles chat completion request (non-streaming)."""
+        logger.debug(f"chat_completions called: model={req.model}")
+        return await self._generate_single_completion(req)
 
     async def _generate_single_completion(self, req: ChatRequestModel) -> ChatResponseModel:
         """Generate a single completion (accumulates stream into response)."""
@@ -609,7 +306,6 @@ To use a tool, respond with JSON:
         nonce = ""
         metrics_dict = None
         usage = None
-        tool_calls = None
         final_message_from_chunk = None
 
         async for chunk in self.generate_stream(req):
@@ -618,13 +314,9 @@ To use a tool, respond with JSON:
 
             if choice.message:
                 final_message_from_chunk = choice.message
-                if final_message_from_chunk.tool_calls:
-                    tool_calls = final_message_from_chunk.tool_calls
             elif choice.delta:
                 if choice.delta.content:
                     full_content += choice.delta.content
-                if choice.delta.tool_calls:
-                    tool_calls = choice.delta.tool_calls
 
             if choice.logprobs:
                 if choice.logprobs.token_logprobs:
@@ -647,8 +339,7 @@ To use a tool, respond with JSON:
         else:
             final_message = ChatMessage(
                 role="assistant",
-                content=None if tool_calls else full_content,
-                tool_calls=tool_calls,
+                content=full_content,
             )
 
         return ChatResponseModel(

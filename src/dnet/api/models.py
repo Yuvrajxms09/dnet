@@ -27,7 +27,6 @@ class ChatCompletionReason(str, Enum):
 
     LENGTH = "length"
     STOP = "stop"
-    TOOL_CALLS = "tool_calls"
 
 
 class RingInferenceError(BaseModel):
@@ -52,24 +51,11 @@ class RingInferenceError(BaseModel):
 class ChatMessage(BaseModel):
     """A single message in a chat conversation.
 
-    Compatible with OpenAI format:
-    - For assistant messages with tool calls: content can be None, tool_calls contains the calls
-    - For tool role messages: name is required (function name), content is the result
+    Compatible with OpenAI format.
     """
 
-    role: str  # "system" | "user" | "assistant" | "tool" | "developer" # TODO: use Literal?
-    content: Optional[str] = None  # Can be None when tool_calls is present
-    name: Optional[str] = Field(
-        default=None, description="Name of the function/tool (required for tool role)"
-    )
-    tool_calls: Optional[List[Dict[str, Any]]] = Field(
-        default=None,
-        description="List of tool calls made by the assistant (OpenAI format: {id, type, function: {name, arguments}})",
-    )
-    tool_call_id: Optional[str] = Field(
-        default=None,
-        description="ID of the tool call this message is responding to (required for tool role)",
-    )
+    role: str  # "system" | "user" | "assistant" | "developer" # TODO: use Literal?
+    content: Optional[str] = None
 
 
 class ChatParams(BaseModel):
