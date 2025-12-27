@@ -362,7 +362,6 @@ class RingAdapter(TopologyAdapter):
             token_id = int(getattr(msg, "token_id", -1))
             logprob = float(getattr(msg, "logprob", 0.0))
             top_logprobs = getattr(msg, "top_logprobs", {}) or {}
-            grammar_terminated = bool(getattr(msg, "grammar_terminated", False))
 
             req = shard_api_comm_pb2.TokenRequest(
                 nonce=msg.nonce,
@@ -370,7 +369,6 @@ class RingAdapter(TopologyAdapter):
                 timestamp=utc_epoch_now(),
                 logprob=logprob,
                 top_logprobs=top_logprobs,
-                grammar_terminated=grammar_terminated,
             )
 
             if self.api_stub is None:

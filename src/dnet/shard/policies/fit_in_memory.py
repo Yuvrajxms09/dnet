@@ -189,16 +189,6 @@ class FitInMemoryPolicy(ComputePolicy):
                             token_id = result.token_id
                             token_logprob = result.logprob
                             top_logprobs = result.top_logprobs
-                            grammar_terminated = result.grammar_terminated
-                            
-                            # Clean up grammar state from cache if terminated
-                            if grammar_terminated and grammar_state is not None and grammar_schema:
-                                nonce = msg.nonce
-                                if nonce in FitInMemoryPolicy._grammar_states:
-                                    logger.info(f"Removing terminated grammar state for nonce {nonce}, token_id={token_id}")
-                                    del FitInMemoryPolicy._grammar_states[nonce]
-                                else:
-                                    logger.warning(f"Grammar terminated but state not found in cache for nonce {nonce}")
 
                         except Exception as e:
                             logger.error("End-shard sampling failed: %s", e)
@@ -219,7 +209,6 @@ class FitInMemoryPolicy(ComputePolicy):
                             token_id=token_id,
                             logprob=token_logprob,
                             top_logprobs=top_logprobs,
-                            grammar_terminated=grammar_terminated,
                         )
                     else:
                         output_msg = ActivationMessage(

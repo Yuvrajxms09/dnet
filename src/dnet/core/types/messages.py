@@ -134,7 +134,6 @@ class TokenResult:
     token_id: int
     logprob: float = 0.0
     top_logprobs: dict[int, float] = field(default_factory=dict)
-    grammar_terminated: bool = False  # True when Outlines' is_terminated() returns True
 
 
 __all__ = [

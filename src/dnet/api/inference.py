@@ -1,6 +1,8 @@
 """Inference manager for dnet API server.
 
-Handles chat completions with optional structured output generation using Outlines.
+Handles chat completions with optional:
+- Tool calling (prompt injection + grammar-constrained generation)
+- MCP tool execution (server-side tool execution loop)
 """
 
 import asyncio
@@ -9,7 +11,7 @@ import uuid
 import json
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Dict
 from builtins import aiter, anext
 from dnet.core.tensor import to_bytes
 
@@ -232,17 +234,10 @@ class InferenceManager:
                 completion_reason = ChatCompletionReason.STOP
                 break
 
-            # Check grammar termination
-            if getattr(result, "grammar_terminated", False):
-                logger.info("Grammar terminated signal received")
-                completion_reason = ChatCompletionReason.STOP
-                break
-
             y = mx.array([token], dtype=mx.int32)
 
         detokenizer.finalize()
         final_text = detokenizer.text
-
 
         # Build metrics
         metrics_dict = None

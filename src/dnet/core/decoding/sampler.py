@@ -314,103 +314,40 @@ class Sampler:
         else:
             v = logits
 
-        # Check termination BEFORE generating token to prevent extra tokens
-        grammar_terminated_before = False
-        if grammar_state is not None:
-            grammar_terminated_before = grammar_state.is_terminated()
-            if grammar_terminated_before:
-                logger.info("Grammar already terminated before token generation - preventing further generation")
-        
         # Apply grammar-constrained logits processing if available
-        if grammar_state is not None and not grammar_terminated_before:
+        if grammar_state is not None:
             try:
                 from outlines_core.kernels.mlx import apply_token_bitmask
-                
+
                 # Fill bitmask with allowed tokens for current grammar state
                 bitmask = grammar_state.fill_next_token_bitmask()
-                
-                # If bitmask is None, grammar was terminated during bitmask fill
-                # This shouldn't happen if we checked is_terminated() first, but be defensive
-                if bitmask is None:
-                    grammar_terminated_before = True
-                    # Mask all tokens except EOS to prevent further generation
-                    eos_token_id = getattr(grammar_state, '_eos_token_id', None)
-                    if eos_token_id is not None and eos_token_id < len(v):
-                        v = mx.full_like(v, float('-inf'))
-                        v[eos_token_id] = 0.0
-                    else:
-                        v = mx.full_like(v, float('-inf'))
-                    logger.debug("Grammar terminated during bitmask fill - masking all tokens except EOS")
-                else:
+
+                if bitmask is not None:
                     # Apply bitmask to logits (sets disallowed tokens to -inf)
                     # Outlines MLX kernel expects 2D input [batch, vocab]
                     v_2d = v[None, :] if v.ndim == 1 else v
                     v_masked = apply_token_bitmask(v_2d, bitmask)
                     v = v_masked[0] if v_masked.ndim == 2 else v_masked
-                
+                else:
+                    # Grammar is exhausted - mask all tokens
+                    v = mx.full_like(v, float('-inf'))
+
             except Exception as e:
                 logger.warning(f"Failed to apply grammar mask: {e}")
                 import traceback
                 logger.debug(traceback.format_exc())
-        
-        if grammar_terminated_before:
-            # Grammar is already terminated - only allow EOS token
-            # This prevents generating any more content tokens
-            eos_token_id = getattr(grammar_state, '_eos_token_id', None)
-            if eos_token_id is not None and eos_token_id < len(v):
-                # Mask all tokens except EOS to force termination
-                v = mx.full_like(v, float('-inf'))
-                v[eos_token_id] = 0.0  # Allow EOS token only
-                logger.debug(f"Grammar terminated - only allowing EOS token {eos_token_id}")
-            else:
-                # No EOS token ID - mask all to prevent further generation
-                v = mx.full_like(v, float('-inf'))
-                logger.debug("Grammar terminated - masked all tokens (no EOS token ID)")
 
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
-        
-        # Log token generation for debugging
+
+        # Update grammar state with accepted token
         if grammar_state is not None:
-            logger.debug(
-                f"Generated token_id={token_id}, grammar_terminated_before={grammar_terminated_before}, "
-                f"_terminated={getattr(grammar_state, '_terminated', False)}, "
-                f"guide.is_finished()={grammar_state.guide.is_finished()}"
-            )
-        
-        # Update grammar state with accepted token and check termination
-        grammar_terminated = grammar_terminated_before  # Use pre-check result
-        if grammar_state is not None and not grammar_terminated_before:
             try:
-                # Accept the token first
                 grammar_state.accept_token(token_id)
-                
-                # Check if grammar is satisfied (complete valid output)
-                # This should return True when we've generated a complete valid JSON
-                if grammar_state.is_terminated():
-                    grammar_terminated = True
-                    try:
-                        current_state = grammar_state.guide.get_state()
-                        is_final = grammar_state.index.is_final_state(current_state)
-                        logger.info(
-                            f"Grammar terminated after token: token_id={token_id}, "
-                            f"guide.is_finished()={grammar_state.guide.is_finished()}, "
-                            f"is_final_state={is_final}, state={current_state}, "
-                            f"_terminated={getattr(grammar_state, '_terminated', False)}"
-                        )
-                    except Exception:
-                        logger.info(
-                            f"Grammar terminated after token: token_id={token_id}, "
-                            f"guide.is_finished()={grammar_state.guide.is_finished()}, "
-                            f"_terminated={getattr(grammar_state, '_terminated', False)}"
-                        )
             except Exception as e:
                 logger.warning(f"Failed to accept token in grammar: {e}")
                 import traceback
                 logger.debug(traceback.format_exc())
-        elif grammar_terminated_before:
-            # Grammar was already terminated - don't accept more tokens
-            logger.info(f"Grammar already terminated, not accepting token_id={token_id} - this should not happen")
 
         logprob = 0.0
         top_logprobs = {}
@@ -433,5 +370,4 @@ class Sampler:
             token_id=token_id,
             logprob=logprob,
             top_logprobs=top_logprobs,
-            grammar_terminated=grammar_terminated,
         )
