@@ -98,7 +98,7 @@ def test_structured_outputs_end_to_end(schema: dict[str, Any], prompt: str) -> N
     assert "message" in choice, f"Choice missing 'message': {choice}"
     content = choice["message"].get("content", "")
 
-    # Verify response is valid JSON
+    # Parse JSON - structured outputs should produce clean JSON (no end tokens)
     parsed = json.loads(content)
     assert isinstance(parsed, dict), f"Response is not a JSON object: {content}"
 

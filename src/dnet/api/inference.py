@@ -1,10 +1,3 @@
-"""Inference manager for dnet API server.
-
-Handles chat completions with optional:
-- Tool calling (prompt injection + grammar-constrained generation)
-- MCP tool execution (server-side tool execution loop)
-"""
-
 import asyncio
 import time
 import uuid
@@ -75,10 +68,6 @@ class InferenceManager:
         self._api_callback_addr = api_callback_addr
 
 
-    # =========================================================================
-    # Core Generation
-    # =========================================================================
-
     async def generate_stream(self, req: ChatRequestModel):
         """Generator for chat completion chunks."""
         logger.debug(f"generate_stream called: model={req.model}")
@@ -90,7 +79,6 @@ class InferenceManager:
 
         tokenizer = self.model_manager.tokenizer
 
-        # Build prompt
         try:
             if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
                 # Convert messages to dict format
@@ -232,7 +220,24 @@ class InferenceManager:
         detokenizer.finalize()
         final_text = detokenizer.text
 
-        # Build metrics
+        # Strip special tokens from output
+        # mlx-lm's NaiveStreamingDetokenizer calls tokenizer.decode() without skip_special_tokens=True
+        # (see: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tokenizer_utils.py)
+        # So we strip them manually as a post-processing step
+        SPECIAL_TOKENS_TO_STRIP = [
+            "<|im_end|>",       # Qwen, ChatML format
+            "<|im_start|>",     # Qwen, ChatML format
+            "<|endoftext|>",    # GPT/generic
+            "</s>",             # Llama, Mistral
+            "<|eot_id|>",       # Llama 3
+            "<|end|>",          # Phi
+            "<|assistant|>",    # Some chat templates
+            "<|user|>",         # Some chat templates
+        ]
+        for token in SPECIAL_TOKENS_TO_STRIP:
+            final_text = final_text.replace(token, "")
+        final_text = final_text.strip()
+
         metrics_dict = None
         t_end = time.perf_counter()
         if getattr(req, "profile", False):
@@ -248,7 +253,6 @@ class InferenceManager:
                 "tps_decoding": round((tokens_generated / gen_s) if tokens_generated else 0.0, 4),
             }
 
-        # Build final message
         final_message = ChatMessage(
             role="assistant",
             content=final_text,
@@ -275,17 +279,11 @@ class InferenceManager:
             ),
         )
 
-    # =========================================================================
-    # Chat Completions (with optional MCP tool execution loop)
-    # =========================================================================
 
     async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
-        """Handles chat completion request (non-streaming)."""
-        logger.debug(f"chat_completions called: model={req.model}")
-        return await self._generate_single_completion(req)
-
-    async def _generate_single_completion(self, req: ChatRequestModel) -> ChatResponseModel:
-        """Generate a single completion (accumulates stream into response)."""
+        """
+        Handles chat completion request (non-streaming).
+        """
         full_content = ""
         tokens = []
         token_logprobs = []
@@ -294,17 +292,12 @@ class InferenceManager:
         nonce = ""
         metrics_dict = None
         usage = None
-        final_message_from_chunk = None
 
         async for chunk in self.generate_stream(req):
             nonce = chunk.id
             choice = chunk.choices[0]
-
-            if choice.message:
-                final_message_from_chunk = choice.message
-            elif choice.delta:
-                if choice.delta.content:
-                    full_content += choice.delta.content
+            if choice.delta and choice.delta.content:
+                full_content += choice.delta.content
 
             if choice.logprobs:
                 if choice.logprobs.token_logprobs:
@@ -316,19 +309,12 @@ class InferenceManager:
 
             if choice.finish_reason:
                 completion_reason = choice.finish_reason
+
             if chunk.metrics:
                 metrics_dict = chunk.metrics
+
             if chunk.usage:
                 usage = chunk.usage
-
-        # Build final message
-        if final_message_from_chunk is not None:
-            final_message = final_message_from_chunk
-        else:
-            final_message = ChatMessage(
-                role="assistant",
-                content=full_content,
-            )
 
         return ChatResponseModel(
             id=nonce,
@@ -336,12 +322,14 @@ class InferenceManager:
                 ChatChoice(
                     index=0,
                     finish_reason=completion_reason,
-                    message=final_message,
+                    message=ChatMessage(role="assistant", content=full_content),
                     logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs,
                         top_logprobs=top_logprobs_list,
                         tokens=tokens,
-                    ) if req.logprobs else None,
+                    )
+                    if req.logprobs
+                    else None,
                 )
             ],
             usage=usage,
