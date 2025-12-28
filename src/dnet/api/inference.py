@@ -316,6 +316,13 @@ class InferenceManager:
             if chunk.usage:
                 usage = chunk.usage
 
+        # Clean up structured output responses - remove end tokens
+        if req.structured_outputs and req.structured_outputs.json:
+            full_content = full_content.strip()
+            for token in ["<|im_end|>", "<|endoftext|>", "</s>"]:
+                if token in full_content:
+                    full_content = full_content.split(token)[0].strip()
+
         return ChatResponseModel(
             id=nonce,
             choices=[
