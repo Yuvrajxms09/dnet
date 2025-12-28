@@ -115,7 +115,6 @@ class HTTPServer:
             ],
         )
 
-
     async def chat_completions(self, req: ChatRequestModel):
         if not self.model_manager.current_model_id:
             from fastapi import HTTPException, status
@@ -126,6 +125,7 @@ class HTTPServer:
             )
 
         if req.stream:
+
             async def stream_generator():
                 async for chunk in self.inference_manager.generate_stream(req):
                     data = chunk.model_dump_json(exclude_none=True)

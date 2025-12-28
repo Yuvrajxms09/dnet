@@ -23,7 +23,7 @@ class OffloadPolicy(ComputePolicy):
     Policy for offloading weights or sliding window fit.
     Handles 'offload' and 'sliding_fit' modes.
     """
-    
+
     # Cache grammar states by nonce to maintain state across token generations
     # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
     # See: _kv_by_nonce pattern in runtime.py
@@ -337,7 +337,7 @@ class OffloadPolicy(ComputePolicy):
                                 y = self.runtime.model.lm_project(y)
 
                             grammar_schema = getattr(msg, "grammar_json_schema", None)
-                            
+
                             decoding_config = DecodingConfig(
                                 temperature=msg.temperature,
                                 top_p=msg.top_p,
@@ -355,18 +355,28 @@ class OffloadPolicy(ComputePolicy):
                                 if nonce in OffloadPolicy._grammar_states:
                                     grammar_state = OffloadPolicy._grammar_states[nonce]
                                     # Check if grammar state was already terminated - if so, don't reuse it
-                                    if grammar_state is not None and getattr(grammar_state, '_terminated', False):
-                                        logger.debug(f"Grammar state for nonce {nonce} already terminated, removing from cache")
+                                    if grammar_state is not None and getattr(
+                                        grammar_state, "_terminated", False
+                                    ):
+                                        logger.debug(
+                                            f"Grammar state for nonce {nonce} already terminated, removing from cache"
+                                        )
                                         del OffloadPolicy._grammar_states[nonce]
                                         grammar_state = None
-                                
+
                                 if grammar_state is None:
                                     tokenizer = getattr(self.runtime, "tokenizer", None)
-                                    model_vocab_size = y.shape[-1] if hasattr(y, 'shape') else None
+                                    model_vocab_size = (
+                                        y.shape[-1] if hasattr(y, "shape") else None
+                                    )
                                     if tokenizer:
-                                        grammar_state = Sampler.create_grammar_state(grammar_schema, tokenizer, model_vocab_size)
+                                        grammar_state = Sampler.create_grammar_state(
+                                            grammar_schema, tokenizer, model_vocab_size
+                                        )
                                         if grammar_state:
-                                            OffloadPolicy._grammar_states[nonce] = grammar_state
+                                            OffloadPolicy._grammar_states[nonce] = (
+                                                grammar_state
+                                            )
 
                             result = Sampler.sample(
                                 logits=y,

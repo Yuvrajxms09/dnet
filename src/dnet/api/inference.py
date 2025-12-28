@@ -4,7 +4,7 @@ import uuid
 import json
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List
 from builtins import aiter, anext
 from dnet.core.tensor import to_bytes
 
@@ -22,7 +22,6 @@ from .model_manager import ModelManager
 from .strategies.base import ApiAdapterBase
 from dnet.core.decoding.config import DecodingConfig
 from dnet.utils.logger import logger
-
 
 
 async def arange(count: int):
@@ -67,7 +66,6 @@ class InferenceManager:
         await self.adapter.connect_first_shard(first_shard_ip, first_shard_port)
         self._api_callback_addr = api_callback_addr
 
-
     async def generate_stream(self, req: ChatRequestModel):
         """Generator for chat completion chunks."""
         logger.debug(f"generate_stream called: model={req.model}")
@@ -80,7 +78,10 @@ class InferenceManager:
         tokenizer = self.model_manager.tokenizer
 
         try:
-            if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
+            if (
+                hasattr(tokenizer, "chat_template")
+                and tokenizer.chat_template is not None
+            ):
                 # Convert messages to dict format
                 message_dicts = []
                 for m in req.messages:
@@ -93,10 +94,14 @@ class InferenceManager:
                     tokenize=False,
                 )
             else:
-                prompt_text = "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
+                prompt_text = (
+                    "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
+                )
         except Exception as e:
             logger.warning(f"Failed to apply chat template: {e}, using fallback")
-            prompt_text = "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
+            prompt_text = (
+                "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
+            )
 
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
@@ -158,7 +163,9 @@ class InferenceManager:
                 top_p=req.top_p,
                 repetition_penalty=req.repetition_penalty,
                 min_p=req.min_p if hasattr(req, "min_p") else 0.0,
-                min_tokens_to_keep=req.min_tokens_to_keep if hasattr(req, "min_tokens_to_keep") else 1,
+                min_tokens_to_keep=req.min_tokens_to_keep
+                if hasattr(req, "min_tokens_to_keep")
+                else 1,
                 grammar_json_schema=grammar_json_schema,
             )
 
@@ -202,7 +209,9 @@ class InferenceManager:
                             token_logprobs=token_logprobs,
                             top_logprobs=top_logprobs_list,
                             tokens=[token],
-                        ) if req.logprobs else None,
+                        )
+                        if req.logprobs
+                        else None,
                         finish_reason=None,
                     )
                 ],
@@ -225,14 +234,14 @@ class InferenceManager:
         # (see: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tokenizer_utils.py)
         # So we strip them manually as a post-processing step
         SPECIAL_TOKENS_TO_STRIP = [
-            "<|im_end|>",       # Qwen, ChatML format
-            "<|im_start|>",     # Qwen, ChatML format
-            "<|endoftext|>",    # GPT/generic
-            "</s>",             # Llama, Mistral
-            "<|eot_id|>",       # Llama 3
-            "<|end|>",          # Phi
-            "<|assistant|>",    # Some chat templates
-            "<|user|>",         # Some chat templates
+            "<|im_end|>",  # Qwen, ChatML format
+            "<|im_start|>",  # Qwen, ChatML format
+            "<|endoftext|>",  # GPT/generic
+            "</s>",  # Llama, Mistral
+            "<|eot_id|>",  # Llama 3
+            "<|end|>",  # Phi
+            "<|assistant|>",  # Some chat templates
+            "<|user|>",  # Some chat templates
         ]
         for token in SPECIAL_TOKENS_TO_STRIP:
             final_text = final_text.replace(token, "")
@@ -249,8 +258,12 @@ class InferenceManager:
                 "ttfb_ms": round(((t_first_token or t_end) - t_start) * 1000.0, 3),
                 "token_gen_ms": round(gen_s * 1000.0, 3),
                 "tokens_generated": tokens_generated,
-                "tps_overall": round((tokens_generated / total_s) if tokens_generated else 0.0, 4),
-                "tps_decoding": round((tokens_generated / gen_s) if tokens_generated else 0.0, 4),
+                "tps_overall": round(
+                    (tokens_generated / total_s) if tokens_generated else 0.0, 4
+                ),
+                "tps_decoding": round(
+                    (tokens_generated / gen_s) if tokens_generated else 0.0, 4
+                ),
             }
 
         final_message = ChatMessage(
@@ -278,7 +291,6 @@ class InferenceManager:
                 total_tokens=len(prompt_tokens) + len(tokens),
             ),
         )
-
 
     async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
         """

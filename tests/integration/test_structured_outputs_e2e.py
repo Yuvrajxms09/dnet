@@ -8,7 +8,7 @@ Usage:
     uv run pytest tests/integration/test_structured_outputs_e2e.py -v
 
     # Test against remote server
-    BASE_URL=http://62.210.150.5:8080 uv run pytest tests/integration/test_structured_outputs_e2e.py -v
+    uv run pytest tests/integration/test_structured_outputs_e2e.py -v
 """
 
 import json
@@ -47,28 +47,31 @@ def wait_for_health(url: str, timeout: float = HEALTH_CHECK_TIMEOUT) -> bool:
         (
             {
                 "type": "object",
-                "properties": {"answer": {"type": "string"}, "count": {"type": "integer"}},
-                "required": ["answer"]
+                "properties": {
+                    "answer": {"type": "string"},
+                    "count": {"type": "integer"},
+                },
+                "required": ["answer"],
             },
-            "Give me a simple response with a count"
+            "Give me a simple response with a count",
         ),
         (
             {
                 "type": "object",
                 "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
-                "required": ["name"]
+                "required": ["name"],
             },
-            "Create a profile for a person"
+            "Create a profile for a person",
         ),
         (
             {
                 "type": "object",
                 "properties": {"items": {"type": "array", "items": {"type": "string"}}},
-                "required": ["items"]
+                "required": ["items"],
             },
-            "List three fruits"
-        )
-    ]
+            "List three fruits",
+        ),
+    ],
 )
 def test_structured_outputs_end_to_end(schema: dict[str, Any], prompt: str) -> None:
     """Test that structured outputs produce valid JSON conforming to schema."""
@@ -80,13 +83,11 @@ def test_structured_outputs_end_to_end(schema: dict[str, Any], prompt: str) -> N
         "messages": [{"role": "user", "content": prompt}],
         "structured_outputs": {"json": schema},
         "max_tokens": 500,
-        "temperature": 0.1
+        "temperature": 0.1,
     }
 
     response = requests.post(
-        f"{BASE_URL}/v1/chat/completions",
-        json=payload,
-        timeout=INFERENCE_TIMEOUT
+        f"{BASE_URL}/v1/chat/completions", json=payload, timeout=INFERENCE_TIMEOUT
     )
     assert response.status_code == 200, f"Request failed: {response.text}"
 
@@ -104,7 +105,9 @@ def test_structured_outputs_end_to_end(schema: dict[str, Any], prompt: str) -> N
 
     # Verify it matches the schema requirements
     for required_field in schema.get("required", []):
-        assert required_field in parsed, f"Required field '{required_field}' missing from response"
+        assert required_field in parsed, (
+            f"Required field '{required_field}' missing from response"
+        )
 
     # Basic type checking for properties
     properties = schema.get("properties", {})
@@ -112,8 +115,14 @@ def test_structured_outputs_end_to_end(schema: dict[str, Any], prompt: str) -> N
         if field_name in parsed:
             field_type = field_schema.get("type")
             if field_type == "string":
-                assert isinstance(parsed[field_name], str), f"Field '{field_name}' should be string"
+                assert isinstance(parsed[field_name], str), (
+                    f"Field '{field_name}' should be string"
+                )
             elif field_type == "integer":
-                assert isinstance(parsed[field_name], int), f"Field '{field_name}' should be integer"
+                assert isinstance(parsed[field_name], int), (
+                    f"Field '{field_name}' should be integer"
+                )
             elif field_type == "array":
-                assert isinstance(parsed[field_name], list), f"Field '{field_name}' should be array"
+                assert isinstance(parsed[field_name], list), (
+                    f"Field '{field_name}' should be array"
+                )

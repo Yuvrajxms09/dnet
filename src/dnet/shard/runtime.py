@@ -282,16 +282,24 @@ class ShardRuntime:
                     int(has_end),
                     int(tied),
                 )
-            
+
             # Load tokenizer for grammar-constrained generation (only on end shard)
             if has_end:
                 try:
                     from transformers import AutoTokenizer
+
                     tok_dir = resolve_tokenizer_dir(self.model_path)
                     self.tokenizer = AutoTokenizer.from_pretrained(tok_dir)
-                    logger.info("Runtime %s: loaded HuggingFace tokenizer for grammar support", self.shard_id)
+                    logger.info(
+                        "Runtime %s: loaded HuggingFace tokenizer for grammar support",
+                        self.shard_id,
+                    )
                 except Exception as e:
-                    logger.warning("Runtime %s: failed to load tokenizer for grammar: %s", self.shard_id, e)
+                    logger.warning(
+                        "Runtime %s: failed to load tokenizer for grammar: %s",
+                        self.shard_id,
+                        e,
+                    )
         except Exception as e:
             logger.warning(
                 "Runtime %s: failed to load API‑layer weights: %s", self.shard_id, e

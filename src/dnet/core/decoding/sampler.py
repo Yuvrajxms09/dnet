@@ -1,6 +1,6 @@
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, Tuple, Dict
+from typing import Optional, Any, Dict
 from mlx_lm.sample_utils import make_sampler
 from dnet.core.types.messages import TokenResult
 from dnet.core.decoding.config import DecodingConfig
@@ -9,14 +9,21 @@ from dnet.utils.logger import logger
 
 class GrammarState:
     """Holds Outlines grammar state for a single generation session.
-    
+
     Uses Outlines' FSM-based approach for constrained JSON generation.
     Replaces the previous xgrammar implementation.
     """
-    
-    def __init__(self, guide, index, bitmask_allocator, vocab_size: int, eos_token_id: Optional[int] = None):
+
+    def __init__(
+        self,
+        guide,
+        index,
+        bitmask_allocator,
+        vocab_size: int,
+        eos_token_id: Optional[int] = None,
+    ):
         """Initialize grammar state with Outlines Guide.
-        
+
         Args:
             guide: Outlines Guide instance for tracking FSM state
             index: Outlines Index for the compiled regex/grammar
@@ -31,37 +38,38 @@ class GrammarState:
         self._eos_token_id = eos_token_id
         self._bitmask = None
         self._terminated = False  # Track termination state - once True, always True
-    
+
     def get_bitmask(self):
         """Get or create the token bitmask."""
         if self._bitmask is None:
             self._bitmask = self.bitmask_allocator(self.vocab_size)
         return self._bitmask
-    
+
     def fill_next_token_bitmask(self):
         """Fill bitmask with allowed tokens for current state.
-        
+
         Returns None if already terminated to prevent further token generation.
         """
         # Don't fill bitmask if already terminated
         if self._terminated:
             return None
-        
+
         from outlines_core.kernels.mlx import fill_next_token_bitmask
+
         bitmask = self.get_bitmask()
         fill_next_token_bitmask(self.guide, bitmask)
         return bitmask
-    
+
     def accept_token(self, token_id: int) -> None:
         """Accept a token and advance the grammar state.
-        
+
         IMPORTANT: Do NOT advance if guide is already finished or terminated, even if it accepts tokens.
         This prevents the guide from restarting/continuing after JSON completion.
         """
         # Never advance if we've already been terminated
         if self._terminated:
             return
-        
+
         # Only advance if NOT finished - once finished, we should stop
         # The accepts_tokens check was allowing continuation after completion
         if not self.guide.is_finished():
@@ -69,39 +77,39 @@ class GrammarState:
         else:
             # Guide is finished - mark as terminated to prevent further advancement
             self._terminated = True
-    
+
     def is_terminated(self) -> bool:
         """Check if the grammar has reached a final/accepting state.
-        
+
         For JSON schemas, this should return True when we've generated
         a complete valid JSON object and are in a final accepting state.
-        
+
         Important: This should be checked BEFORE accepting the next token
         to prevent generating beyond the valid JSON structure.
-        
+
         Once terminated, always returns True to prevent duplication.
         """
         # If we've already been terminated, always return True
         # This prevents the guide from resetting/continuing after completion
         if self._terminated:
             return True
-        
+
         # Primary check: is the guide finished?
         if not self.guide.is_finished():
             return False
-        
+
         # When finished, verify we're in a final accepting state of the FSM
         # This ensures we've completed a valid JSON structure
         try:
             current_state = self.guide.get_state()
             is_final = self.index.is_final_state(current_state)
-            
+
             if is_final:
                 # We're in a final state - mark as terminated and return True
                 # Once terminated, we'll always return True on subsequent checks
                 self._terminated = True
                 return True
-            
+
             # If guide is finished but not in final state, still mark as terminated
             # This is a safety measure - if the guide says it's finished, we should stop
             # The issue was that we were returning False here, allowing continuation
@@ -139,10 +147,10 @@ class Sampler:
     @staticmethod
     def _get_or_create_vocabulary(tokenizer, vocab_size: int):
         """Get or create Outlines Vocabulary from tokenizer.
-        
+
         Caches vocabulary by tokenizer to avoid recomputation.
         Validates that vocab_size matches tokenizer's actual vocabulary size.
-        
+
         Args:
             tokenizer: HuggingFace tokenizer
             vocab_size: Expected vocabulary size (from model logits or tokenizer.vocab_size)
@@ -150,14 +158,14 @@ class Sampler:
         cache_key = id(tokenizer)
         if cache_key in Sampler._vocabulary_cache:
             return Sampler._vocabulary_cache[cache_key]
-        
+
         try:
             from outlines_core import Vocabulary
-            
+
             # Get vocabulary dict from tokenizer
             vocab = tokenizer.get_vocab()
             actual_vocab_size = len(vocab)
-            
+
             # Validate vocab_size matches actual tokenizer vocab size
             # This is important for bitmask allocation - it must match logits shape
             if vocab_size != actual_vocab_size:
@@ -166,10 +174,10 @@ class Sampler:
                     f"but tokenizer has {actual_vocab_size} tokens. "
                     f"Using model vocab_size {vocab_size} for bitmask allocation."
                 )
-            
+
             eos_token_id = tokenizer.eos_token_id
             eos_token = tokenizer.eos_token or tokenizer.decode([eos_token_id])
-            
+
             # Build formatted vocabulary for Outlines
             # Need to convert token strings to their actual string representation
             formatted_vocab = {}
@@ -188,97 +196,97 @@ class Sampler:
                         formatted_vocab[token] = [token_id]
                     else:
                         formatted_vocab[token].append(token_id)
-            
+
             # Remove EOS token from vocab (Outlines handles it separately)
             formatted_vocab.pop(eos_token, None)
-            
+
             vocabulary = Vocabulary(eos_token_id, formatted_vocab)
             Sampler._vocabulary_cache[cache_key] = vocabulary
-            
+
             logger.debug(
                 f"Created Outlines vocabulary: {len(formatted_vocab)} entries, "
                 f"vocab_size={vocab_size}, actual_tokenizer_size={actual_vocab_size}"
             )
             return vocabulary
-            
+
         except Exception as e:
             logger.warning(f"Failed to create Outlines vocabulary: {e}")
             import traceback
+
             logger.debug(traceback.format_exc())
             return None
 
     @staticmethod
-    def create_grammar_state(json_schema: str, tokenizer, model_vocab_size: Optional[int] = None) -> Optional[GrammarState]:
+    def create_grammar_state(
+        json_schema: str, tokenizer, model_vocab_size: Optional[int] = None
+    ) -> Optional[GrammarState]:
         """Create a grammar state for JSON schema constrained generation.
-        
+
         Uses Outlines to compile JSON schema into an FSM-based grammar guide.
-        
+
         Args:
             json_schema: JSON schema string to constrain generation
             tokenizer: HuggingFace tokenizer for the model
             model_vocab_size: Optional vocab size override
-            
+
         Returns:
             GrammarState instance or None if creation fails
         """
         if not json_schema:
             return None
-            
+
         try:
             from outlines_core import Index, Guide
             from outlines_core.outlines_core import json_schema as oc_json_schema
             from outlines_core.kernels.mlx import allocate_token_bitmask
-            
+
             # Get vocab_size: prefer model_vocab_size (from logits shape) over tokenizer.vocab_size
-            #   - model_vocab_size comes from logits.shape[-1] (most accurate, matches actual model)
-            #   - tokenizer.vocab_size is fallback (may differ if model was extended)
-            # The vocab_size is critical for bitmask allocation - must match logits shape
-            vocab_size = model_vocab_size or getattr(tokenizer, 'vocab_size', None)
+            vocab_size = model_vocab_size or getattr(tokenizer, "vocab_size", None)
             if vocab_size is None:
                 logger.warning("Could not determine vocab size for grammar state")
                 return None
-            
+
             # Log which source we used for debugging
             if model_vocab_size:
                 logger.debug(f"Using model_vocab_size={vocab_size} (from logits shape)")
             else:
-                tokenizer_vocab_size = getattr(tokenizer, 'vocab_size', None)
                 logger.debug(f"Using tokenizer.vocab_size={vocab_size} (fallback)")
-            
+
             # Build regex pattern from JSON schema
             regex_pattern = oc_json_schema.build_regex_from_schema(json_schema)
             logger.debug(f"Built regex from JSON schema (length: {len(regex_pattern)})")
-            
+
             # Get or create vocabulary
             vocabulary = Sampler._get_or_create_vocabulary(tokenizer, vocab_size)
             if vocabulary is None:
                 logger.warning("Failed to create vocabulary for grammar state")
                 return None
-            
+
             # Create Index from regex and vocabulary
             index = Index(regex_pattern, vocabulary)
-            
+
             # Create Guide from Index
             guide = Guide(index)
-            
+
             # Get EOS token ID for forced termination when grammar completes
-            eos_token_id = getattr(tokenizer, 'eos_token_id', None)
-            
+            eos_token_id = getattr(tokenizer, "eos_token_id", None)
+
             logger.debug("Successfully created Outlines grammar state")
             return GrammarState(
                 guide=guide,
                 index=index,
                 bitmask_allocator=allocate_token_bitmask,
                 vocab_size=vocab_size,
-                eos_token_id=eos_token_id
+                eos_token_id=eos_token_id,
             )
-            
+
         except ImportError as e:
             logger.warning(f"Outlines not installed or import error: {e}")
             return None
         except Exception as e:
             logger.warning(f"Failed to create grammar state: {e}")
             import traceback
+
             logger.debug(traceback.format_exc())
             return None
 
@@ -293,7 +301,7 @@ class Sampler:
         """
         Sample a token from logits using the provided configuration.
         If grammar_state is provided, applies grammar constraints before sampling.
-        
+
         Uses Outlines' FSM-based approach for constrained generation.
         """
         sampler_fn = make_sampler(
@@ -318,10 +326,10 @@ class Sampler:
         if grammar_state is not None:
             try:
                 from outlines_core.kernels.mlx import apply_token_bitmask
-                
+
                 # Fill bitmask with allowed tokens for current grammar state
                 bitmask = grammar_state.fill_next_token_bitmask()
-                
+
                 if bitmask is not None:
                     # Apply bitmask to logits (sets disallowed tokens to -inf)
                     # Outlines MLX kernel expects 2D input [batch, vocab]
@@ -330,16 +338,17 @@ class Sampler:
                     v = v_masked[0] if v_masked.ndim == 2 else v_masked
                 else:
                     # Grammar is exhausted - mask all tokens
-                    v = mx.full_like(v, float('-inf'))
-                
+                    v = mx.full_like(v, float("-inf"))
+
             except Exception as e:
                 logger.warning(f"Failed to apply grammar mask: {e}")
                 import traceback
+
                 logger.debug(traceback.format_exc())
 
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
-        
+
         # Update grammar state with accepted token
         if grammar_state is not None:
             try:
@@ -347,6 +356,7 @@ class Sampler:
             except Exception as e:
                 logger.warning(f"Failed to accept token in grammar: {e}")
                 import traceback
+
                 logger.debug(traceback.format_exc())
 
         logprob = 0.0

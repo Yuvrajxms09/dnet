@@ -348,13 +348,14 @@ def test_structured_outputs_invalid_json_schema():
 
     # Not JSON serializable
     with pytest.raises(ValidationError):
-        StructuredOutputsParams(json={"key": set([1, 2, 3])})  # sets aren't JSON serializable
-
-
+        StructuredOutputsParams(
+            json={"key": set([1, 2, 3])}
+        )  # sets aren't JSON serializable
 
 
 def test_structured_outputs_inference_integration():
     """Test that structured outputs work in the inference flow."""
+
     async def main():
         tok = FakeTokenizer()
         mm = FakeModelManager(tok)
@@ -381,8 +382,9 @@ def test_structured_outputs_inference_integration():
         ad.queue_token(nonce, FakeTokenResult(tok.eos_token_id))
         c1 = await agen.__anext__()
         assert c1.choices[0].delta.content == "t1"
-        assert ad.sent[0]["decoding_config"].grammar_json_schema == '{"type": "object", "properties": {"answer": {"type": "string"}}}'
+        assert (
+            ad.sent[0]["decoding_config"].grammar_json_schema
+            == '{"type": "object", "properties": {"answer": {"type": "string"}}}'
+        )
 
     asyncio.run(main())
-
-

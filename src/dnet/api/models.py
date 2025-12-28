@@ -45,6 +45,7 @@ class StructuredOutputsParams(BaseModel):
             raise ValueError("JSON schema must have a 'type' field")
         try:
             import json
+
             json.dumps(v)
         except (TypeError, ValueError) as e:
             raise ValueError(f"JSON schema must be JSON serializable: {e}")
@@ -103,7 +104,9 @@ class ChatParams(BaseModel):
     # prediction: NOT USED
     # presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
     # prompt_cache_key: Optional[str] = Field(default=None)  # NOTE: unused
-    structured_outputs: Optional[StructuredOutputsParams] = Field(default=None)  # Structured output parameters for grammar-constrained generation
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
+        default=None
+    )  # Structured output parameters for grammar-constrained generation
     # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
     # service_tier: Optional[str] = Field(default=None)  # NOTE: unused
     stop: Union[str, List[str]] = Field(default_factory=list)
@@ -147,7 +150,6 @@ class ChatParams(BaseModel):
         if v != -1 and not (0 < v <= 10):
             raise ValueError(f"logprobs must be between 1 and 10 but got {v:,}")
         return v
-
 
 
 class ChatUsage(BaseModel):
