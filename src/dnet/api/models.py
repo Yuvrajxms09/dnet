@@ -107,6 +107,9 @@ class ChatParams(BaseModel):
     structured_outputs: Optional[StructuredOutputsParams] = Field(
         default=None
     )  # Structured output parameters for grammar-constrained generation
+    response_format: Optional[Dict[str, Any]] = Field(
+        default=None
+    )  # OpenAI-compatible response format (json_schema, etc.)
     # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
     # service_tier: Optional[str] = Field(default=None)  # NOTE: unused
     stop: Union[str, List[str]] = Field(default_factory=list)

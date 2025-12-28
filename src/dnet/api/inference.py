@@ -16,6 +16,7 @@ from .models import (
     ChatUsage,
     ChatCompletionReason,
     ChatLogProbs,
+    StructuredOutputsParams,
 )
 from .cluster import ClusterManager
 from .model_manager import ModelManager
@@ -112,6 +113,11 @@ class InferenceManager:
                 stop_id_sequences.append(
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
+
+        # Convert OpenAI response_format to internal structured_outputs format
+        if req.response_format and req.response_format.get("type") == "json_schema":
+            json_schema = req.response_format["json_schema"]["schema"]
+            req.structured_outputs = StructuredOutputsParams(json=json_schema)
 
         # Get grammar JSON schema for structured output
         grammar_json_schema = None
