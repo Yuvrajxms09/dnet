@@ -81,7 +81,7 @@ class ChatParams(BaseModel):
     # prediction: NOT USED
     # presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
     # prompt_cache_key: Optional[str] = Field(default=None)  # NOTE: unused
-    response_format: Optional[Union[Dict[str, Any], str]] = Field(default=None)  # For structured outputs (JSON schema)
+    response_format: Optional[Union[Dict[str, Any], str]] = Field(default=None)  # For structured outputs - supports OpenAI format {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}} and custom format {"schema": {...}}
     grammar_json_schema: Optional[str] = Field(default=None)  # Direct JSON schema string for grammar-constrained generation
     # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
     # service_tier: Optional[str] = Field(default=None)  # NOTE: unused

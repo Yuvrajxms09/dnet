@@ -127,10 +127,17 @@ class InferenceManager:
             grammar_json_schema = req.grammar_json_schema
         elif hasattr(req, "response_format") and req.response_format:
             if isinstance(req.response_format, dict):
-                if "schema" in req.response_format:
-                    grammar_json_schema = json.dumps(req.response_format["schema"])
+                # Handle OpenAI's structured output format
+                if req.response_format.get("type") == "json_schema":
+                    json_schema_obj = req.response_format.get("json_schema", {})
+                    if "schema" in json_schema_obj:
+                        grammar_json_schema = json.dumps(json_schema_obj["schema"])
+                # Handle OpenAI's basic JSON format
                 elif req.response_format.get("type") == "json_object":
                     grammar_json_schema = json.dumps({"type": "object"})
+                # Handle custom format (backward compatibility)
+                elif "schema" in req.response_format:
+                    grammar_json_schema = json.dumps(req.response_format["schema"])
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
