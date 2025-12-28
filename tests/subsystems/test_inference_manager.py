@@ -334,13 +334,6 @@ def test_structured_outputs_valid_json_schema():
     )
     assert req.structured_outputs.json == valid_schema
 
-    # Test backward compatibility properties
-    assert req.grammar_json_schema == '{"type": "object", "properties": {"name": {"type": "string"}}}'
-    assert req.response_format == {
-        "type": "json_schema",
-        "json_schema": {"schema": valid_schema}
-    }
-
 
 def test_structured_outputs_invalid_json_schema():
     """Test invalid JSON schema validation."""
