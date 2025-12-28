@@ -318,10 +318,10 @@ class Sampler:
         if grammar_state is not None:
             try:
                 from outlines_core.kernels.mlx import apply_token_bitmask
-
+                
                 # Fill bitmask with allowed tokens for current grammar state
                 bitmask = grammar_state.fill_next_token_bitmask()
-
+                
                 if bitmask is not None:
                     # Apply bitmask to logits (sets disallowed tokens to -inf)
                     # Outlines MLX kernel expects 2D input [batch, vocab]
@@ -331,7 +331,7 @@ class Sampler:
                 else:
                     # Grammar is exhausted - mask all tokens
                     v = mx.full_like(v, float('-inf'))
-
+                
             except Exception as e:
                 logger.warning(f"Failed to apply grammar mask: {e}")
                 import traceback
@@ -339,7 +339,7 @@ class Sampler:
 
         token_tensor = sampler_fn(v)
         token_id = int(token_tensor.item())
-
+        
         # Update grammar state with accepted token
         if grammar_state is not None:
             try:

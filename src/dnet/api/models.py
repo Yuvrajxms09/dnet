@@ -29,6 +29,28 @@ class ChatCompletionReason(str, Enum):
     STOP = "stop"
 
 
+class StructuredOutputsParams(BaseModel):
+    """Parameters for structured output generation."""
+
+    json: Optional[Dict[str, Any]] = Field(default=None)
+
+    @field_validator("json")
+    @classmethod
+    def validate_json_schema(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("JSON schema must be a dictionary")
+        if "type" not in v:
+            raise ValueError("JSON schema must have a 'type' field")
+        try:
+            import json
+            json.dumps(v)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"JSON schema must be JSON serializable: {e}")
+        return v
+
+
 class RingInferenceError(BaseModel):
     """Error response for ring inference."""
 
@@ -81,8 +103,7 @@ class ChatParams(BaseModel):
     # prediction: NOT USED
     # presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
     # prompt_cache_key: Optional[str] = Field(default=None)  # NOTE: unused
-    response_format: Optional[Union[Dict[str, Any], str]] = Field(default=None)  # For structured outputs - supports OpenAI format {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}} and custom format {"schema": {...}}
-    grammar_json_schema: Optional[str] = Field(default=None)  # Direct JSON schema string for grammar-constrained generation
+    structured_outputs: Optional[StructuredOutputsParams] = Field(default=None)  # Structured output parameters for grammar-constrained generation
     # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
     # service_tier: Optional[str] = Field(default=None)  # NOTE: unused
     stop: Union[str, List[str]] = Field(default_factory=list)
@@ -126,6 +147,7 @@ class ChatParams(BaseModel):
         if v != -1 and not (0 < v <= 10):
             raise ValueError(f"logprobs must be between 1 and 10 but got {v:,}")
         return v
+
 
 
 class ChatUsage(BaseModel):
@@ -310,7 +332,7 @@ class ListModelsResponseModel(BaseModel):
     data: List[ModelObject]
 
 
-type RetrieveModelResponseModel = ModelObject
+RetrieveModelResponseModel = ModelObject
 
 
 # ------------------------
