@@ -1,0 +1,26 @@
+name: dnet
+description: Distributed LLM inference exposed via MCP
+version: 0.0.2
+
+mcp:
+  command: uv
+  args:
+    - run
+    - dnet-mcp
+  transport: stdio
+
+tools:
+  - name: prepare_topology
+    description: Discover devices and compute optimal layer distribution
+  - name: load_model
+    description: Load a model across the dnet cluster
+  - name: chat_completion
+    description: Generate text using distributed LLM inference
+  - name: unload_model
+    description: Unload the currently loaded model to free memory
+  - name: list_models
+    description: List all available models in the dnet catalog
+  - name: get_status
+    description: Get the current status of dnet
+  - name: get_cluster_details
+    description: Get detailed cluster information including devices and topology

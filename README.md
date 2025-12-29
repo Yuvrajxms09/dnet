@@ -236,11 +236,28 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-#### MCP Integration
+## MCP Server
 
-dnet exposes an MCP server at `/mcp` for use with Claude Desktop, Cursor, and other MCP clients.
+This repository exposes dnet as an MCP server for agent-based usage.
 
-Add this to your MCP config:
+### Run
+```bash
+uv sync --extra mac
+uv run dnet-mcp
+```
+
+### Tools
+
+- `chat_completion(messages, model, temperature, max_tokens, top_p, top_k, stop, repetition_penalty)` - Generate text using distributed LLM inference
+- `load_model(model, kv_bits, seq_len)` - Load a model across the dnet cluster
+- `unload_model()` - Unload the currently loaded model to free memory
+- `list_models()` - List all available models in the dnet catalog
+- `get_status()` - Get the current status of dnet
+- `get_cluster_details()` - Get detailed cluster information
+
+### Integration with Claude Desktop, Cursor, etc.
+
+dnet also exposes an MCP server at `/mcp` endpoint for HTTP-based MCP clients:
 
 ```json
 {
@@ -257,8 +274,6 @@ Add this to your MCP config:
   }
 }
 ```
-
-Available tools: `chat_completion`, `load_model`, `unload_model`, `list_models`, `get_status`, `get_cluster_details`.
 
 #### Devices
 

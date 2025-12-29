@@ -1,0 +1,14 @@
+logs/
+tests/
+misc/
+.github/
+.vscode/
+*.pyc
+__pycache__/
+*.egg-info/
+build/
+dist/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
