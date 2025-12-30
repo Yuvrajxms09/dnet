@@ -1043,6 +1043,98 @@ Important: Only output JSON when you actually want to call tools. For normal res
         """Get currently bound tools."""
         return self._bound_tools.copy()
 
+    def register_mcp_tools(self, transport: str, namespace: Optional[str] = None) -> bool:
+        """Register tools from an MCP server dynamically.
+
+        Args:
+            transport: MCP transport URL or path (e.g., "https://exa-mcp.com", "path/to/server.py")
+            namespace: Optional namespace prefix for tool names
+
+        Returns:
+            bool: True if registration successful
+        """
+        logger.info(f"🔗 Attempting MCP tool registration from: {transport}")
+        logger.debug(f"🏷️ Using namespace: {namespace}")
+
+        if not TOOL_REGISTRY_AVAILABLE:
+            logger.error("❌ ToolRegistry library not installed")
+            return False
+
+        if not self._tool_registry:
+            logger.error("❌ ToolRegistry not initialized")
+            return False
+
+        try:
+            logger.debug("📡 Calling ToolRegistry.register_from_mcp()...")
+            # Register MCP tools using ToolRegistry
+            self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
+
+            # Get registered tools to verify
+            available_tools = self._tool_registry.get_available_tools()
+            logger.info(f"✅ Successfully registered MCP tools from {transport}")
+            logger.info(f"📋 Available tools: {len(available_tools)} total")
+            logger.debug(f"🛠️ Tool list: {available_tools}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to register MCP tools from {transport}: {e}")
+            logger.debug("MCP registration error details:", exc_info=True)
+            return False
+
+    def register_openapi_tools(self, openapi_spec: Union[str, Dict], client_config: Optional[Dict] = None) -> bool:
+        """Register tools from OpenAPI specification.
+
+        Args:
+            openapi_spec: OpenAPI spec as dict or URL/file path
+            client_config: HTTP client configuration
+
+        Returns:
+            bool: True if registration successful
+        """
+        if not TOOL_REGISTRY_AVAILABLE or not self._tool_registry:
+            logger.warning("ToolRegistry not available for OpenAPI tool registration")
+            return False
+
+        try:
+            # Register OpenAPI tools using ToolRegistry
+            if client_config:
+                # ToolRegistry expects HttpxClientConfig, but we'll pass dict for now
+                self._tool_registry.register_from_openapi(
+                    client_config=client_config,
+                    openapi_spec=openapi_spec
+                )
+            else:
+                # Try with just the spec
+                self._tool_registry.register_from_openapi(openapi_spec=openapi_spec)
+
+            logger.info(f"Successfully registered OpenAPI tools")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to register OpenAPI tools: {e}")
+            return False
+
+    def get_registered_tools(self) -> List[str]:
+        """Get list of all registered tool names."""
+        logger.debug("📋 Querying registered tools...")
+
+        if not TOOL_REGISTRY_AVAILABLE:
+            logger.debug("❌ ToolRegistry library not available")
+            return []
+
+        if not self._tool_registry:
+            logger.debug("❌ ToolRegistry not initialized")
+            return []
+
+        try:
+            tools = self._tool_registry.get_available_tools()
+            logger.debug(f"✅ Found {len(tools)} registered tools: {tools}")
+            return tools
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get registered tools: {e}")
+            logger.debug("Tool query error details:", exc_info=True)
+            return []
+
 
 class StructuredOutputInferenceManager:
     """
@@ -1184,7 +1276,7 @@ class StructuredOutputInferenceManager:
         """
         return StructuredOutputInferenceManager(self.inference_manager, schema)
 
-    def register_mcp_tools(self, transport: str, namespace: Optional[str] = None) -> bool:
+    def with_structured_output(self, schema: Any) -> 'StructuredOutputInferenceManager':
         """
         Create an inference manager that returns structured output (LangGraph-style).
 
@@ -1209,97 +1301,6 @@ class StructuredOutputInferenceManager:
         """
         return StructuredOutputInferenceManager(self, schema)
 
-    def register_mcp_tools(self, transport: str, namespace: Optional[str] = None) -> bool:
-        """Register tools from an MCP server dynamically.
-
-        Args:
-            transport: MCP transport URL or path (e.g., "https://exa-mcp.com", "path/to/server.py")
-            namespace: Optional namespace prefix for tool names
-
-        Returns:
-            bool: True if registration successful
-        """
-        logger.info(f"🔗 Attempting MCP tool registration from: {transport}")
-        logger.debug(f"🏷️ Using namespace: {namespace}")
-
-        if not TOOL_REGISTRY_AVAILABLE:
-            logger.error("❌ ToolRegistry library not installed")
-            return False
-
-        if not self._tool_registry:
-            logger.error("❌ ToolRegistry not initialized")
-            return False
-
-        try:
-            logger.debug("📡 Calling ToolRegistry.register_from_mcp()...")
-            # Register MCP tools using ToolRegistry
-            self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
-
-            # Get registered tools to verify
-            available_tools = self._tool_registry.get_available_tools()
-            logger.info(f"✅ Successfully registered MCP tools from {transport}")
-            logger.info(f"📋 Available tools: {len(available_tools)} total")
-            logger.debug(f"🛠️ Tool list: {available_tools}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Failed to register MCP tools from {transport}: {e}")
-            logger.debug("MCP registration error details:", exc_info=True)
-            return False
-
-    def register_openapi_tools(self, openapi_spec: Union[str, Dict], client_config: Optional[Dict] = None) -> bool:
-        """Register tools from OpenAPI specification.
-
-        Args:
-            openapi_spec: OpenAPI spec as dict or URL/file path
-            client_config: HTTP client configuration
-
-        Returns:
-            bool: True if registration successful
-        """
-        if not TOOL_REGISTRY_AVAILABLE or not self._tool_registry:
-            logger.warning("ToolRegistry not available for OpenAPI tool registration")
-            return False
-
-        try:
-            # Register OpenAPI tools using ToolRegistry
-            if client_config:
-                # ToolRegistry expects HttpxClientConfig, but we'll pass dict for now
-                self._tool_registry.register_from_openapi(
-                    client_config=client_config,
-                    openapi_spec=openapi_spec
-                )
-            else:
-                # Try with just the spec
-                self._tool_registry.register_from_openapi(openapi_spec=openapi_spec)
-
-            logger.info(f"Successfully registered OpenAPI tools")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to register OpenAPI tools: {e}")
-            return False
-
-    def get_registered_tools(self) -> List[str]:
-        """Get list of all registered tool names."""
-        logger.debug("📋 Querying registered tools...")
-
-        if not TOOL_REGISTRY_AVAILABLE:
-            logger.debug("❌ ToolRegistry library not available")
-            return []
-
-        if not self._tool_registry:
-            logger.debug("❌ ToolRegistry not initialized")
-            return []
-
-        try:
-            tools = self._tool_registry.get_available_tools()
-            logger.debug(f"✅ Found {len(tools)} registered tools: {tools}")
-            return tools
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get registered tools: {e}")
-            logger.debug("Tool query error details:", exc_info=True)
-            return []
 
     def resolve_request(self, nonce: str, result: Any):
         self.adapter.resolve_token(nonce, result)
