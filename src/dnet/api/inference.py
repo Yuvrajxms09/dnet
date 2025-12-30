@@ -356,9 +356,11 @@ class InferenceManager:
         available_tools = self._bound_tools or req.tools or []
         if available_tools:
             logger.info(f"🛠️ Tools available ({len(available_tools)}), attempting to parse tool calls")
-            tool_calls = self._parse_tool_calls_langchain_style(final_text)
-            if tool_calls:
-                logger.info(f"✅ Found {len(tool_calls)} tool calls in response")
+            parsed_calls = self._parse_tool_calls_langchain_style(final_text)
+            if parsed_calls:
+                logger.info(f"✅ Found {len(parsed_calls)} tool calls in response")
+                # Convert parsed dicts to ToolCall objects
+                tool_calls = self._convert_to_tool_call_objects(parsed_calls)
                 final_content = self._format_tool_call_response(final_text, tool_calls)
                 logger.debug(f"📝 Formatted response content (tool calls present)")
             else:
@@ -440,8 +442,13 @@ class InferenceManager:
         final_content = full_content
         available_tools = self._bound_tools or req.tools or []
         if available_tools:
-            tool_calls = self._parse_tool_calls_langchain_style(full_content)
-            final_content = self._format_tool_call_response(full_content, tool_calls) if tool_calls else full_content
+            parsed_calls = self._parse_tool_calls_langchain_style(full_content)
+            if parsed_calls:
+                # Convert parsed dicts to ToolCall objects
+                tool_calls = self._convert_to_tool_call_objects(parsed_calls)
+                final_content = self._format_tool_call_response(full_content, tool_calls)
+            else:
+                final_content = full_content
 
         return ChatResponseModel(
             id=nonce,
@@ -575,6 +582,62 @@ If you want to respond conversationally without using tools, use the "__conversa
         if tool_calls:
             return ""  # LangChain format: empty content when there are tool calls
         return content
+
+    def _convert_to_tool_call_objects(self, parsed_calls: List[Dict[str, Any]]) -> List[ToolCall]:
+        """Convert parsed tool call dicts (OpenAI format) to ToolCall Pydantic objects.
+        
+        OpenAI format:
+            {"id": "call_xxx", "type": "function", "function": {"name": "...", "arguments": "..."}}
+        
+        ToolCall format:
+            {"name": "...", "args": {...}, "id": "..."}
+        """
+        tool_calls = []
+        for call in parsed_calls:
+            try:
+                # Handle OpenAI format
+                if "function" in call:
+                    func = call.get("function", {})
+                    name = func.get("name", "")
+                    args_raw = func.get("arguments", "{}")
+                    
+                    # Parse arguments if string
+                    if isinstance(args_raw, str):
+                        try:
+                            args = json.loads(args_raw)
+                        except json.JSONDecodeError:
+                            args = {}
+                    else:
+                        args = args_raw or {}
+                    
+                    tool_call = ToolCall(
+                        name=name,
+                        args=args,
+                        id=call.get("id", f"call_{uuid.uuid4().hex[:8]}")
+                    )
+                    tool_calls.append(tool_call)
+                    
+                # Handle direct format (name, args already present)
+                elif "name" in call:
+                    args = call.get("args", call.get("arguments", {}))
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {}
+                    
+                    tool_call = ToolCall(
+                        name=call["name"],
+                        args=args,
+                        id=call.get("id", f"call_{uuid.uuid4().hex[:8]}")
+                    )
+                    tool_calls.append(tool_call)
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to convert tool call: {e}")
+                continue
+        
+        return tool_calls
 
     def _setup_tool_registry(self) -> Optional[ToolRegistry]:
         """Initialize ToolRegistry for MCP tool execution."""
