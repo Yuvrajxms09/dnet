@@ -978,43 +978,72 @@ Important: Only output JSON when you actually want to call tools. For normal res
         return results
     
     async def _execute_tool_calls_async(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Execute tool calls asynchronously using MCP client."""
+        """Execute tool calls asynchronously using MCP client or ToolRegistry."""
         logger.info(f"🔨 Starting async execution of {len(tool_calls)} tool calls")
 
-        if not MCP_CLIENT_AVAILABLE or not self._mcp_client:
-            logger.warning("⚠️ MCP client not available, falling back to sync execution")
-            return self._execute_tool_calls_simple(tool_calls)
+        has_mcp = MCP_CLIENT_AVAILABLE and self._mcp_client
+        has_registry = TOOL_REGISTRY_AVAILABLE and self._tool_registry
+        
+        if not has_mcp and not has_registry:
+            logger.error("❌ No tool execution backend available (MCP or ToolRegistry)")
+            return [{"tool_call_id": "error", "content": "No tool execution backend available", "success": False}]
+
+        mcp_tool_names = self._mcp_client.get_tool_names() if has_mcp else []
+        logger.debug(f"📋 Available MCP tools: {mcp_tool_names}")
 
         results = []
-        for tc in tool_calls:
+        for i, tc in enumerate(tool_calls):
             tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             func = tc.get("function", {})
             tool_name = func.get("name", "")
+            
+            logger.info(f"🔧 [{i+1}/{len(tool_calls)}] Executing tool: {tool_name}")
             
             # Parse arguments
             args_raw = func.get("arguments", "{}")
             if isinstance(args_raw, str):
                 try:
                     arguments = json.loads(args_raw)
-                except json.JSONDecodeError:
+                    logger.debug(f"   📝 Parsed arguments: {arguments}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"   ⚠️ Failed to parse arguments: {e}")
                     arguments = {}
             else:
                 arguments = args_raw
 
             try:
-                result = await self._mcp_client.execute_tool(tool_name, arguments)
+                result = None
+                
+                # Try MCP client first if tool is registered
+                if has_mcp and tool_name in mcp_tool_names:
+                    logger.debug(f"   🌐 Executing via MCP client")
+                    result = await self._mcp_client.execute_tool(tool_name, arguments)
+                # Fallback to ToolRegistry
+                elif has_registry:
+                    logger.debug(f"   📦 Executing via ToolRegistry")
+                    result = self._tool_registry.invoke(tool_name, **arguments)
+                else:
+                    raise ValueError(f"Tool '{tool_name}' not found. Available MCP tools: {mcp_tool_names}")
+                
+                result_str = str(result)
+                logger.info(f"   ✅ Success! Result: {len(result_str)} chars")
+                logger.debug(f"   📄 Preview: {result_str[:200]}...")
+                
                 results.append({
                     "tool_call_id": tool_id,
-                    "content": str(result),
+                    "content": result_str,
                     "success": True
                 })
             except Exception as e:
+                logger.error(f"   ❌ Tool '{tool_name}' failed: {e}")
                 results.append({
                     "tool_call_id": tool_id,
                     "content": f"Tool execution failed: {e}",
                     "success": False
                 })
 
+        successful = sum(1 for r in results if r.get('success'))
+        logger.info(f"📊 Tool execution complete: {successful}/{len(results)} successful")
         return results
 
     async def execute_tools_and_continue(self, req: ChatRequestModel) -> ChatResponseModel:
@@ -1051,7 +1080,7 @@ Important: Only output JSON when you actually want to call tools. For normal res
         ]
         logger.debug(f"🔄 Converted {len(tool_calls)} ToolCall objects to dict format")
 
-        tool_results = self._execute_tool_calls_simple(tool_calls_dict)
+        tool_results = await self._execute_tool_calls_async(tool_calls_dict)
 
         # Step 3: Create new conversation with tool results
         new_messages = req.messages.copy()
