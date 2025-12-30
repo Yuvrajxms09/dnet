@@ -1046,6 +1046,15 @@ Important: Only output JSON when you actually want to call tools. For normal res
         logger.info(f"📊 Tool execution complete: {successful}/{len(results)} successful")
         return results
 
+    async def _generate_single_completion(self, req: ChatRequestModel) -> ChatResponseModel:
+        """
+        Generate a single completion (non-streaming).
+        
+        This is a helper for agent-style execution that needs to make multiple
+        LLM calls in sequence.
+        """
+        return await self.chat_completions(req)
+
     async def execute_tools_and_continue(self, req: ChatRequestModel) -> ChatResponseModel:
         """
         Execute tools and continue conversation (for research use cases).
