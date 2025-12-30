@@ -1565,6 +1565,13 @@ Important: Only output JSON when you actually want to call tools. For normal res
         
         return tools
 
+    def resolve_request(self, nonce: str, result: Any):
+        """Resolve a pending request with the given result.
+        
+        Called by gRPC servicer when a token is received from a shard.
+        """
+        self.adapter.resolve_token(nonce, result)
+
 
 class StructuredOutputInferenceManager:
     """
@@ -1730,10 +1737,6 @@ class StructuredOutputInferenceManager:
             # Agent will call WeatherResponse tool with structured data when ready to respond
         """
         return StructuredOutputInferenceManager(self, schema)
-
-
-    def resolve_request(self, nonce: str, result: Any):
-        self.adapter.resolve_token(nonce, result)
 
 
 # Test function for structured output
