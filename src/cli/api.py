@@ -126,6 +126,22 @@ async def serve(
             logger.info("ℹ️ EXA_API_KEY not set, skipping Exa MCP registration")
             logger.info("   Set EXA_API_KEY environment variable to enable Exa tools")
         
+        # Register Semantic Scholar MCP (no API key required!)
+        # Provides: paper search, citations, abstracts, arXiv access
+        # See: https://smithery.ai/server/@hamid-vakilzadeh/mcpsemanticscholar
+        try:
+            semantic_scholar_url = "https://server.smithery.ai/@hamid-vakilzadeh/mcpsemanticscholar"
+            success = await inference_manager.register_mcp_http(
+                server_name="semantic-scholar",
+                url=semantic_scholar_url
+            )
+            if success:
+                logger.info("✅ Semantic Scholar MCP tools registered (no API key needed)")
+            else:
+                logger.warning("⚠️ Failed to register Semantic Scholar MCP tools")
+        except Exception as e:
+            logger.warning(f"Failed to register Semantic Scholar MCP tools: {e}")
+        
         # You can also register other MCP servers:
         # - GitHub: await inference_manager.register_mcp_preset("github")
         # - Brave Search: await inference_manager.register_mcp_preset("brave-search")

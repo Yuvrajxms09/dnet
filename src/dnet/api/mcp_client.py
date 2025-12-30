@@ -511,6 +511,19 @@ MCP_SERVER_PRESETS: Dict[str, Dict[str, Any]] = {
         "args": ["-y", "@modelcontextprotocol/server-fetch"],
         "transport": "stdio",
         "description": "HTTP fetch requests"
+    },
+    # Semantic Scholar - Remote HTTP (no API key required!)
+    # Tools: basic_search, advanced_search, search_paper, read_abstract, review_citations, etc.
+    "semantic-scholar": {
+        "transport": "http",
+        "url": "https://server.smithery.ai/@hamid-vakilzadeh/mcpsemanticscholar",
+        "description": "Academic paper search via Semantic Scholar & arXiv (no API key needed)"
+    },
+    # Arxiv - if available separately
+    "arxiv": {
+        "transport": "http",
+        "url": "https://server.smithery.ai/@hamid-vakilzadeh/mcpsemanticscholar",
+        "description": "Alias for semantic-scholar (includes arXiv access)"
     }
 }
 
