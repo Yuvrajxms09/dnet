@@ -5,12 +5,31 @@ import json
 import mlx.core as mx
 import numpy as np
 from typing import Optional, Any, List, Union, Dict
+
+# Try to import MCP client (our new implementation)
+try:
+    from .mcp_client import (
+        MCPToolClient, 
+        create_mcp_client_from_presets, 
+        create_mcp_client_from_config,
+        MCP_SERVER_PRESETS
+    )
+    MCP_CLIENT_AVAILABLE = True
+except ImportError:
+    MCP_CLIENT_AVAILABLE = False
+    MCPToolClient = None
+    create_mcp_client_from_presets = None
+    create_mcp_client_from_config = None
+    MCP_SERVER_PRESETS = {}
+
+# Fallback to toolregistry for backward compatibility
 try:
     from toolregistry import ToolRegistry
     TOOL_REGISTRY_AVAILABLE = True
 except ImportError:
     TOOL_REGISTRY_AVAILABLE = False
     ToolRegistry = None
+
 from builtins import aiter, anext
 from dnet.core.tensor import to_bytes
 
@@ -50,7 +69,7 @@ async def azip(*async_iterables):
 
 
 class InferenceManager:
-    """Inference manager for dnet with ToolRegistry integration.
+    """Inference manager for dnet with MCP and LangChain-style tool integration.
 
     Supports:
     - LangChain-style tool calling (prompting + robust parsing)
@@ -59,8 +78,16 @@ class InferenceManager:
     - OpenAI-compatible API responses
 
     Example:
-        # Register MCP tools
-        inference_manager.register_mcp_tools("https://exa-mcp.com", "exa")
+        # Register MCP tools using stdio transport (correct way)
+        await inference_manager.register_mcp_stdio(
+            server_name="exa",
+            command="npx",
+            args=["-y", "@anthropic-ai/exa-mcp-server"],
+            env={"EXA_API_KEY": "your-key"}
+        )
+
+        # Or use presets
+        await inference_manager.register_mcp_preset("exa")
 
         # Research with automatic tool execution
         response = await inference_manager.execute_tools_and_continue(request)
@@ -78,6 +105,14 @@ class InferenceManager:
         self.adapter = adapter
 
         self._api_callback_addr: str = ""
+        
+        # New MCP client (preferred)
+        self._mcp_client: Optional[MCPToolClient] = None
+        if MCP_CLIENT_AVAILABLE:
+            self._mcp_client = MCPToolClient()
+            logger.info("✅ MCPToolClient initialized for MCP tool integration")
+        
+        # Legacy toolregistry (fallback)
         self._tool_registry: Optional[ToolRegistry] = self._setup_tool_registry()
 
         # LangChain-compatible tool binding
@@ -789,11 +824,15 @@ Important: Only output JSON when you actually want to call tools. For normal res
         return candidates
 
     def _execute_tool_calls_simple(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Execute tool calls using ToolRegistry (professional implementation)."""
+        """Execute tool calls using MCP client or ToolRegistry."""
         logger.info(f"🔨 Starting execution of {len(tool_calls)} tool calls")
 
-        if not TOOL_REGISTRY_AVAILABLE or not self._tool_registry:
-            logger.error("❌ ToolRegistry not available for tool execution")
+        # Check if we have any execution capability
+        has_mcp = MCP_CLIENT_AVAILABLE and self._mcp_client
+        has_registry = TOOL_REGISTRY_AVAILABLE and self._tool_registry
+        
+        if not has_mcp and not has_registry:
+            logger.error("❌ No tool execution backend available")
             return []
 
         results = []
@@ -808,7 +847,7 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
             # Parse arguments
             args_raw = func.get("arguments", "{}")
-            logger.debug(f"📝 Raw arguments: {args_raw[:200]}...")
+            logger.debug(f"📝 Raw arguments: {str(args_raw)[:200]}...")
 
             if isinstance(args_raw, str):
                 try:
@@ -825,9 +864,31 @@ Important: Only output JSON when you actually want to call tools. For normal res
             logger.info(f"🚀 Executing tool: {tool_name} with {len(arguments)} args")
 
             try:
-                # Use ToolRegistry's professional execution
-                logger.debug(f"🔧 Calling ToolRegistry.invoke({tool_name}, **{arguments})")
-                result = self._tool_registry.invoke(tool_name, **arguments)
+                result = None
+                
+                # Try MCP client first
+                if has_mcp and tool_name in self._mcp_client.get_tool_names():
+                    logger.debug(f"🔧 Executing via MCP client: {tool_name}")
+                    # MCP client execution is async, need to run in event loop
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # We're in async context, create a task
+                        result = asyncio.create_task(
+                            self._mcp_client.execute_tool(tool_name, arguments)
+                        )
+                        # Wait for result (this might need adjustment based on context)
+                        result = asyncio.get_event_loop().run_until_complete(result)
+                    except RuntimeError:
+                        # No running loop, use asyncio.run
+                        result = asyncio.run(
+                            self._mcp_client.execute_tool(tool_name, arguments)
+                        )
+                # Fallback to ToolRegistry
+                elif has_registry:
+                    logger.debug(f"🔧 Executing via ToolRegistry: {tool_name}")
+                    result = self._tool_registry.invoke(tool_name, **arguments)
+                else:
+                    raise ValueError(f"Tool '{tool_name}' not found in any backend")
 
                 result_str = str(result)
                 logger.info(f"✅ Tool '{tool_name}' executed successfully (result: {len(result_str)} chars)")
@@ -851,6 +912,46 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 })
 
         logger.info(f"📊 Tool execution complete: {len(results)} results ({sum(1 for r in results if r['success'])} successful)")
+        return results
+    
+    async def _execute_tool_calls_async(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Execute tool calls asynchronously using MCP client."""
+        logger.info(f"🔨 Starting async execution of {len(tool_calls)} tool calls")
+
+        if not MCP_CLIENT_AVAILABLE or not self._mcp_client:
+            logger.warning("⚠️ MCP client not available, falling back to sync execution")
+            return self._execute_tool_calls_simple(tool_calls)
+
+        results = []
+        for tc in tool_calls:
+            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            
+            # Parse arguments
+            args_raw = func.get("arguments", "{}")
+            if isinstance(args_raw, str):
+                try:
+                    arguments = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    arguments = {}
+            else:
+                arguments = args_raw
+
+            try:
+                result = await self._mcp_client.execute_tool(tool_name, arguments)
+                results.append({
+                    "tool_call_id": tool_id,
+                    "content": str(result),
+                    "success": True
+                })
+            except Exception as e:
+                results.append({
+                    "tool_call_id": tool_id,
+                    "content": f"Tool execution failed: {e}",
+                    "success": False
+                })
+
         return results
 
     async def execute_tools_and_continue(self, req: ChatRequestModel) -> ChatResponseModel:
@@ -1043,111 +1144,348 @@ Important: Only output JSON when you actually want to call tools. For normal res
         """Get currently bound tools."""
         return self._bound_tools.copy()
 
-    def register_mcp_tools(self, transport: str, namespace: Optional[str] = None) -> bool:
-        """Register tools from an MCP server dynamically.
-
+    async def register_mcp_stdio(
+        self,
+        server_name: str,
+        command: str,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """Register MCP tools using stdio transport (spawns subprocess).
+        
+        This is the CORRECT way to register MCP tools. MCP uses stdio transport
+        which spawns a subprocess that communicates via stdin/stdout.
+        
+        Based on langchain-mcp-adapters:
+        https://github.com/langchain-ai/langchain-mcp-adapters
+        
         Args:
-            transport: MCP transport URL or path (e.g., "https://exa-mcp.com", "path/to/server.py")
+            server_name: Unique name for this MCP server (e.g., "exa", "github")
+            command: Command to run (e.g., "npx", "python", "node")
+            args: Arguments for the command (e.g., ["-y", "@anthropic-ai/exa-mcp-server"])
+            env: Environment variables (e.g., {"EXA_API_KEY": "..."})
+            
+        Returns:
+            bool: True if registration successful
+            
+        Example:
+            await manager.register_mcp_stdio(
+                server_name="exa",
+                command="npx",
+                args=["-y", "@anthropic-ai/exa-mcp-server"],
+                env={"EXA_API_KEY": os.getenv("EXA_API_KEY")}
+            )
+        """
+        logger.info(f"🔗 Registering MCP server '{server_name}' via stdio...")
+        
+        if not MCP_CLIENT_AVAILABLE:
+            logger.error("❌ MCP client not available. Install: pip install langchain-mcp-adapters mcp")
+            return False
+        
+        try:
+            # Create config for this server
+            config = {
+                server_name: {
+                    "command": command,
+                    "args": args or [],
+                    "transport": "stdio",
+                }
+            }
+            if env:
+                config[server_name]["env"] = env
+            
+            # Initialize or update MCP client
+            if self._mcp_client is None:
+                self._mcp_client = MCPToolClient(server_configs=config)
+            else:
+                self._mcp_client._server_configs.update(config)
+            
+            # Load tools from this server
+            tools = await self._mcp_client.load_tools()
+            
+            # Update bound tools with newly registered MCP tools
+            mcp_tools = self._mcp_client.get_tools_openai_format()
+            for tool in mcp_tools:
+                if tool not in self._bound_tools:
+                    self._bound_tools.append(tool)
+            
+            logger.info(f"✅ MCP server '{server_name}' registered successfully")
+            logger.info(f"📋 Total tools available: {len(self._bound_tools)}")
+            return True
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to register MCP server '{server_name}': {e}")
+            logger.debug("MCP registration error details:", exc_info=True)
+            return False
+    
+    async def register_mcp_http(
+        self,
+        server_name: str,
+        url: str,
+        headers: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """Register MCP tools using HTTP transport.
+        
+        This is the preferred transport for remote MCP servers.
+        
+        Args:
+            server_name: Unique name for this MCP server
+            url: Server URL (e.g., "http://localhost:8000/mcp")
+            headers: Optional HTTP headers (e.g., for authentication)
+            
+        Returns:
+            bool: True if registration successful
+            
+        Example:
+            await manager.register_mcp_http(
+                server_name="weather",
+                url="http://localhost:8000/mcp",
+                headers={"Authorization": "Bearer token"}
+            )
+        """
+        logger.info(f"🔗 Registering MCP server '{server_name}' via HTTP...")
+        
+        if not MCP_CLIENT_AVAILABLE:
+            logger.error("❌ MCP client not available")
+            return False
+        
+        try:
+            config = {
+                server_name: {
+                    "url": url,
+                    "transport": "http",
+                }
+            }
+            if headers:
+                config[server_name]["headers"] = headers
+            
+            if self._mcp_client is None:
+                self._mcp_client = MCPToolClient(server_configs=config)
+            else:
+                self._mcp_client._server_configs.update(config)
+            
+            tools = await self._mcp_client.load_tools()
+            
+            mcp_tools = self._mcp_client.get_tools_openai_format()
+            for tool in mcp_tools:
+                if tool not in self._bound_tools:
+                    self._bound_tools.append(tool)
+            
+            logger.info(f"✅ MCP server '{server_name}' (HTTP) registered successfully")
+            return True
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to register MCP server '{server_name}': {e}")
+            return False
+    
+    async def register_mcp_sse(
+        self,
+        server_name: str,
+        url: str,
+        headers: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """Register MCP tools using SSE (Server-Sent Events) transport.
+        
+        Note: HTTP transport is now preferred over SSE for remote servers.
+        
+        Args:
+            server_name: Unique name for this MCP server
+            url: SSE endpoint URL
+            headers: Optional HTTP headers (e.g., for authentication)
+            
+        Returns:
+            bool: True if registration successful
+        """
+        logger.info(f"🔗 Registering MCP server '{server_name}' via SSE...")
+        logger.info("   Note: HTTP transport is now preferred over SSE")
+        
+        if not MCP_CLIENT_AVAILABLE:
+            logger.error("❌ MCP client not available")
+            return False
+        
+        try:
+            config = {
+                server_name: {
+                    "url": url,
+                    "transport": "sse",
+                }
+            }
+            if headers:
+                config[server_name]["headers"] = headers
+            
+            if self._mcp_client is None:
+                self._mcp_client = MCPToolClient(server_configs=config)
+            else:
+                self._mcp_client._server_configs.update(config)
+            
+            tools = await self._mcp_client.load_tools()
+            
+            mcp_tools = self._mcp_client.get_tools_openai_format()
+            for tool in mcp_tools:
+                if tool not in self._bound_tools:
+                    self._bound_tools.append(tool)
+            
+            logger.info(f"✅ MCP server '{server_name}' (SSE) registered successfully")
+            return True
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to register MCP server '{server_name}': {e}")
+            return False
+    
+    async def register_mcp_preset(
+        self,
+        preset_name: str,
+        env: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """Register MCP tools using a predefined preset.
+        
+        Available presets:
+        - "exa": Exa AI search (requires EXA_API_KEY)
+        - "github": GitHub API (requires GITHUB_TOKEN)
+        - "brave-search": Brave Search (requires BRAVE_API_KEY)
+        - "filesystem": Local filesystem access
+        - "fetch": HTTP fetch requests
+        
+        Args:
+            preset_name: Name of the preset (e.g., "exa", "github")
+            env: Optional environment variables override
+            
+        Returns:
+            bool: True if registration successful
+            
+        Example:
+            await manager.register_mcp_preset("exa", env={"EXA_API_KEY": "..."})
+        """
+        if not MCP_CLIENT_AVAILABLE:
+            logger.error("❌ MCP client not available")
+            return False
+        
+        if preset_name not in MCP_SERVER_PRESETS:
+            logger.error(f"❌ Unknown MCP preset: {preset_name}")
+            logger.info(f"📋 Available presets: {list(MCP_SERVER_PRESETS.keys())}")
+            return False
+        
+        preset = MCP_SERVER_PRESETS[preset_name]
+        
+        # Build environment from preset and override
+        import os
+        final_env = {}
+        if preset.get("env_key"):
+            env_value = (env or {}).get(preset["env_key"]) or os.getenv(preset["env_key"])
+            if env_value:
+                final_env[preset["env_key"]] = env_value
+            else:
+                logger.warning(f"⚠️ Environment variable {preset['env_key']} not set for preset '{preset_name}'")
+        
+        return await self.register_mcp_stdio(
+            server_name=preset_name,
+            command=preset["command"],
+            args=preset["args"],
+            env=final_env
+        )
+    
+    async def register_mcp_servers(
+        self,
+        config: Dict[str, Dict[str, Any]]
+    ) -> bool:
+        """Register multiple MCP servers from a configuration dict.
+        
+        This matches the langchain-mcp-adapters MultiServerMCPClient config format.
+        
+        Args:
+            config: Server configurations:
+                {
+                    "math": {
+                        "command": "python",
+                        "args": ["/path/to/math_server.py"],
+                        "transport": "stdio",
+                    },
+                    "weather": {
+                        "url": "http://localhost:8000/mcp",
+                        "transport": "http",
+                    }
+                }
+        
+        Returns:
+            bool: True if all servers registered successfully
+            
+        Example:
+            await manager.register_mcp_servers({
+                "math": {"command": "python", "args": ["math_server.py"], "transport": "stdio"},
+                "weather": {"url": "http://localhost:8000/mcp", "transport": "http"}
+            })
+        """
+        if not MCP_CLIENT_AVAILABLE:
+            logger.error("❌ MCP client not available")
+            return False
+        
+        try:
+            self._mcp_client = MCPToolClient(server_configs=config)
+            tools = await self._mcp_client.load_tools()
+            
+            mcp_tools = self._mcp_client.get_tools_openai_format()
+            for tool in mcp_tools:
+                if tool not in self._bound_tools:
+                    self._bound_tools.append(tool)
+            
+            logger.info(f"✅ Registered {len(config)} MCP servers with {len(tools)} total tools")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to register MCP servers: {e}")
+            return False
+
+    def register_mcp_tools(self, transport: str, namespace: Optional[str] = None) -> bool:
+        """[DEPRECATED] Register tools from an MCP server.
+        
+        ⚠️ This method is deprecated. Use register_mcp_stdio() or register_mcp_preset() instead.
+        
+        MCP servers do NOT use HTTP URLs. They use stdio (subprocess) or SSE transport.
+        
+        Args:
+            transport: This parameter was incorrectly named. MCP doesn't use URLs.
             namespace: Optional namespace prefix for tool names
 
         Returns:
-            bool: True if registration successful
+            bool: Always returns False with a deprecation warning
         """
-        logger.info(f"🔗 Attempting MCP tool registration from: {transport}")
-        logger.debug(f"🏷️ Using namespace: {namespace}")
-
-        if not TOOL_REGISTRY_AVAILABLE:
-            logger.error("❌ ToolRegistry library not installed")
-            return False
-
-        if not self._tool_registry:
-            logger.error("❌ ToolRegistry not initialized")
-            return False
-
-        try:
-            logger.debug("📡 Calling ToolRegistry.register_from_mcp()...")
-            # Handle async/sync mismatch - ToolRegistry may be async
-            # Use asyncio.run_in_executor to bridge sync->async if needed
-            import asyncio
-
-            # Check if we're in an async context
-            try:
-                loop = asyncio.get_running_loop()
-                # We're in an async context, need to handle this differently
-                logger.warning("⚠️ MCP registration called in async context - deferring to sync execution")
-                # For now, return False and handle this in startup
-                return False
-            except RuntimeError:
-                # No running loop, we can use asyncio.run
-                pass
-
-            # Try to call the async method synchronously
-            try:
-                # If the method is async, we need to handle it
-                import inspect
-                register_method = getattr(self._tool_registry, 'register_from_mcp', None)
-                if register_method and inspect.iscoroutinefunction(register_method):
-                    # It's async, we need to run it in an event loop
-                    logger.debug("🔄 Running async MCP registration...")
-                    asyncio.run(self._tool_registry.register_from_mcp(transport, with_namespace=namespace))
-                else:
-                    # It's sync, call directly
-                    self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
-            except Exception as async_error:
-                logger.warning(f"⚠️ Async registration failed, trying sync: {async_error}")
-                # Fallback to sync call
-                self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
-
-            # Get registered tools to verify
-            available_tools = self._tool_registry.get_available_tools()
-            logger.info(f"✅ Successfully registered MCP tools from {transport}")
-            logger.info(f"📋 Available tools: {len(available_tools)} total")
-            logger.debug(f"🛠️ Tool list: {available_tools}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Failed to register MCP tools from {transport}: {e}")
-            logger.debug("MCP registration error details:", exc_info=True)
-            return False
+        logger.warning("⚠️ register_mcp_tools() is DEPRECATED!")
+        logger.warning("   MCP servers use stdio or SSE transport, NOT HTTP URLs.")
+        logger.warning("   Use register_mcp_stdio() or register_mcp_preset() instead.")
+        logger.warning("")
+        logger.warning("   Example:")
+        logger.warning("     await manager.register_mcp_preset('exa')")
+        logger.warning("   or:")
+        logger.warning("     await manager.register_mcp_stdio(")
+        logger.warning("       server_name='exa',")
+        logger.warning("       command='npx',")
+        logger.warning("       args=['-y', '@anthropic-ai/exa-mcp-server'],")
+        logger.warning("       env={'EXA_API_KEY': 'your-key'}")
+        logger.warning("     )")
+        
+        return False
 
     async def register_mcp_tools_async(self, transport: str, namespace: Optional[str] = None) -> bool:
-        """Async version of MCP tool registration.
+        """[DEPRECATED] Async version of MCP tool registration.
+        
+        ⚠️ This method is deprecated. Use register_mcp_stdio() or register_mcp_preset() instead.
 
         Args:
-            transport: MCP transport URL or path
+            transport: This parameter was incorrectly named. MCP doesn't use URLs.
             namespace: Optional namespace prefix
 
         Returns:
-            bool: True if registration successful
+            bool: Always returns False with a deprecation warning
         """
-        logger.info(f"🔗 Attempting async MCP tool registration from: {transport}")
-
-        if not TOOL_REGISTRY_AVAILABLE:
-            logger.error("❌ ToolRegistry library not installed")
-            return False
-
-        if not self._tool_registry:
-            logger.error("❌ ToolRegistry not initialized")
-            return False
-
-        try:
-            logger.debug("📡 Calling async ToolRegistry.register_from_mcp()...")
-            # Call the async method directly
-            await self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
-
-            # Get registered tools to verify
-            available_tools = self._tool_registry.get_available_tools()
-            logger.info(f"✅ Successfully registered MCP tools from {transport}")
-            logger.info(f"📋 Available tools: {len(available_tools)} total")
-            logger.debug(f"🛠️ Tool list: {available_tools}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Failed to register MCP tools from {transport}: {e}")
-            logger.debug("Async MCP registration error details:", exc_info=True)
-            return False
+        logger.warning("⚠️ register_mcp_tools_async() is DEPRECATED!")
+        logger.warning("   Use register_mcp_preset() or register_mcp_stdio() instead.")
+        
+        # If it looks like a preset name, try to use the preset
+        if transport in ["exa", "github", "brave-search", "filesystem", "fetch"]:
+            logger.info(f"💡 Detected preset name '{transport}', using register_mcp_preset()")
+            return await self.register_mcp_preset(transport)
+        
+        return False
 
     def register_openapi_tools(self, openapi_spec: Union[str, Dict], client_config: Optional[Dict] = None) -> bool:
         """Register tools from OpenAPI specification.
@@ -1182,25 +1520,50 @@ Important: Only output JSON when you actually want to call tools. For normal res
             return False
 
     def get_registered_tools(self) -> List[str]:
-        """Get list of all registered tool names."""
+        """Get list of all registered tool names from all sources."""
         logger.debug("📋 Querying registered tools...")
-
-        if not TOOL_REGISTRY_AVAILABLE:
-            logger.debug("❌ ToolRegistry library not available")
-            return []
-
-        if not self._tool_registry:
-            logger.debug("❌ ToolRegistry not initialized")
-            return []
-
-        try:
-            tools = self._tool_registry.get_available_tools()
-            logger.debug(f"✅ Found {len(tools)} registered tools: {tools}")
-            return tools
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get registered tools: {e}")
-            logger.debug("Tool query error details:", exc_info=True)
-            return []
+        
+        all_tools = []
+        
+        # Get tools from MCP client
+        if MCP_CLIENT_AVAILABLE and self._mcp_client:
+            mcp_tools = self._mcp_client.get_tool_names()
+            all_tools.extend(mcp_tools)
+            logger.debug(f"📦 MCP tools: {len(mcp_tools)}")
+        
+        # Get tools from ToolRegistry (legacy)
+        if TOOL_REGISTRY_AVAILABLE and self._tool_registry:
+            try:
+                registry_tools = self._tool_registry.get_available_tools()
+                # Add only tools not already in list
+                for tool in registry_tools:
+                    if tool not in all_tools:
+                        all_tools.append(tool)
+                logger.debug(f"📦 ToolRegistry tools: {len(registry_tools)}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to get ToolRegistry tools: {e}")
+        
+        # Get tools from bound tools
+        for tool in self._bound_tools:
+            name = tool.get("function", {}).get("name", "")
+            if name and name not in all_tools:
+                all_tools.append(name)
+        
+        logger.debug(f"✅ Total registered tools: {len(all_tools)}")
+        return all_tools
+    
+    def get_all_tools_openai_format(self) -> List[Dict[str, Any]]:
+        """Get all tools in OpenAI-compatible format."""
+        tools = list(self._bound_tools)
+        
+        # Add MCP tools
+        if MCP_CLIENT_AVAILABLE and self._mcp_client:
+            mcp_tools = self._mcp_client.get_tools_openai_format()
+            for tool in mcp_tools:
+                if tool not in tools:
+                    tools.append(tool)
+        
+        return tools
 
 
 class StructuredOutputInferenceManager:

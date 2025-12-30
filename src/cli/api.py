@@ -100,11 +100,34 @@ async def serve(
         await grpc_server.start()
         await http_server.start(shutdown_trigger=stop_event.wait)
 
-        # Register Exa MCP tools asynchronously after servers are started
-        try:
-            await inference_manager.register_mcp_tools_async("https://exa-mcp.com", "exa")
-        except Exception as e:
-            logger.warning(f"Failed to register Exa MCP tools: {e}")
+        # Register MCP tools using the correct method (stdio transport)
+        # MCP servers use stdio (subprocess) or SSE transport, NOT HTTP URLs!
+        import os
+        
+        # Try to register Exa MCP tools if API key is available
+        exa_api_key = os.getenv("EXA_API_KEY")
+        if exa_api_key:
+            try:
+                # Use the preset for easy configuration
+                success = await inference_manager.register_mcp_preset(
+                    "exa",
+                    env={"EXA_API_KEY": exa_api_key}
+                )
+                if success:
+                    logger.info("✅ Exa MCP tools registered successfully")
+                else:
+                    logger.warning("⚠️ Failed to register Exa MCP tools")
+            except Exception as e:
+                logger.warning(f"Failed to register Exa MCP tools: {e}")
+        else:
+            logger.info("ℹ️ EXA_API_KEY not set, skipping Exa MCP registration")
+            logger.info("   Set EXA_API_KEY environment variable to enable Exa tools")
+        
+        # You can also register other MCP presets:
+        # - "github" (requires GITHUB_TOKEN)
+        # - "brave-search" (requires BRAVE_API_KEY)
+        # - "filesystem" (local filesystem access)
+        # - "fetch" (HTTP requests)
 
         mode = "static" if hostfile else "dynamic"
         tui.update_status(f"Running on HTTP:{http_port} gRPC:{grpc_port} ({mode})")
