@@ -71,6 +71,16 @@ class RingInferenceError(BaseModel):
 # ------------------------
 
 
+class ToolCall(BaseModel):
+    """A tool call made by the model.
+
+    Compatible with LangChain/OpenAI format.
+    """
+    name: str
+    args: Dict[str, Any]
+    id: Optional[str] = None
+
+
 class ChatMessage(BaseModel):
     """A single message in a chat conversation.
 
@@ -79,6 +89,7 @@ class ChatMessage(BaseModel):
 
     role: str  # "system" | "user" | "assistant" | "developer" # TODO: use Literal?
     content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
 
 
 class ChatParams(BaseModel):
@@ -117,8 +128,8 @@ class ChatParams(BaseModel):
     stream: bool = Field(default=False)
     # stream_options:  # NOTE: unused
     temperature: float = Field(default=1.0, ge=0, le=2)
-    # tool_choice: # NOTE: unused, later with tool calling
-    # tools: # NOTE: unused, later with tool calling
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(default=None)  # Tool choice strategy
+    tools: Optional[List[Dict[str, Any]]] = Field(default=None)  # Available tools for function calling
     top_logprobs: int = Field(default=0, ge=0, le=20)
     top_p: float = Field(default=1.0, ge=0, le=1)
     verbosity: Literal["low", "medium", "high"] = Field(default="medium")  # TODO: used?

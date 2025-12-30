@@ -4,7 +4,7 @@ import uuid
 import json
 import mlx.core as mx
 import numpy as np
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Union, Dict
 from builtins import aiter, anext
 from dnet.core.tensor import to_bytes
 
@@ -17,6 +17,7 @@ from .models import (
     ChatCompletionReason,
     ChatLogProbs,
     StructuredOutputsParams,
+    ToolCall,
 )
 from .cluster import ClusterManager
 from .model_manager import ModelManager
@@ -85,6 +86,12 @@ class InferenceManager:
             ):
                 # Convert messages to dict format
                 message_dicts = []
+
+                # Add tool system message if tools are provided
+                if req.tools:
+                    tool_system_msg = self._create_tool_system_message(req.tools)
+                    message_dicts.append({"role": "system", "content": tool_system_msg})
+
                 for m in req.messages:
                     msg_dict = {"role": m.role, "content": m.content or ""}
                     message_dicts.append(msg_dict)
@@ -100,9 +107,16 @@ class InferenceManager:
                 )
         except Exception as e:
             logger.warning(f"Failed to apply chat template: {e}, using fallback")
-            prompt_text = (
-                "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
-            )
+            prompt_parts = []
+
+            # Add tool system message if tools are provided
+            if req.tools:
+                tool_system_msg = self._create_tool_system_message(req.tools)
+                prompt_parts.append(f"System: {tool_system_msg}")
+
+            prompt_parts.extend(m.content or "" for m in req.messages)
+            prompt_parts.append("Assistant:")
+            prompt_text = "\n".join(prompt_parts)
 
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
@@ -273,9 +287,17 @@ class InferenceManager:
                 ),
             }
 
+        # Parse tool calls if tools were provided
+        tool_calls = None
+        final_content = final_text
+        if req.tools:
+            tool_calls = self._parse_tool_calls(final_text)
+            final_content = self._format_tool_call_response(final_text, tool_calls) if tool_calls else final_text
+
         final_message = ChatMessage(
             role="assistant",
-            content=final_text,
+            content=final_content,
+            tool_calls=tool_calls,
         )
 
         # Final chunk
@@ -342,13 +364,20 @@ class InferenceManager:
                 if token in full_content:
                     full_content = full_content.split(token)[0].strip()
 
+        # Parse tool calls if tools were provided
+        tool_calls = None
+        final_content = full_content
+        if req.tools:
+            tool_calls = self._parse_tool_calls(full_content)
+            final_content = self._format_tool_call_response(full_content, tool_calls) if tool_calls else full_content
+
         return ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
                     index=0,
                     finish_reason=completion_reason,
-                    message=ChatMessage(role="assistant", content=full_content),
+                    message=ChatMessage(role="assistant", content=final_content, tool_calls=tool_calls),
                     logprobs=ChatLogProbs(
                         token_logprobs=token_logprobs,
                         top_logprobs=top_logprobs_list,
@@ -363,6 +392,106 @@ class InferenceManager:
             model=req.model,
             metrics=metrics_dict,
         )
+
+    def _create_tool_system_message(self, tools: List[Dict[str, Any]]) -> str:
+        """Create system message with available tools for LangChain-style tool calling."""
+        tools_json = json.dumps(tools, indent=2)
+
+        system_template = """You have access to the following tools:
+
+{tools}
+
+You must always select one of the above tools and respond with only a JSON object matching the following schema:
+
+{{
+  "tool": "<name of the selected tool>",
+  "tool_input": "<parameters for the selected tool, matching the tool's JSON schema>"
+}}
+
+If you want to respond conversationally without using tools, use the "__conversational_response" tool with a "response" parameter containing your message."""
+
+        return system_template.format(tools=tools_json)
+
+    def _parse_tool_calls(self, content: str) -> Optional[List[ToolCall]]:
+        """Parse tool calls from model output using LangChain-style parsing."""
+        if not content.strip():
+            return None
+
+        try:
+            # Try direct JSON parsing first
+            parsed = json.loads(content.strip())
+            return self._convert_to_tool_calls(parsed)
+        except json.JSONDecodeError:
+            try:
+                # Fallback: extract JSON from mixed text using LangChain-style parsing
+                candidates = self._extract_json_candidates(content)
+                if candidates:
+                    parsed = candidates[0]  # Take first valid JSON
+                    return self._convert_to_tool_calls(parsed)
+            except Exception:
+                pass
+
+        return None
+
+    def _extract_json_candidates(self, s: str) -> List[Any]:
+        """Extract JSON objects from text, similar to LangChain's parse_json_garbage."""
+        candidates = []
+        i = 0
+        while i < len(s):
+            # Find opening brace
+            start = s.find('{', i)
+            if start == -1:
+                break
+
+            # Try to parse JSON from this position
+            try:
+                # Find matching closing brace
+                brace_count = 0
+                end = start
+                for j in range(start, len(s)):
+                    if s[j] == '{':
+                        brace_count += 1
+                    elif s[j] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end = j + 1
+                            break
+
+                if brace_count == 0:
+                    json_str = s[start:end]
+                    parsed = json.loads(json_str)
+                    candidates.append(parsed)
+                    i = end
+                else:
+                    i = start + 1
+            except (json.JSONDecodeError, ValueError):
+                i = start + 1
+
+        return candidates
+
+    def _convert_to_tool_calls(self, parsed: Dict[str, Any]) -> Optional[List[ToolCall]]:
+        """Convert parsed JSON to LangChain-compatible ToolCall format."""
+        tool_name = parsed.get("tool") or parsed.get("name")
+        tool_input = parsed.get("tool_input") or parsed.get("parameters", {})
+
+        # Handle conversational responses
+        if tool_name in ["__conversational_response", "__conversational_response"]:
+            return None  # No tool calls, just conversational response
+
+        if tool_name and tool_input is not None:
+            return [ToolCall(
+                name=tool_name,
+                args=tool_input if isinstance(tool_input, dict) else {"input": tool_input},
+                id=f"call_{uuid.uuid4().hex}"
+            )]
+
+        return None
+
+    def _format_tool_call_response(self, content: str, tool_calls: Optional[List[ToolCall]]) -> str:
+        """Format response content when tool calls are present."""
+        if tool_calls:
+            return ""  # LangChain format: empty content when there are tool calls
+        return content
 
     def resolve_request(self, nonce: str, result: Any):
         self.adapter.resolve_token(nonce, result)
