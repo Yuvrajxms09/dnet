@@ -126,21 +126,27 @@ async def serve(
             logger.info("ℹ️ EXA_API_KEY not set, skipping Exa MCP registration")
             logger.info("   Set EXA_API_KEY environment variable to enable Exa tools")
         
-        # Register Semantic Scholar MCP (no API key required!)
-        # Provides: paper search, citations, abstracts, arXiv access
-        # See: https://smithery.ai/server/@hamid-vakilzadeh/mcpsemanticscholar
-        try:
-            semantic_scholar_url = "https://server.smithery.ai/@hamid-vakilzadeh/mcpsemanticscholar"
-            success = await inference_manager.register_mcp_http(
-                server_name="semantic-scholar",
-                url=semantic_scholar_url
-            )
-            if success:
-                logger.info("✅ Semantic Scholar MCP tools registered (no API key needed)")
-            else:
-                logger.warning("⚠️ Failed to register Semantic Scholar MCP tools")
-        except Exception as e:
-            logger.warning(f"Failed to register Semantic Scholar MCP tools: {e}")
+        # Register GitHub MCP (official, remote HTTP)
+        # See: https://github.com/github/github-mcp-server
+        # Requires: GITHUB_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN
+        github_token = os.getenv("GITHUB_TOKEN") or os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN")
+        if github_token:
+            try:
+                github_url = "https://api.githubcopilot.com/mcp/"
+                success = await inference_manager.register_mcp_http(
+                    server_name="github",
+                    url=github_url,
+                    headers={"Authorization": f"Bearer {github_token}"}
+                )
+                if success:
+                    logger.info("✅ GitHub MCP tools registered successfully via HTTP")
+                else:
+                    logger.warning("⚠️ Failed to register GitHub MCP tools via HTTP")
+            except Exception as e:
+                logger.warning(f"Failed to register GitHub MCP tools: {e}")
+        else:
+            logger.info("ℹ️ GITHUB_TOKEN not set, skipping GitHub MCP registration")
+            logger.info("   Set GITHUB_TOKEN environment variable to enable GitHub tools")
         
         # You can also register other MCP servers:
         # - GitHub: await inference_manager.register_mcp_preset("github")

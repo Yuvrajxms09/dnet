@@ -512,18 +512,15 @@ MCP_SERVER_PRESETS: Dict[str, Dict[str, Any]] = {
         "transport": "stdio",
         "description": "HTTP fetch requests"
     },
-    # Semantic Scholar - Remote HTTP (no API key required!)
-    # Tools: basic_search, advanced_search, search_paper, read_abstract, review_citations, etc.
-    "semantic-scholar": {
+    # GitHub - Remote HTTP (official, requires GITHUB_TOKEN)
+    # See: https://github.com/github/github-mcp-server
+    # Tools: repos, issues, pull_requests, code_security, actions, etc.
+    "github-http": {
         "transport": "http",
-        "url": "https://server.smithery.ai/@hamid-vakilzadeh/mcpsemanticscholar",
-        "description": "Academic paper search via Semantic Scholar & arXiv (no API key needed)"
-    },
-    # Arxiv - if available separately
-    "arxiv": {
-        "transport": "http",
-        "url": "https://server.smithery.ai/@hamid-vakilzadeh/mcpsemanticscholar",
-        "description": "Alias for semantic-scholar (includes arXiv access)"
+        "url": "https://api.githubcopilot.com/mcp/",
+        "env_key": "GITHUB_TOKEN",
+        "headers_template": {"Authorization": "Bearer {GITHUB_TOKEN}"},
+        "description": "GitHub API (remote HTTP - recommended)"
     }
 }
 
