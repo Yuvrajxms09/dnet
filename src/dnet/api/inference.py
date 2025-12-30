@@ -5,6 +5,12 @@ import json
 import mlx.core as mx
 import numpy as np
 from typing import Optional, Any, List, Union, Dict
+try:
+    from toolregistry import ToolRegistry
+    TOOL_REGISTRY_AVAILABLE = True
+except ImportError:
+    TOOL_REGISTRY_AVAILABLE = False
+    ToolRegistry = None
 from builtins import aiter, anext
 from dnet.core.tensor import to_bytes
 
@@ -57,6 +63,7 @@ class InferenceManager:
         self.adapter = adapter
 
         self._api_callback_addr: str = ""
+        self._tool_registry: Optional[ToolRegistry] = self._setup_tool_registry()
 
     async def connect_to_ring(
         self, first_shard_ip: str, first_shard_port: int, api_callback_addr: str
@@ -89,7 +96,7 @@ class InferenceManager:
 
                 # Add tool system message if tools are provided
                 if req.tools:
-                    tool_system_msg = self._create_tool_system_message(req.tools)
+                    tool_system_msg = self._create_tool_system_message(req.tools, self._tool_registry)
                     message_dicts.append({"role": "system", "content": tool_system_msg})
 
                 for m in req.messages:
@@ -111,7 +118,7 @@ class InferenceManager:
 
             # Add tool system message if tools are provided
             if req.tools:
-                tool_system_msg = self._create_tool_system_message(req.tools)
+                tool_system_msg = self._create_tool_system_message(req.tools, self._tool_registry)
                 prompt_parts.append(f"System: {tool_system_msg}")
 
             prompt_parts.extend(m.content or "" for m in req.messages)
@@ -393,9 +400,20 @@ class InferenceManager:
             metrics=metrics_dict,
         )
 
-    def _create_tool_system_message(self, tools: List[Dict[str, Any]]) -> str:
+    def _create_tool_system_message(self, tools: List[Dict[str, Any]], registry: Optional[ToolRegistry] = None) -> str:
         """Create system message with available tools for LangChain-style tool calling."""
-        tools_json = json.dumps(tools, indent=2)
+        all_tools = list(tools)  # Start with provided tools
+
+        # Add tools from registry if available
+        if registry and TOOL_REGISTRY_AVAILABLE:
+            try:
+                registry_tools = registry.get_tools_json()
+                all_tools.extend(registry_tools)
+                logger.debug(f"Added {len(registry_tools)} tools from registry")
+            except Exception as e:
+                logger.warning(f"Failed to get tools from registry: {e}")
+
+        tools_json = json.dumps(all_tools, indent=2)
 
         system_template = """You have access to the following tools:
 
@@ -492,6 +510,66 @@ If you want to respond conversationally without using tools, use the "__conversa
         if tool_calls:
             return ""  # LangChain format: empty content when there are tool calls
         return content
+
+    def _setup_tool_registry(self) -> Optional[ToolRegistry]:
+        """Initialize ToolRegistry for MCP tool execution."""
+        if not TOOL_REGISTRY_AVAILABLE:
+            logger.warning("ToolRegistry not available. Install with: pip install toolregistry[mcp]")
+            return None
+
+        registry = ToolRegistry()
+        logger.info("ToolRegistry initialized for MCP tool execution")
+        return registry
+
+    def _register_mcp_tools(self, registry: ToolRegistry, mcp_configs: List[Dict[str, Any]]) -> None:
+        """Register MCP tools dynamically from configurations."""
+        for config in mcp_configs:
+            try:
+                transport = config.get("transport")
+                namespace = config.get("namespace", False)
+
+                if TOOL_REGISTRY_AVAILABLE:
+                    registry.register_from_mcp(transport, with_namespace=namespace)
+                    logger.info(f"Registered MCP tools from {transport}")
+
+            except Exception as e:
+                logger.error(f"Failed to register MCP tools from {config}: {e}")
+
+    async def _execute_tool_calls(self, tool_calls: List[ToolCall], registry: ToolRegistry) -> List[Dict[str, Any]]:
+        """Execute tool calls using ToolRegistry and return results."""
+        results = []
+
+        for tool_call in tool_calls:
+            try:
+                # Get the callable tool from registry
+                tool_func = registry.get_callable(tool_call.name)
+                if not tool_func:
+                    logger.error(f"Tool {tool_call.name} not found in registry")
+                    continue
+
+                # Execute the tool
+                if asyncio.iscoroutinefunction(tool_func):
+                    result = await tool_func(**tool_call.args)
+                else:
+                    result = tool_func(**tool_call.args)
+
+                results.append({
+                    "tool_call_id": tool_call.id,
+                    "content": str(result),
+                    "success": True
+                })
+
+                logger.info(f"Executed tool {tool_call.name} successfully")
+
+            except Exception as e:
+                logger.error(f"Tool execution failed for {tool_call.name}: {e}")
+                results.append({
+                    "tool_call_id": tool_call.id,
+                    "content": f"Tool execution failed: {str(e)}",
+                    "success": False
+                })
+
+        return results
 
     def resolve_request(self, nonce: str, result: Any):
         self.adapter.resolve_token(nonce, result)
