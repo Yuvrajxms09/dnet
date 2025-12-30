@@ -84,6 +84,9 @@ async def serve(
             cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
         )
 
+        # Register Exa MCP tools for web search capabilities
+        inference_manager.register_mcp_tools("https://exa-mcp.com", "exa")
+
         # Servers
         grpc_server = ApiGrpcServer(
             grpc_port=grpc_port, inference_manager=inference_manager

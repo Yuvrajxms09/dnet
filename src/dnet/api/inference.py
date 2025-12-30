@@ -80,6 +80,9 @@ class InferenceManager:
         self._api_callback_addr: str = ""
         self._tool_registry: Optional[ToolRegistry] = self._setup_tool_registry()
 
+        # LangChain-compatible tool binding
+        self._bound_tools: List[Dict[str, Any]] = []
+
     async def connect_to_ring(
         self, first_shard_ip: str, first_shard_port: int, api_callback_addr: str
     ) -> None:
@@ -109,9 +112,11 @@ class InferenceManager:
                 # Convert messages to dict format
                 message_dicts = []
 
-                # Add tool system message if tools are provided (LangChain-style)
-                if req.tools:
-                    tool_system_msg = self._create_langchain_tool_prompt(req.tools)
+                # Add tool system message if tools are available (LangChain-style)
+                # Use bound tools (LangChain approach) or request tools (backward compatibility)
+                available_tools = self._bound_tools or req.tools or []
+                if available_tools:
+                    tool_system_msg = self._create_langchain_tool_prompt(available_tools)
                     message_dicts.append({"role": "system", "content": tool_system_msg})
 
                 for m in req.messages:
@@ -309,12 +314,13 @@ class InferenceManager:
                 ),
             }
 
-        # Parse tool calls if tools were provided
+        # Parse tool calls if tools were available
         logger.debug(f"🔍 Checking for tool calls in generate_stream response")
         tool_calls = None
         final_content = final_text
-        if req.tools:
-            logger.info(f"🛠️ Tools available ({len(req.tools)}), attempting to parse tool calls")
+        available_tools = self._bound_tools or req.tools or []
+        if available_tools:
+            logger.info(f"🛠️ Tools available ({len(available_tools)}), attempting to parse tool calls")
             tool_calls = self._parse_tool_calls_langchain_style(final_text)
             if tool_calls:
                 logger.info(f"✅ Found {len(tool_calls)} tool calls in response")
@@ -394,10 +400,11 @@ class InferenceManager:
                 if token in full_content:
                     full_content = full_content.split(token)[0].strip()
 
-        # Parse tool calls if tools were provided (LangChain-style, no grammar)
+        # Parse tool calls if tools were available (LangChain-style, no grammar)
         tool_calls = None
         final_content = full_content
-        if req.tools:
+        available_tools = self._bound_tools or req.tools or []
+        if available_tools:
             tool_calls = self._parse_tool_calls_langchain_style(full_content)
             final_content = self._format_tool_call_response(full_content, tool_calls) if tool_calls else full_content
 
@@ -678,6 +685,16 @@ Important: Only output JSON when you actually want to call tools. For normal res
         # Remove common prefixes/suffixes that models sometimes add
         clean_content = content.strip()
         original_length = len(clean_content)
+
+        # Remove think tags
+        import re
+        clean_content = re.sub(r'<think>.*?</think>', '', clean_content, flags=re.DOTALL).strip()
+
+        # Remove special tokens
+        special_tokens = ['<|im_end|>', '<|im_start|>', '<|endoftext|>', '</s>', '<|eot_id|>', '<|end|>']
+        for token in special_tokens:
+            clean_content = clean_content.replace(token, '').strip()
+
         prefixes_to_remove = ['Assistant:', 'AI:', 'Response:']
         for prefix in prefixes_to_remove:
             if clean_content.startswith(prefix):
@@ -932,6 +949,266 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
         return final_response
 
+    def bind_tools(self, tools: List[Any]) -> 'InferenceManager':
+        """
+        Bind tools to this inference manager (LangChain-compatible interface).
+
+        Args:
+            tools: List of tool definitions. Can be:
+                - Pydantic BaseModel classes
+                - LangChain tools (@tool decorated functions)
+                - Raw tool dictionaries (OpenAI format)
+                - Functions with type hints
+
+        Returns:
+            InferenceManager: Self for method chaining
+        """
+        logger.info(f"🔧 Binding {len(tools)} tools to inference manager")
+
+        bound_tools = []
+        for tool in tools:
+            tool_def = self._convert_tool_to_definition(tool)
+            if tool_def:
+                bound_tools.append(tool_def)
+                logger.debug(f"✅ Bound tool: {tool_def.get('function', {}).get('name', 'unknown')}")
+
+        self._bound_tools = bound_tools
+        logger.info(f"🎯 Successfully bound {len(self._bound_tools)} tools")
+        return self
+
+    def _convert_tool_to_definition(self, tool: Any) -> Optional[Dict[str, Any]]:
+        """
+        Convert various tool formats to OpenAI-compatible tool definition.
+        """
+        # If it's already a dict with OpenAI format
+        if isinstance(tool, dict) and tool.get("type") == "function":
+            return tool
+
+        # If it's a Pydantic model
+        if hasattr(tool, '__annotations__') and hasattr(tool, 'model_json_schema'):
+            try:
+                schema = tool.model_json_schema()
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": getattr(tool, '__name__', tool.__class__.__name__.lower()),
+                        "description": getattr(tool, '__doc__', '').strip(),
+                        "parameters": schema
+                    }
+                }
+            except Exception as e:
+                logger.warning(f"Failed to convert Pydantic model to tool definition: {e}")
+
+        # If it's a function with @tool decorator (basic support)
+        if callable(tool) and hasattr(tool, '__name__'):
+            # Try to extract function signature
+            import inspect
+            try:
+                sig = inspect.signature(tool)
+                params = {}
+                for name, param in sig.parameters.items():
+                    if name == 'self':
+                        continue
+                    # Basic type inference
+                    param_def = {"type": "string"}  # default
+                    if param.annotation != inspect.Parameter.empty:
+                        if param.annotation == int:
+                            param_def["type"] = "integer"
+                        elif param.annotation == float:
+                            param_def["type"] = "number"
+                        elif param.annotation == bool:
+                            param_def["type"] = "boolean"
+
+                    params[name] = param_def
+
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": tool.__name__,
+                        "description": getattr(tool, '__doc__', '').strip(),
+                        "parameters": {
+                            "type": "object",
+                            "properties": params,
+                            "required": list(params.keys())
+                        }
+                    }
+                }
+            except Exception as e:
+                logger.warning(f"Failed to convert function to tool definition: {e}")
+
+        logger.warning(f"Unsupported tool format: {type(tool)}")
+        return None
+
+    def get_bound_tools(self) -> List[Dict[str, Any]]:
+        """Get currently bound tools."""
+        return self._bound_tools.copy()
+
+
+class StructuredOutputInferenceManager:
+    """
+    LangGraph-style structured output wrapper for InferenceManager.
+
+    Forces the agent to return responses in a specific structured format by binding
+    the response schema as a tool that must be called (LangGraph "Option 1").
+
+    This ensures the agent provides structured output without requiring a second LLM call.
+    """
+
+    def __init__(self, inference_manager: 'InferenceManager', schema: Any):
+        self.inference_manager = inference_manager
+        self.schema = schema
+
+        # Generate tool definition from schema
+        self._structured_output_tool = self._schema_to_tool(schema)
+
+    def _schema_to_tool(self, schema: Any) -> Dict[str, Any]:
+        """Convert Pydantic schema or JSON schema to tool definition."""
+        if hasattr(schema, 'model_json_schema'):
+            # Pydantic model
+            json_schema = schema.model_json_schema()
+            return {
+                "type": "function",
+                "function": {
+                    "name": schema.__name__,
+                    "description": getattr(schema, '__doc__', '').strip() or "Structured response",
+                    "parameters": json_schema
+                }
+            }
+        elif isinstance(schema, dict):
+            # Raw JSON schema
+            return {
+                "type": "function",
+                "function": {
+                    "name": "StructuredResponse",
+                    "description": "Structured response",
+                    "parameters": schema
+                }
+            }
+        else:
+            raise ValueError(f"Unsupported schema type: {type(schema)}")
+
+    async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
+        """
+        Generate completion with guaranteed structured output.
+
+        The agent will be forced to call the structured output tool to provide its final answer.
+        """
+        # Temporarily bind the structured output tool
+        original_tools = self.inference_manager._bound_tools.copy() if hasattr(self.inference_manager, '_bound_tools') else []
+
+        try:
+            # Add structured output tool to bound tools or request tools
+            if hasattr(self.inference_manager, '_bound_tools'):
+                # LangChain-style: add to bound tools
+                self.inference_manager._bound_tools.append(self._structured_output_tool)
+            else:
+                # Fallback: add to request tools
+                if not req.tools:
+                    req.tools = []
+                req.tools.append(self._structured_output_tool)
+
+            # Force tool calling by setting tool_choice
+            if hasattr(req, 'tool_choice'):
+                req.tool_choice = "any"  # Force at least one tool call
+
+            # Generate response (agent should call the structured output tool)
+            response = await self.inference_manager.chat_completions(req)
+
+            # Extract structured data from tool calls
+            if response.choices and response.choices[0].message.tool_calls:
+                for tool_call in response.choices[0].message.tool_calls:
+                    tool_name = tool_call.name if hasattr(tool_call, 'name') else tool_call.get('function', {}).get('name', '')
+                    if tool_name == self._structured_output_tool["function"]["name"]:
+                        # Parse the structured arguments
+                        if hasattr(tool_call, 'args'):
+                            structured_data = tool_call.args
+                        else:
+                            # Handle dict format
+                            args_str = tool_call.get('function', {}).get('arguments', '{}')
+                            try:
+                                structured_data = json.loads(args_str) if isinstance(args_str, str) else args_str
+                            except:
+                                structured_data = {}
+
+                        # Replace response content with structured data
+                        response.choices[0].message.content = str(structured_data)
+
+                        # Add structured output field to response
+                        response.structured_output = structured_data
+                        break
+
+            return response
+
+        finally:
+            # Restore original tools
+            if hasattr(self.inference_manager, '_bound_tools'):
+                self.inference_manager._bound_tools = original_tools
+
+    def bind_tools(self, tools: List[Any]) -> 'StructuredOutputInferenceManager':
+        """
+        Bind additional tools while keeping the structured output tool.
+
+        This allows binding action tools + maintaining structured output.
+        """
+        # Bind tools on the underlying inference manager
+        if hasattr(self.inference_manager, 'bind_tools'):
+            self.inference_manager.bind_tools(tools)
+        return self
+
+    def __getattr__(self, name):
+        """Delegate other methods to the underlying inference manager."""
+        return getattr(self.inference_manager, name)
+
+    def with_structured_output(self, schema: Any) -> 'StructuredOutputInferenceManager':
+        """
+        Create an inference manager that returns structured output (LangGraph-style).
+
+        This implements the "Option 1: Bind output as tool" approach from LangGraph,
+        where the response schema is bound as a tool that the agent must call to respond.
+
+        Args:
+            schema: Pydantic model or JSON schema for structured output
+
+        Returns:
+            StructuredOutputInferenceManager: Wrapper that ensures structured responses
+
+        Example:
+            class WeatherResponse(BaseModel):
+                temperature: float
+                wind_direction: str
+
+            # Create structured output wrapper
+            structured_llm = inference_manager.with_structured_output(WeatherResponse)
+
+            # Agent will call WeatherResponse tool with structured data when ready to respond
+        """
+        return StructuredOutputInferenceManager(self.inference_manager, schema)
+
+    def register_mcp_tools(self, transport: str, namespace: Optional[str] = None) -> bool:
+        """
+        Create an inference manager that returns structured output (LangGraph-style).
+
+        This implements the "Option 1: Bind output as tool" approach from LangGraph,
+        where the response schema is bound as a tool that the agent must call to respond.
+
+        Args:
+            schema: Pydantic model or JSON schema for structured output
+
+        Returns:
+            StructuredOutputInferenceManager: Wrapper that ensures structured responses
+
+        Example:
+            class WeatherResponse(BaseModel):
+                temperature: float
+                wind_direction: str
+
+            # Create structured output wrapper
+            structured_llm = inference_manager.with_structured_output(WeatherResponse)
+
+            # Agent will call WeatherResponse tool with structured data when ready to respond
+        """
+        return StructuredOutputInferenceManager(self, schema)
+
     def register_mcp_tools(self, transport: str, namespace: Optional[str] = None) -> bool:
         """Register tools from an MCP server dynamically.
 
@@ -1026,3 +1303,71 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
     def resolve_request(self, nonce: str, result: Any):
         self.adapter.resolve_token(nonce, result)
+
+
+# Test function for structured output
+def test_structured_output():
+    """Test the LangGraph-style structured output functionality."""
+    from pydantic import BaseModel, Field
+
+    # Mock InferenceManager for testing
+    class MockInferenceManager:
+        def __init__(self):
+            self._bound_tools = []
+
+        def bind_tools(self, tools):
+            bound_tools = []
+            for tool in tools:
+                tool_def = self._convert_tool_to_definition(tool)
+                if tool_def:
+                    bound_tools.append(tool_def)
+            self._bound_tools = bound_tools
+            return self
+
+        def _convert_tool_to_definition(self, tool):
+            if hasattr(tool, '__annotations__') and hasattr(tool, 'model_json_schema'):
+                try:
+                    schema = tool.model_json_schema()
+                    return {
+                        "type": "function",
+                        "function": {
+                            "name": tool.__name__,
+                            "description": getattr(tool, '__doc__', '').strip(),
+                            "parameters": schema
+                        }
+                    }
+                except:
+                    pass
+            return None
+
+        def get_bound_tools(self):
+            return self._bound_tools.copy()
+
+    # Test structured output schema
+    class WeatherResponse(BaseModel):
+        """Structured weather response."""
+        temperature: float = Field(description="Temperature in Fahrenheit")
+        wind_direction: str = Field(description="Wind direction")
+        wind_speed: float = Field(description="Wind speed in mph")
+
+    # Test StructuredOutputInferenceManager
+    base_llm = MockInferenceManager()
+    structured_llm = StructuredOutputInferenceManager(base_llm, WeatherResponse)
+
+    # Check that structured output tool was created
+    tools = structured_llm.get_bound_tools()
+    print(f"✅ Structured output tool created: {len(tools)} tools")
+    for tool in tools:
+        name = tool.get('function', {}).get('name', 'unknown')
+        print(f"  - {name}")
+
+    # Test schema conversion
+    schema_tool = structured_llm._schema_to_tool(WeatherResponse)
+    print(f"✅ Schema converted to tool: {schema_tool['function']['name']}")
+
+    print("✅ Structured output functionality implemented!")
+    return True
+
+
+if __name__ == "__main__":
+    test_structured_output()

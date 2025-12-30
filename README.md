@@ -48,6 +48,9 @@
   - **Heterogeneity-Aware Solver**: Topology aware assignment that accounts for device capability, network speed, KV cache size, and disk speed
 
 - ✅ **[Pipelined-ring](https://arxiv.org/pdf/2504.08791)** - Run >32B 8-bit models across devices with insufficient total memory
+- ✅ **LangChain-Compatible Tool Calling** - Standard `bind_tools()` interface with structured tool execution
+- ✅ **MCP Tool Integration** - Built-in Exa web search tools for enhanced capabilities
+- ✅ **Structured Output (LangGraph-style)** - Force agents to return consistent data formats
 - 🚧 **Long context** - Make >128K context windows a reality for home clusters
 - 🚧 **High throughput** - Maximize throughput via tensor parallelism
 - 🚧 **Unified backend** - A single optimized backend for Apple Silicon, NVIDIA, and AMD (currently Apple Silicon only, via MLX)
@@ -234,6 +237,44 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     ],
     "max_tokens": 100
   }'
+```
+
+#### MCP Tool Integration
+
+dnet automatically registers Exa MCP tools for web search capabilities:
+
+```bash
+# Exa tools are available in all requests
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -d '{
+    "messages": [{"role": "user", "content": "Search for recent AI research papers"}]
+  }'
+
+# Model can automatically choose to use Exa search tools
+```
+
+#### Structured Output (LangGraph-Style)
+
+Force agents to return structured responses using LangGraph's approach:
+
+```python
+from dnet.api.inference import InferenceManager
+from pydantic import BaseModel, Field
+
+class WeatherResponse(BaseModel):
+    """Structured weather response."""
+    temperature: float = Field(description="Temperature in Fahrenheit")
+    wind_direction: str = Field(description="Wind direction")
+    wind_speed: float = Field(description="Wind speed in mph")
+
+# Method 1: with_structured_output wrapper
+structured_llm = inference_manager.with_structured_output(WeatherResponse)
+response = await structured_llm.chat_completions(request)
+# response.structured_output contains the parsed WeatherResponse object
+
+# Method 2: Bind response schema as tool (recommended)
+llm_with_response = inference_manager.bind_tools([get_weather_tool, WeatherResponse])
+# Agent will call WeatherResponse tool to provide structured final answer
 ```
 
 #### Devices
