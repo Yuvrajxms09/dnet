@@ -84,9 +84,6 @@ async def serve(
             cluster_manager, model_manager, grpc_port, adapter=strategy.adapter
         )
 
-        # Register Exa MCP tools for web search capabilities
-        inference_manager.register_mcp_tools("https://exa-mcp.com", "exa")
-
         # Servers
         grpc_server = ApiGrpcServer(
             grpc_port=grpc_port, inference_manager=inference_manager
@@ -102,6 +99,12 @@ async def serve(
         tui.update_status("Starting Servers...")
         await grpc_server.start()
         await http_server.start(shutdown_trigger=stop_event.wait)
+
+        # Register Exa MCP tools asynchronously after servers are started
+        try:
+            await inference_manager.register_mcp_tools_async("https://exa-mcp.com", "exa")
+        except Exception as e:
+            logger.warning(f"Failed to register Exa MCP tools: {e}")
 
         mode = "static" if hostfile else "dynamic"
         tui.update_status(f"Running on HTTP:{http_port} gRPC:{grpc_port} ({mode})")

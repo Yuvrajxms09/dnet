@@ -1066,8 +1066,37 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
         try:
             logger.debug("📡 Calling ToolRegistry.register_from_mcp()...")
-            # Register MCP tools using ToolRegistry
-            self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
+            # Handle async/sync mismatch - ToolRegistry may be async
+            # Use asyncio.run_in_executor to bridge sync->async if needed
+            import asyncio
+
+            # Check if we're in an async context
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an async context, need to handle this differently
+                logger.warning("⚠️ MCP registration called in async context - deferring to sync execution")
+                # For now, return False and handle this in startup
+                return False
+            except RuntimeError:
+                # No running loop, we can use asyncio.run
+                pass
+
+            # Try to call the async method synchronously
+            try:
+                # If the method is async, we need to handle it
+                import inspect
+                register_method = getattr(self._tool_registry, 'register_from_mcp', None)
+                if register_method and inspect.iscoroutinefunction(register_method):
+                    # It's async, we need to run it in an event loop
+                    logger.debug("🔄 Running async MCP registration...")
+                    asyncio.run(self._tool_registry.register_from_mcp(transport, with_namespace=namespace))
+                else:
+                    # It's sync, call directly
+                    self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
+            except Exception as async_error:
+                logger.warning(f"⚠️ Async registration failed, trying sync: {async_error}")
+                # Fallback to sync call
+                self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
 
             # Get registered tools to verify
             available_tools = self._tool_registry.get_available_tools()
@@ -1080,6 +1109,44 @@ Important: Only output JSON when you actually want to call tools. For normal res
         except Exception as e:
             logger.error(f"❌ Failed to register MCP tools from {transport}: {e}")
             logger.debug("MCP registration error details:", exc_info=True)
+            return False
+
+    async def register_mcp_tools_async(self, transport: str, namespace: Optional[str] = None) -> bool:
+        """Async version of MCP tool registration.
+
+        Args:
+            transport: MCP transport URL or path
+            namespace: Optional namespace prefix
+
+        Returns:
+            bool: True if registration successful
+        """
+        logger.info(f"🔗 Attempting async MCP tool registration from: {transport}")
+
+        if not TOOL_REGISTRY_AVAILABLE:
+            logger.error("❌ ToolRegistry library not installed")
+            return False
+
+        if not self._tool_registry:
+            logger.error("❌ ToolRegistry not initialized")
+            return False
+
+        try:
+            logger.debug("📡 Calling async ToolRegistry.register_from_mcp()...")
+            # Call the async method directly
+            await self._tool_registry.register_from_mcp(transport, with_namespace=namespace)
+
+            # Get registered tools to verify
+            available_tools = self._tool_registry.get_available_tools()
+            logger.info(f"✅ Successfully registered MCP tools from {transport}")
+            logger.info(f"📋 Available tools: {len(available_tools)} total")
+            logger.debug(f"🛠️ Tool list: {available_tools}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to register MCP tools from {transport}: {e}")
+            logger.debug("Async MCP registration error details:", exc_info=True)
             return False
 
     def register_openapi_tools(self, openapi_spec: Union[str, Dict], client_config: Optional[Dict] = None) -> bool:
