@@ -94,9 +94,9 @@ class InferenceManager:
                 # Convert messages to dict format
                 message_dicts = []
 
-                # Add tool system message if tools are provided
+                # Add tool system message if tools are provided (LangChain-style)
                 if req.tools:
-                    tool_system_msg = self._create_tool_system_message(req.tools, self._tool_registry)
+                    tool_system_msg = self._create_langchain_tool_prompt(req.tools)
                     message_dicts.append({"role": "system", "content": tool_system_msg})
 
                 for m in req.messages:
@@ -116,9 +116,9 @@ class InferenceManager:
             logger.warning(f"Failed to apply chat template: {e}, using fallback")
             prompt_parts = []
 
-            # Add tool system message if tools are provided
+            # Add tool system message if tools are provided (LangChain-style)
             if req.tools:
-                tool_system_msg = self._create_tool_system_message(req.tools, self._tool_registry)
+                tool_system_msg = self._create_langchain_tool_prompt(req.tools)
                 prompt_parts.append(f"System: {tool_system_msg}")
 
             prompt_parts.extend(m.content or "" for m in req.messages)
@@ -371,11 +371,11 @@ class InferenceManager:
                 if token in full_content:
                     full_content = full_content.split(token)[0].strip()
 
-        # Parse tool calls if tools were provided
+        # Parse tool calls if tools were provided (LangChain-style, no grammar)
         tool_calls = None
         final_content = full_content
         if req.tools:
-            tool_calls = self._parse_tool_calls(full_content)
+            tool_calls = self._parse_tool_calls_langchain_style(full_content)
             final_content = self._format_tool_call_response(full_content, tool_calls) if tool_calls else full_content
 
         return ChatResponseModel(
@@ -570,6 +570,244 @@ If you want to respond conversationally without using tools, use the "__conversa
                 })
 
         return results
+
+    def _create_langchain_tool_prompt(self, tools: List[Dict[str, Any]]) -> str:
+        """Create LangChain-style tool prompt (no grammar constraints, just instructions)."""
+        if not tools:
+            return ""
+
+        tool_summaries = []
+        for tool in tools:
+            if tool.get("type") == "function" and "function" in tool:
+                func = tool["function"]
+                name = func.get("name", "unknown")
+                desc = func.get("description", "")
+
+                # Keep it concise for prompt
+                short_desc = desc.split(".")[0][:100] if desc else ""
+                tool_summaries.append(f"- {name}: {short_desc}")
+
+        tools_section = "\n".join(tool_summaries)
+
+        return f"""
+
+You have access to the following tools:
+{tools_section}
+
+To use a tool, respond with ONLY a JSON object containing tool calls:
+{{"tool_calls": [{{"id": "call_1", "type": "function", "function": {{"name": "tool_name", "arguments": "{{\\"param\\": \\"value\\"}}"}}}}]}}
+
+For general conversation or when no tools are needed, respond with plain text.
+
+Important: Only output JSON when you actually want to call tools. For normal responses, just write naturally."""
+
+    def _parse_tool_calls_langchain_style(self, content: str) -> Optional[List[Dict[str, Any]]]:
+        """Parse tool calls using LangChain-style robust parsing (no grammar required)."""
+        if not content or not content.strip():
+            return None
+
+        # Remove common prefixes/suffixes that models sometimes add
+        clean_content = content.strip()
+        prefixes_to_remove = ['Assistant:', 'AI:', 'Response:']
+        for prefix in prefixes_to_remove:
+            if clean_content.startswith(prefix):
+                clean_content = clean_content[len(prefix):].strip()
+
+        # Try direct JSON parsing first
+        try:
+            data = json.loads(clean_content)
+            if isinstance(data, dict) and "tool_calls" in data:
+                calls = data["tool_calls"]
+                if isinstance(calls, list) and calls:
+                    logger.debug(f"Parsed {len(calls)} tool calls via direct JSON")
+                    return calls
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: Extract JSON from mixed text (LangChain-style)
+        json_candidates = self._extract_json_from_text(clean_content)
+        for candidate in json_candidates:
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict) and "tool_calls" in data:
+                    calls = data["tool_calls"]
+                    if isinstance(calls, list) and calls:
+                        logger.debug(f"Parsed {len(calls)} tool calls via extracted JSON")
+                        return calls
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # Check for single tool call format (OpenAI style)
+        try:
+            data = json.loads(clean_content)
+            if isinstance(data, dict) and "function" in data:
+                # Convert single tool call to tool_calls format
+                tool_call = {
+                    "id": data.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                    "type": "function",
+                    "function": data["function"]
+                }
+                logger.debug("Converted single tool call format")
+                return [tool_call]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+        return None
+
+    def _extract_json_from_text(self, text: str) -> List[str]:
+        """Extract JSON blocks from text (LangChain-inspired approach)."""
+        candidates = []
+
+        # Find all JSON-like blocks
+        brace_level = 0
+        start_pos = -1
+
+        i = 0
+        while i < len(text):
+            if text[i] == '{':
+                if brace_level == 0:
+                    start_pos = i
+                brace_level += 1
+            elif text[i] == '}':
+                brace_level -= 1
+                if brace_level == 0 and start_pos != -1:
+                    json_block = text[start_pos:i+1]
+                    candidates.append(json_block)
+                    start_pos = -1
+            i += 1
+
+        return candidates
+
+    def _execute_tool_calls_simple(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Execute tool calls using ToolRegistry (simple version for standalone tool calling)."""
+        if not TOOL_REGISTRY_AVAILABLE or not self._tool_registry:
+            logger.warning("ToolRegistry not available for tool execution")
+            return []
+
+        results = []
+        for tc in tool_calls:
+            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+
+            # Parse arguments
+            args_raw = func.get("arguments", "{}")
+            if isinstance(args_raw, str):
+                try:
+                    arguments = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    arguments = {}
+                    logger.warning(f"Failed to parse tool arguments: {args_raw[:100]}")
+            else:
+                arguments = args_raw
+
+            logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+
+            try:
+                # Execute via ToolRegistry
+                tool_func = self._tool_registry.get_callable(tool_name)
+                if tool_func:
+                    if asyncio.iscoroutinefunction(tool_func):
+                        result = asyncio.run(tool_func(**arguments))
+                    else:
+                        result = tool_func(**arguments)
+
+                    results.append({
+                        "tool_call_id": tool_id,
+                        "content": str(result),
+                        "success": True
+                    })
+                    logger.info(f"Tool '{tool_name}' executed successfully")
+                else:
+                    raise ValueError(f"Tool '{tool_name}' not found in registry")
+
+            except Exception as e:
+                error_msg = f"Tool execution failed: {e}"
+                logger.error(f"Tool '{tool_name}' failed: {e}")
+                results.append({
+                    "tool_call_id": tool_id,
+                    "content": error_msg,
+                    "success": False
+                })
+
+        return results
+
+    async def execute_tools_and_continue(self, req: ChatRequestModel) -> ChatResponseModel:
+        """
+        Execute tools and continue conversation (for research use cases).
+        This is a standalone agent-style method that doesn't interfere with normal chat completions.
+        """
+        logger.info(f"Starting tool execution flow for: {req.messages[-1].content[:100] if req.messages else 'empty'}")
+
+        # Step 1: Generate initial response (may contain tool calls)
+        initial_response = await self._generate_single_completion(req)
+
+        choice = initial_response.choices[0]
+        if not choice.message or not choice.message.tool_calls:
+            # No tool calls, return normal response
+            logger.info("No tool calls generated, returning normal response")
+            return initial_response
+
+        tool_calls = choice.message.tool_calls
+        logger.info(f"Executing {len(tool_calls)} tool calls")
+
+        # Step 2: Execute tools
+        tool_results = self._execute_tool_calls_simple([
+            {
+                "id": tc.id,
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.args) if tc.args else "{}"
+                }
+            } for tc in tool_calls
+        ])
+
+        # Step 3: Create new conversation with tool results
+        new_messages = req.messages.copy()
+
+        # Add assistant message with tool calls
+        assistant_msg = choice.message.model_copy()
+        new_messages.append(assistant_msg)
+
+        # Add tool results
+        for result in tool_results:
+            tool_call_id = result["tool_call_id"]
+            content = result["content"]
+
+            # Find the corresponding tool call to get the tool name
+            tool_name = "unknown_tool"
+            for tc in tool_calls:
+                if tc.id == tool_call_id:
+                    tool_name = tc.name
+                    break
+
+            new_messages.append(ChatMessage(
+                role="tool",
+                name=tool_name,
+                content=content,
+                tool_call_id=tool_call_id
+            ))
+
+        # Add guidance for the model to synthesize the final answer
+        guidance_msg = ChatMessage(
+            role="user",
+            content="Based on the tool results above, provide a comprehensive and well-structured answer to my original question. Extract and organize the key information from the tool outputs."
+        )
+        new_messages.append(guidance_msg)
+
+        # Step 4: Generate final synthesized response
+        final_req = req.model_copy(update={
+            "messages": new_messages,
+            "tools": None,  # Don't include tools in final generation
+        })
+
+        logger.info("Generating final synthesized response")
+        final_response = await self._generate_single_completion(final_req)
+
+        # Mark as tool-synthesized response
+        final_response.choices[0].finish_reason = ChatCompletionReason.STOP
+
+        return final_response
 
     def resolve_request(self, nonce: str, result: Any):
         self.adapter.resolve_token(nonce, result)
