@@ -471,36 +471,44 @@ class MCPToolClient:
 
 # Predefined MCP server configurations for popular services
 MCP_SERVER_PRESETS: Dict[str, Dict[str, Any]] = {
+    # Exa - Remote HTTP (recommended, no local install needed)
+    "exa-http": {
+        "transport": "http",
+        "url_template": "https://mcp.exa.ai/mcp?exaApiKey={EXA_API_KEY}&tools=web_search_exa,get_code_context_exa",
+        "env_key": "EXA_API_KEY",
+        "description": "Exa AI search (remote HTTP - recommended)"
+    },
+    # Exa - Local stdio (requires npx)
     "exa": {
         "command": "npx",
-        "args": ["-y", "@anthropic-ai/exa-mcp-server"],
+        "args": ["-y", "exa-mcp-server"],
         "transport": "stdio",
         "env_key": "EXA_API_KEY",
-        "description": "Exa AI search engine"
+        "description": "Exa AI search engine (local stdio)"
     },
     "github": {
         "command": "npx", 
-        "args": ["-y", "@anthropic-ai/github-mcp-server"],
+        "args": ["-y", "@modelcontextprotocol/server-github"],
         "transport": "stdio",
         "env_key": "GITHUB_TOKEN",
         "description": "GitHub API integration"
     },
     "filesystem": {
         "command": "npx",
-        "args": ["-y", "@anthropic-ai/filesystem-mcp-server"],
+        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
         "transport": "stdio",
         "description": "Local filesystem access"
     },
     "brave-search": {
         "command": "npx",
-        "args": ["-y", "@anthropic-ai/brave-search-mcp-server"],
+        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
         "transport": "stdio",
         "env_key": "BRAVE_API_KEY",
         "description": "Brave Search API"
     },
     "fetch": {
         "command": "npx",
-        "args": ["-y", "@anthropic-ai/fetch-mcp-server"],
+        "args": ["-y", "@modelcontextprotocol/server-fetch"],
         "transport": "stdio",
         "description": "HTTP fetch requests"
     }
@@ -544,7 +552,7 @@ async def create_mcp_client_from_presets(
     Create an MCP client with predefined server configurations.
     
     Args:
-        presets: List of preset names (e.g., ["exa", "github"])
+        presets: List of preset names (e.g., ["exa-http", "github"])
         additional_env: Additional environment variables
         
     Returns:
@@ -552,7 +560,7 @@ async def create_mcp_client_from_presets(
         
     Example:
         client = await create_mcp_client_from_presets(
-            presets=["exa", "github"],
+            presets=["exa-http", "github"],
             additional_env={"EXA_API_KEY": "...", "GITHUB_TOKEN": "..."}
         )
     """
@@ -564,22 +572,47 @@ async def create_mcp_client_from_presets(
             continue
         
         preset = MCP_SERVER_PRESETS[preset_name]
+        transport = preset.get("transport", "stdio")
         
-        config: Dict[str, Any] = {
-            "command": preset["command"],
-            "args": preset["args"],
-            "transport": preset.get("transport", "stdio"),
-        }
-        
-        # Build environment
-        if preset.get("env_key"):
-            env_value = (additional_env or {}).get(preset["env_key"]) or os.getenv(preset["env_key"])
-            if env_value:
-                config["env"] = {preset["env_key"]: env_value}
+        # Handle HTTP transport (remote servers)
+        if transport == "http":
+            url_template = preset.get("url_template", "")
+            
+            # Get API key if needed
+            if preset.get("env_key"):
+                env_value = (additional_env or {}).get(preset["env_key"]) or os.getenv(preset["env_key"])
+                if env_value:
+                    # Substitute API key in URL template
+                    url = url_template.replace(f"{{{preset['env_key']}}}", env_value)
+                    configs[preset_name] = {
+                        "url": url,
+                        "transport": "http",
+                    }
+                else:
+                    logger.warning(f"⚠️ {preset['env_key']} not set for {preset_name}")
             else:
-                logger.warning(f"⚠️ {preset['env_key']} not set for {preset_name}")
+                configs[preset_name] = {
+                    "url": url_template,
+                    "transport": "http",
+                }
         
-        configs[preset_name] = config
+        # Handle stdio transport (local servers)
+        else:
+            config: Dict[str, Any] = {
+                "command": preset["command"],
+                "args": preset["args"],
+                "transport": "stdio",
+            }
+            
+            # Build environment
+            if preset.get("env_key"):
+                env_value = (additional_env or {}).get(preset["env_key"]) or os.getenv(preset["env_key"])
+                if env_value:
+                    config["env"] = {preset["env_key"]: env_value}
+                else:
+                    logger.warning(f"⚠️ {preset['env_key']} not set for {preset_name}")
+            
+            configs[preset_name] = config
     
     client = MCPToolClient(server_configs=configs)
     await client.load_tools()

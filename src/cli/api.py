@@ -100,34 +100,36 @@ async def serve(
         await grpc_server.start()
         await http_server.start(shutdown_trigger=stop_event.wait)
 
-        # Register MCP tools using the correct method (stdio transport)
-        # MCP servers use stdio (subprocess) or SSE transport, NOT HTTP URLs!
+        # Register MCP tools
         import os
         
         # Try to register Exa MCP tools if API key is available
+        # Using Exa's remote HTTP MCP server (simplest approach)
+        # See: https://github.com/exa-labs/exa-mcp-server
         exa_api_key = os.getenv("EXA_API_KEY")
         if exa_api_key:
             try:
-                # Use the preset for easy configuration
-                success = await inference_manager.register_mcp_preset(
-                    "exa",
-                    env={"EXA_API_KEY": exa_api_key}
+                # Use Exa's remote HTTP MCP server
+                # Available tools: web_search_exa, get_code_context_exa, deep_search_exa, etc.
+                exa_url = f"https://mcp.exa.ai/mcp?exaApiKey={exa_api_key}&tools=web_search_exa,get_code_context_exa"
+                success = await inference_manager.register_mcp_http(
+                    server_name="exa",
+                    url=exa_url
                 )
                 if success:
-                    logger.info("✅ Exa MCP tools registered successfully")
+                    logger.info("✅ Exa MCP tools registered successfully via HTTP")
                 else:
-                    logger.warning("⚠️ Failed to register Exa MCP tools")
+                    logger.warning("⚠️ Failed to register Exa MCP tools via HTTP")
             except Exception as e:
                 logger.warning(f"Failed to register Exa MCP tools: {e}")
         else:
             logger.info("ℹ️ EXA_API_KEY not set, skipping Exa MCP registration")
             logger.info("   Set EXA_API_KEY environment variable to enable Exa tools")
         
-        # You can also register other MCP presets:
-        # - "github" (requires GITHUB_TOKEN)
-        # - "brave-search" (requires BRAVE_API_KEY)
-        # - "filesystem" (local filesystem access)
-        # - "fetch" (HTTP requests)
+        # You can also register other MCP servers:
+        # - GitHub: await inference_manager.register_mcp_preset("github")
+        # - Brave Search: await inference_manager.register_mcp_preset("brave-search")
+        # - Custom HTTP: await inference_manager.register_mcp_http("name", "url")
 
         mode = "static" if hostfile else "dynamic"
         tui.update_status(f"Running on HTTP:{http_port} gRPC:{grpc_port} ({mode})")
