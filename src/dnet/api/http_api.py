@@ -169,6 +169,7 @@ class HTTPServer:
                         message="No profiles collected",
                     )
 
+                logger.info(f"Profiling model {req.model} with seq_len={req.seq_len}, batch_sizes={batch_sizes}")
                 model_profile_split = profile_model(
                     repo_id=req.model,
                     batch_sizes=batch_sizes,
@@ -281,6 +282,7 @@ class HTTPServer:
                     detail="No profiles collected from shards",
                 )
 
+            logger.info(f"Profiling model {req.model} with seq_len={req.seq_len}, batch_sizes={batch_sizes}")
             model_profile_split = profile_model(
                 repo_id=req.model,
                 batch_sizes=batch_sizes,
