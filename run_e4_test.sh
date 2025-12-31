@@ -1,10 +1,10 @@
 #!/bin/bash
-# Run E2 memory pool test - assumes API/shard are running and model is loaded
+# Run E4 Embedding/LM head test - assumes API/shard are running and model is loaded
 
 set -e
 
 BASE_URL="http://localhost:8080"
-RESULTS_DIR="e2_results_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="e4_results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 
 run_test() {
@@ -64,9 +64,9 @@ EOF
 }
 
 # Run tests (assumes API/shard running with model loaded)
-run_test "default_pools" "default_pools.config"
-run_test "small_pools" "small_pools.config"
-run_test "tiny_pools" "tiny_pools.config"
+run_test "embedding_default" "embedding_default.config"
+run_test "embedding_stressed" "embedding_stressed.config"
+run_test "embedding_extreme" "embedding_extreme.config"
 
 echo ""
 echo "Tests completed. Results in $RESULTS_DIR"
