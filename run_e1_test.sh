@@ -45,6 +45,8 @@ run_test() {
 
     # Setup config
     cp "$config" .env || { echo "Config file $config not found"; exit 1; }
+    echo "Config loaded from $config:"
+    cat .env
 
     TEST_DIR="$RESULTS_DIR/$name"
     mkdir -p "$TEST_DIR"
@@ -123,8 +125,26 @@ run_test() {
     echo "=== VM Stats ===" >> "$TEST_DIR/memory_after.txt"
     vm_stat >> "$TEST_DIR/memory_after.txt" 2>/dev/null || echo "vm_stat not available" >> "$TEST_DIR/memory_after.txt"
 
-    # Extract logs
+    # Extract logs - try different patterns
     grep "\[PROFILE\]" "$TEST_DIR"/*.log > "$TEST_DIR/profile.txt" 2>/dev/null || true
+    grep "PROFILE" "$TEST_DIR"/*.log >> "$TEST_DIR/profile_all.txt" 2>/dev/null || true
+
+    # Also check if MATERIALIZE appears anywhere
+    grep "MATERIALIZE" "$TEST_DIR"/*.log >> "$TEST_DIR/materialize_logs.txt" 2>/dev/null || true
+
+    # Debug: show what we found
+    if [ -s "$TEST_DIR/profile.txt" ]; then
+        echo "Found PROFILE logs in profile.txt"
+    else
+        echo "No PROFILE logs found in *.log files"
+        # Check if logs have any content at all
+        for log in "$TEST_DIR"/*.log; do
+            if [ -f "$log" ] && [ -s "$log" ]; then
+                echo "Log file $log has content ($(wc -l < "$log") lines)"
+                tail -10 "$log"
+            fi
+        done
+    fi
 
     # Summary
     cat > "$TEST_DIR/summary.txt" << EOF
