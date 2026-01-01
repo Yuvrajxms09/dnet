@@ -1,4 +1,6 @@
 from typing import cast
+from functools import reduce
+from operator import mul
 from dnet.core.memory.weight_cache import WeightCache
 from ..models import ShardLoadModelRequest
 from dnet.core.types.messages import ActivationMessage
@@ -49,9 +51,9 @@ class FitInMemoryPolicy(ComputePolicy):
 
                 # Memory logging: pre-inference
                 # Calculate expected tensor size from shape and dtype
-                from dnet.utils.serialization import mlx_dtype_map
                 dtype_size = mlx_dtype_map.get(msg.dtype, mx.float32).size
-                input_activation_mb = msg.shape[0] * msg.shape[1] * dtype_size / (1024 * 1024)
+                total_elements = reduce(mul, msg.shape, 1) 
+                input_activation_mb = total_elements * dtype_size / (1024 * 1024)
                 self.runtime.log_stage_memory("pre_inference", input_activation_mb)
 
                 # 1) per-nonce KV
