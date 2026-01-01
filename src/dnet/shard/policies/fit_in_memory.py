@@ -47,6 +47,13 @@ class FitInMemoryPolicy(ComputePolicy):
                     )
                     return
 
+                # Memory logging: pre-inference
+                # Calculate expected tensor size from shape and dtype
+                from dnet.utils.serialization import mlx_dtype_map
+                dtype_size = mlx_dtype_map.get(msg.dtype, mx.float32).size
+                input_activation_mb = msg.shape[0] * msg.shape[1] * dtype_size / (1024 * 1024)
+                self.runtime.log_stage_memory("pre_inference", input_activation_mb)
+
                 # 1) per-nonce KV
                 kv = self.runtime.get_or_make_kv(msg.nonce)
 
@@ -113,6 +120,10 @@ class FitInMemoryPolicy(ComputePolicy):
                         mx.eval(x)
                     except Exception:
                         pass
+
+                    # Memory logging: post-layer computation
+                    current_activation_mb = x.size * x.itemsize / (1024 * 1024)
+                    self.runtime.log_stage_memory(f"post_layer_{last_layer}", current_activation_mb)
 
                     for lid in window_layers:
                         self.weight_cache.decrease_reference(lid)
@@ -195,6 +206,10 @@ class FitInMemoryPolicy(ComputePolicy):
                             req_logprobs=msg.req_logprobs,
                             req_top_logprobs=msg.req_top_logprobs,
                         )
+
+                    # Memory logging: post-inference
+                    output_activation_mb = x.size * x.itemsize / (1024 * 1024)  # Actual tensor size
+                    self.runtime.log_stage_memory("post_inference", output_activation_mb)
 
                     self.runtime.emit_result(output_msg)
                     self.runtime.input_pool.release(msg.pool_id)

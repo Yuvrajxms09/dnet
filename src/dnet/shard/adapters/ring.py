@@ -271,6 +271,36 @@ class RingAdapter(TopologyAdapter):
         except Exception as e:
             logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
             return
+
+        # Communication budget logging: track bytes sent between stages
+        try:
+            from dnet.core.observability import load_settings
+            obs_settings = load_settings()
+
+            if obs_settings.enabled:
+                bytes_sent = len(data) if isinstance(data, (bytes, bytearray)) else 0
+                activation_size_mb = bytes_sent / (1024 * 1024)
+
+                # Estimate tokens in this activation using actual model hidden size and wire dtype
+                try:
+                    hidden_size = self.runtime.model_metadata.embedding_size() if self.runtime.model_metadata else 8192
+                    wire_dtype_size = self.runtime._wire_mx_dtype.size
+                except:
+                    hidden_size = 8192  # fallback for large models (e.g., 70B)
+                    wire_dtype_size = 2  # fallback to fp16
+
+                estimated_tokens = max(1, int(bytes_sent / (wire_dtype_size * hidden_size)))
+                bytes_per_token = bytes_sent / estimated_tokens if estimated_tokens > 0 else 0
+
+                logger.info(
+                    "[COMM_BUDGET] stage=%s direction=outbound nonce=%s "
+                    "bytes=%d activation_mb=%.2f bytes_per_token=%.1f compression=%s",
+                    self.runtime.shard_id, msg.nonce, bytes_sent, activation_size_mb,
+                    bytes_per_token, "enabled" if self.transport_settings.compress else "disabled"
+                )
+        except Exception:
+            # Silent failure for comm logging
+            pass
         msg.dtype = self.runtime._wire_dtype_str
         request = msg.to_proto(data)
         request.timestamp = int(time.time() * 1000)

@@ -30,6 +30,36 @@ class ActivationCodec:
         activation = request.activation
         pool_id = None
 
+        # Communication budget logging: track bytes received
+        try:
+            from dnet.core.observability import load_settings
+            obs_settings = load_settings()
+
+            if obs_settings.enabled:
+                bytes_received = len(activation.data) if activation.data else 0
+                activation_size_mb = bytes_received / (1024 * 1024)
+
+                # Estimate tokens in this activation using actual model hidden size and wire dtype
+                try:
+                    hidden_size = self.runtime.model_metadata.embedding_size() if self.runtime.model_metadata else 8192
+                    wire_dtype_size = self.runtime._wire_mx_dtype.size
+                except:
+                    hidden_size = 8192  # fallback for large models (e.g., 70B)
+                    wire_dtype_size = 2  # fallback to fp16
+
+                estimated_tokens = max(1, int(bytes_received / (wire_dtype_size * hidden_size)))
+                bytes_per_token = bytes_received / estimated_tokens if estimated_tokens > 0 else 0
+
+                logger.info(
+                    "[COMM_BUDGET] stage=%s direction=inbound nonce=%s "
+                    "bytes=%d activation_mb=%.2f bytes_per_token=%.1f layer=%s dtype=%s",
+                    self.runtime.shard_id, request.nonce, bytes_received, activation_size_mb,
+                    bytes_per_token, activation.layer_id, activation.dtype
+                )
+        except Exception:
+            # Silent failure for comm logging
+            pass
+
         try:
             # Compressed Tensors
             if "|" in activation.dtype:

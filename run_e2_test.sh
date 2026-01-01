@@ -38,7 +38,7 @@ run_test() {
     START=$(date +%s)
     curl -s -X POST "$BASE_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d '{"model": "mlx-community/Llama-3.3-70B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
+      -d '{"model": "mlx-community/Llama-3.2-3B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
       > "$TEST_DIR/response.json"
 
     END=$(date +%s)
@@ -73,4 +73,12 @@ echo "Tests completed. Results in $RESULTS_DIR"
 echo ""
 echo "To analyze:"
 echo "cat $RESULTS_DIR/*/memory_*.txt"
-echo "Check API/shard logs for [PROFILE] entries"
+echo "Check API/shard logs for:"
+echo "  [PROFILE] entries (weight loading)"
+echo "  [STAGE_MEMORY] entries (stage-wise memory breakdown)"
+echo "  [COMM_BUDGET] entries (inter-stage communication)"
+echo "  [STAGE_PEAK_MEMORY] entries (peak memory per stage)"
+echo ""
+echo "Compare pool memory impact:"
+echo "  Look at pools_mb in [STAGE_MEMORY] across different pool sizes"
+echo "  Check if smaller pools prevent OOM but increase latency"

@@ -144,6 +144,113 @@ class ShardRuntime:
         """Backward compat: returns topology settings."""
         return self._topology_settings
 
+    def get_stage_memory_breakdown(self) -> dict:
+        breakdown = {
+            'pools_mb': 0,
+            'weights_mb': 0,
+            'activations_mb': 0
+        }
+
+        try:
+            if self.input_pool:
+                breakdown['pools_mb'] += self.input_pool.get_stats().get('used_memory_mb', 0)
+            if self.output_pool:
+                breakdown['pools_mb'] += self.output_pool.get_stats().get('used_memory_mb', 0)
+        except Exception as e:
+            from dnet.utils.logger import logger
+            logger.warning(f"Failed to get pool memory stats: {e}")
+
+        try:
+            breakdown['weights_mb'] = self._get_weight_memory_mb()
+        except Exception as e:
+            from dnet.utils.logger import logger
+            logger.warning(f"Failed to calculate weight memory: {e}")
+
+        return breakdown
+
+    def _get_weight_memory_mb(self) -> float:
+        if not hasattr(self, 'model_metadata') or not self.model_metadata:
+            return 0.0
+
+        total_bytes = 0
+
+        # Include layer weights
+        if hasattr(self, 'policy') and self.policy and hasattr(self.policy, 'weight_cache'):
+            resident_layers = self.policy.weight_cache.get_resident_layers()
+
+            for layer_id in resident_layers:
+                layer_info = self.model_metadata.weight_info.get(layer_id, {})
+                total_bytes += sum(w.size_bytes for w in layer_info.values())
+
+        # Include embeddings if this stage has layer 0
+        has_start = 0 in getattr(self, 'assigned_layers', [])
+        if has_start and self.model_metadata.embed_tokens:
+            total_bytes += sum(w.size_bytes for w in self.model_metadata.embed_tokens.values())
+
+        # Include LM head if this stage has the last layer
+        num_layers = getattr(self.model_metadata, 'num_layers', 0)
+        has_end = (num_layers - 1) in getattr(self, 'assigned_layers', [])
+        tied = getattr(getattr(self, 'model', None), 'config.tie_word_embeddings', False)
+        if has_end and self.model_metadata.lm_head and not (has_start and tied):
+            total_bytes += sum(w.size_bytes for w in self.model_metadata.lm_head.values())
+
+        return total_bytes / (1024 * 1024)
+
+    def log_stage_memory(self, checkpoint: str = "current", activation_mb: float = 0) -> None:
+        try:
+            from dnet.core.observability import load_settings
+            if not load_settings().enabled:
+                return
+        except Exception:
+            return
+
+        try:
+            breakdown = self.get_stage_memory_breakdown()
+            breakdown['activations_mb'] = activation_mb
+
+            total_mb = sum(breakdown.values())
+            if not hasattr(self, '_peak_memory_mb'):
+                self._peak_memory_mb = 0
+            self._peak_memory_mb = max(self._peak_memory_mb, total_mb)
+
+            # Identify edge stages for H2 analysis
+            num_layers = getattr(self.model_metadata, 'num_layers', 0) if self.model_metadata else 0
+            has_start = 0 in getattr(self, 'assigned_layers', [])
+            has_end = (num_layers - 1) in getattr(self, 'assigned_layers', [])
+            stage_type = ""
+            if has_start and has_end:
+                stage_type = "both_ends"
+            elif has_start:
+                stage_type = "start"
+            elif has_end:
+                stage_type = "end"
+            else:
+                stage_type = "middle"
+
+            from dnet.core.observability import make_profiler
+            profiler = make_profiler(True)
+
+            # Enhanced logging with stage type for H2 analysis
+            logger.info(
+                "[STAGE_MEMORY] stage=%s type=%s layers=%s checkpoint=%s "
+                "weights=%.1fMB activations=%.1fMB pools=%.1fMB total=%.1fMB",
+                self.shard_id, stage_type, len(getattr(self, 'assigned_layers', [])),
+                checkpoint, breakdown['weights_mb'], breakdown['activations_mb'],
+                breakdown['pools_mb'], total_mb
+            )
+
+            if total_mb > getattr(self, '_last_logged_peak', 0) + 50:
+                from dnet.utils.logger import logger
+                logger.info(
+                    "[STAGE_PEAK_MEMORY] stage=%s type=%s peak=%.1fMB",
+                    self.shard_id, stage_type, self._peak_memory_mb
+                )
+                self._last_logged_peak = self._peak_memory_mb
+
+        except Exception as e:
+            from dnet.utils.logger import logger
+            logger.warning(f"Stage memory logging failed for {self.shard_id}: {e}")
+
     def attach_loop(self, loop):
         self._loop = loop
 

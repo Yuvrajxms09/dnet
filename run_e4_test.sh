@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run E4 Embedding/LM head test - assumes API/shard are running and model is loaded
+# Run E4: KV cache quantization test - assumes API/shard are running and model is loaded
 
 set -e
 
@@ -38,7 +38,7 @@ run_test() {
     START=$(date +%s)
     curl -s -X POST "$BASE_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d '{"model": "mlx-community/Llama-3.3-70B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
+      -d '{"model": "mlx-community/Llama-3.2-3B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
       > "$TEST_DIR/response.json"
 
     END=$(date +%s)
@@ -63,14 +63,22 @@ EOF
     echo "✓ $name test completed - results in $TEST_DIR"
 }
 
-# Run tests (assumes API/shard running with model loaded)
-run_test "embedding_default" "embedding_default.config"
-run_test "embedding_stressed" "embedding_stressed.config"
-run_test "embedding_extreme" "embedding_extreme.config"
+# Run E4 tests: KV cache quantization impact
+run_test "kv_fp16" "kv_fp16.config"
+run_test "kv_quantized" "kv_quantized.config"
 
 echo ""
 echo "Tests completed. Results in $RESULTS_DIR"
 echo ""
 echo "To analyze:"
 echo "cat $RESULTS_DIR/*/memory_*.txt"
-echo "Check API/shard logs for [PROFILE] entries"
+echo "Check API/shard logs for:"
+echo "  [PROFILE] entries (weight loading)"
+echo "  [STAGE_MEMORY] entries (stage-wise memory breakdown)"
+echo "  [COMM_BUDGET] entries (inter-stage communication)"
+echo "  [STAGE_PEAK_MEMORY] entries (peak memory per stage)"
+echo ""
+echo "Compare KV cache memory impact:"
+echo "  Look at kv_mb in [STAGE_MEMORY] for fp16 vs 8bit quantization"
+echo "  kv_fp16 should use ~2x more memory than kv_quantized for same sequence length"
+echo "  Check if KV cache is a significant contributor to peak stage memory"

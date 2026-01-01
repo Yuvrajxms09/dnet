@@ -47,3 +47,6 @@ repacked_models/*
 # Env files
 *.env*
 !.env*.example
+
+# Hostfile (contains machine-specific IPs)
+# hostfile  # Temporarily commented out for issue-73 testing

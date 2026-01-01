@@ -101,6 +101,21 @@ class Profiler:
         if self.enabled:
             logger.warning(msg, *args, **kwargs)
 
+    def log_memory(self, stage_id: str, checkpoint: str, memory_breakdown: dict) -> None:
+        if not self.enabled:
+            return
+
+        weights_mb = memory_breakdown.get('weights_mb', 0)
+        activations_mb = memory_breakdown.get('activations_mb', 0)
+        pools_mb = memory_breakdown.get('pools_mb', 0)
+        total_mb = weights_mb + activations_mb + pools_mb
+
+        logger.info(
+            "[STAGE_MEMORY] stage=%s checkpoint=%s "
+            "weights=%.1fMB activations=%.1fMB pools=%.1fMB total=%.1fMB",
+            stage_id, checkpoint, weights_mb, activations_mb, pools_mb, total_mb
+        )
+
 
 def make_profiler(enabled: bool) -> Profiler:
     """Create a Profiler instance."""

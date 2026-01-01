@@ -1,10 +1,10 @@
 #!/bin/bash
-# Run E2 memory pool test - assumes API/shard are running and model is loaded
+# Run E1: Inter-stage dtype compression test - assumes API/shard are running and model is loaded
 
 set -e
 
 BASE_URL="http://localhost:8080"
-RESULTS_DIR="e2_results_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="e1_results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 
 run_test() {
@@ -38,7 +38,7 @@ run_test() {
     START=$(date +%s)
     curl -s -X POST "$BASE_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d '{"model": "mlx-community/Llama-3.3-70B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
+      -d '{"model": "mlx-community/Llama-3.2-3B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
       > "$TEST_DIR/response.json"
 
     END=$(date +%s)
@@ -63,13 +63,21 @@ EOF
     echo "✓ $name test completed - results in $TEST_DIR"
 }
 
-# Run tests (assumes API/shard running with model loaded)
-run_test "default_pools" "default_pools.config"
-run_test "small_pools" "small_pools.config"
+# Run E1 tests: fp16 wire vs qsparse8_v1 compression
+run_test "baseline_fp16" "baseline.config"
+run_test "compressed_qsparse8" "compressed.config"
 
 echo ""
 echo "Tests completed. Results in $RESULTS_DIR"
 echo ""
 echo "To analyze:"
 echo "cat $RESULTS_DIR/*/memory_*.txt"
-echo "Check API/shard logs for [PROFILE] entries"
+echo "Check API/shard logs for:"
+echo "  [PROFILE] entries (weight loading)"
+echo "  [STAGE_MEMORY] entries (stage-wise memory breakdown)"
+echo "  [COMM_BUDGET] entries (inter-stage communication costs)"
+echo "  [STAGE_PEAK_MEMORY] entries (peak memory per stage)"
+echo ""
+echo "Compare compression effectiveness:"
+echo "  baseline_fp16 vs compressed_qsparse8 activation_mb values"
+echo "  Look for reduction in [COMM_BUDGET] activation_mb with compression"
