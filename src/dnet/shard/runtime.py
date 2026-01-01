@@ -153,9 +153,11 @@ class ShardRuntime:
 
         try:
             if self.input_pool:
-                breakdown['pools_mb'] += self.input_pool.get_stats().get('used_memory_mb', 0)
+                stats = self.input_pool.get_stats()
+                breakdown['pools_mb'] += stats.get('pool', {}).get('used_memory_mb', 0)
             if self.output_pool:
-                breakdown['pools_mb'] += self.output_pool.get_stats().get('used_memory_mb', 0)
+                stats = self.output_pool.get_stats()
+                breakdown['pools_mb'] += stats.get('pool', {}).get('used_memory_mb', 0)
         except Exception as e:
             logger.warning(f"Failed to get pool memory stats: {e}")
 
