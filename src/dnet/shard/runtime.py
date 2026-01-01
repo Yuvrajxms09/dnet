@@ -157,13 +157,11 @@ class ShardRuntime:
             if self.output_pool:
                 breakdown['pools_mb'] += self.output_pool.get_stats().get('used_memory_mb', 0)
         except Exception as e:
-            from dnet.utils.logger import logger
             logger.warning(f"Failed to get pool memory stats: {e}")
 
         try:
             breakdown['weights_mb'] = self._get_weight_memory_mb()
         except Exception as e:
-            from dnet.utils.logger import logger
             logger.warning(f"Failed to calculate weight memory: {e}")
 
         return breakdown
@@ -240,7 +238,6 @@ class ShardRuntime:
             )
 
             if total_mb > getattr(self, '_last_logged_peak', 0) + 50:
-                from dnet.utils.logger import logger
                 logger.info(
                     "[STAGE_PEAK_MEMORY] stage=%s type=%s peak=%.1fMB",
                     self.shard_id, stage_type, self._peak_memory_mb
@@ -248,7 +245,6 @@ class ShardRuntime:
                 self._last_logged_peak = self._peak_memory_mb
 
         except Exception as e:
-            from dnet.utils.logger import logger
             logger.warning(f"Stage memory logging failed for {self.shard_id}: {e}")
 
     def attach_loop(self, loop):
