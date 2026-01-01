@@ -38,7 +38,7 @@ run_test() {
     START=$(date +%s)
     curl -s -X POST "$BASE_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d '{"model": "mlx-community/Llama-3.2-3B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
+      -d '{"model": "mlx-community/Llama-3.3-70B-Instruct-4bit", "messages": [{"role": "user", "content": "Explain machine learning"}], "max_tokens": 500}' \
       > "$TEST_DIR/response.json"
 
     END=$(date +%s)
