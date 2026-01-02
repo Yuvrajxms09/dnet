@@ -208,11 +208,17 @@ def main():
                        help="API URL to fetch topology from (default: http://localhost:8080)")
     parser.add_argument("--seq-len", type=int, default=4096, help="Sequence length")
     parser.add_argument("--kv-bits", type=int, default=16, help="KV cache bits (8, 16, 32)")
+    parser.add_argument("--pools", type=int, help="Set both input and output pools to same size (MB)")
     parser.add_argument("--input-pool-mb", type=int, default=512, help="Input pool size MB")
     parser.add_argument("--output-pool-mb", type=int, default=512, help="Output pool size MB")
     parser.add_argument("--wire-dtype-bits", type=int, default=16, help="Wire dtype bits")
 
     args = parser.parse_args()
+
+    # Handle --pools argument (sets both input and output pools)
+    if args.pools is not None:
+        args.input_pool_mb = args.pools
+        args.output_pool_mb = args.pools
 
     try:
         # Get model metadata
