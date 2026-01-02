@@ -144,6 +144,33 @@ class ShardRuntime:
         """Backward compat: returns topology settings."""
         return self._topology_settings
 
+    def capture_memory_snapshot(self, checkpoint: str) -> dict:
+        """Capture current memory usage snapshot for Issue #73 analysis.
+
+        Returns dict with checkpoint name and memory values.
+        Non-blocking - returns empty dict if MLX Metal API unavailable.
+        """
+        snapshot = {"checkpoint": checkpoint}
+
+        try:
+            import mlx.core as mx
+            snapshot["active_mb"] = mx.metal.get_active_memory() / (1024 * 1024)
+            snapshot["peak_mb"] = mx.metal.get_peak_memory() / (1024 * 1024)
+        except Exception as e:
+            logger.debug(f"Metal memory API unavailable: {e}")
+            snapshot["active_mb"] = 0
+            snapshot["peak_mb"] = 0
+
+        # Also capture process RSS for comparison
+        try:
+            import resource
+            snapshot["process_rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        except Exception:
+            snapshot["process_rss_mb"] = 0
+
+        logger.info(f"[MEMORY_SNAPSHOT] {checkpoint}: active={snapshot['active_mb']:.0f}MB peak={snapshot['peak_mb']:.0f}MB rss={snapshot['process_rss_mb']:.0f}MB")
+        return snapshot
+
     def get_stage_memory_breakdown(self) -> dict:
         breakdown = {
             'pools_mb': 0,
@@ -275,6 +302,9 @@ class ShardRuntime:
         """
         load model
         """
+        # Memory snapshot: before loading starts
+        self.capture_memory_snapshot("before_load")
+
         # Metadata + assignment
         self.model_metadata = get_model_metadata(req.model_path)
         self.assigned_layers = list(req.layers)
@@ -389,6 +419,9 @@ class ShardRuntime:
             logger.warning(
                 "Runtime %s: failed to load API‑layer weights: %s", self.shard_id, e
             )
+
+        # Memory snapshot: after model loading complete
+        self.capture_memory_snapshot("after_load")
 
     def unload_model_core(self) -> ShardUnloadModelResponse:
         """

@@ -59,6 +59,16 @@ class FitInMemoryPolicy(ComputePolicy):
                 # 1) per-nonce KV
                 kv = self.runtime.get_or_make_kv(msg.nonce)
 
+                # Memory snapshot: after first token (KV cache allocated)
+                if kv and hasattr(kv, 'seen_tokens') and kv.seen_tokens == 1:
+                    self.runtime.capture_memory_snapshot("after_first_token")
+
+                # Memory snapshot: at sequence length milestones (for Issue #73 analysis)
+                seq_len = getattr(kv, 'seen_tokens', 0) if kv else 0
+                # Capture at milestones or every 25 tokens for testing
+                if seq_len in [1024, 2048, 3072, 4096] or (seq_len > 0 and seq_len % 25 == 0):
+                    self.runtime.capture_memory_snapshot(f"at_seq_{seq_len}")
+
                 # 2) get input tensor from pool
                 input_buffer = self.runtime.input_pool.get_buffer(msg.pool_id)
                 if input_buffer is None:
