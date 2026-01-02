@@ -7,11 +7,26 @@ BASE_URL="http://localhost:8080"
 RESULTS_DIR="e1_results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 
-# Run budget calculator first
+# Auto-detect model from topology
+MODEL_NAME=$(curl -s "http://localhost:8080/v1/topology" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('model', 'unknown'))
+except:
+    print('unknown')
+")
+
+if [ "$MODEL_NAME" = "unknown" ] || [ -z "$MODEL_NAME" ]; then
+    echo "ERROR: Could not detect model from topology. Is the model loaded via dnet-tui?"
+    exit 1
+fi
+
+echo "=== Detected Model: $MODEL_NAME ==="
+
+# Run budget calculator first (auto-detects model and topology from loaded system)
 echo "=== Running Memory Budget Calculator ==="
 uv run python3 scripts/memory_budget.py \
-  --model Qwen/Qwen3-32B-MLX-bf16 \
-  --api-url "http://localhost:8080" \
   --seq-len 2048 \
   --pools 512 \
   > "$RESULTS_DIR/budget_baseline.txt"
@@ -47,7 +62,7 @@ run_test() {
     START=$(date +%s)
     curl -s -X POST "$BASE_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d '{"model": "Qwen/Qwen3-32B-MLX-bf16", "messages": [{"role": "user", "content": "hi there"}], "max_tokens": 50}' \
+      -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"hi there\"}], \"max_tokens\": 50}" \
       > "$TEST_DIR/response.json"
 
     END=$(date +%s)

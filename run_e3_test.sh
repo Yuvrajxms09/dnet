@@ -10,8 +10,6 @@ mkdir -p "$RESULTS_DIR"
 # Run budget calculator for baseline
 echo "=== Running Memory Budget Calculator ==="
 uv run python3 scripts/memory_budget.py \
-  --model Qwen/Qwen3-32B-MLX-bf16 \
-  --api-url "http://localhost:8080" \
   --seq-len 2048 \
   --pools 512 \
   > "$RESULTS_DIR/budget_baseline.txt"

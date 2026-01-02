@@ -6,7 +6,9 @@ Calculates expected memory usage per stage without running inference.
 Uses model metadata to compute exact memory requirements.
 
 Usage:
-    python scripts/memory_budget.py --model <model_path> --stage-layers "0-39" "40-79" --seq-len 4096 --pools 512
+    python scripts/memory_budget.py --seq-len 4096 --pools 512
+
+Auto-detects model and stage layers from loaded topology.
 """
 
 import argparse
@@ -22,21 +24,6 @@ from dnet.utils.model import get_model_metadata, ModelMetadata
 from dnet.utils.logger import logger
 
 
-def parse_layer_ranges(ranges: List[str]) -> List[List[int]]:
-    """Parse layer range strings like '0-39' or '0-15,32-47' into lists of integers."""
-    result = []
-    for range_str in ranges:
-        layer_list = []
-        # Split by comma for multiple ranges like "0-15,32-47"
-        for part in range_str.split(","):
-            part = part.strip()
-            if "-" in part:
-                start, end = part.split("-")
-                layer_list.extend(range(int(start), int(end) + 1))
-            else:
-                layer_list.append(int(part))
-        result.append(layer_list)
-    return result
 
 
 def get_topology_from_api(api_url: str) -> Optional[Dict[str, Any]]:
@@ -45,7 +32,9 @@ def get_topology_from_api(api_url: str) -> Optional[Dict[str, Any]]:
         import requests
         response = requests.get(f"{api_url}/v1/topology", timeout=5)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        logger.info(f"Fetched topology: model={data.get('model')}, layers={data.get('num_layers')}, devices={len(data.get('assignments', []))}")
+        return data
     except Exception as e:
         logger.warning(f"Could not fetch topology from {api_url}: {e}")
         return None
@@ -200,10 +189,9 @@ def print_budget_table(metadata: ModelMetadata, stage_budgets: List[Dict[str, fl
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Calculate memory budget for DNET stages")
-    parser.add_argument("--model", required=True, help="Model path or HuggingFace ID")
-    parser.add_argument("--stage-layers", nargs="+",
-                       help="Layer ranges for each stage (e.g., '0-39' '40-79'). If not provided, fetches from --api-url")
+    parser = argparse.ArgumentParser(
+        description="Calculate memory budget for DNET stages (requires loaded model with topology)"
+    )
     parser.add_argument("--api-url", default="http://localhost:8080",
                        help="API URL to fetch topology from (default: http://localhost:8080)")
     parser.add_argument("--seq-len", type=int, default=4096, help="Sequence length")
@@ -221,27 +209,32 @@ def main():
         args.output_pool_mb = args.pools
 
     try:
-        # Get model metadata
-        metadata = get_model_metadata(args.model)
-        logger.info(f"Loaded metadata for model with {metadata.num_layers} layers")
+        # Get topology from API (required for issue-73 investigation)
+        topology = get_topology_from_api(args.api_url)
 
-        # Get stage layer assignments
-        if args.stage_layers:
-            # Manual specification
-            stage_layers = parse_layer_ranges(args.stage_layers)
-        else:
-            # Try to fetch from API
-            topology = get_topology_from_api(args.api_url)
-            if topology:
-                stage_layers = extract_stage_layers_from_topology(topology)
-                logger.info(f"Fetched topology with {len(stage_layers)} stages from {args.api_url}")
-            else:
-                logger.error("No --stage-layers provided and could not fetch topology from API")
-                sys.exit(1)
-
-        if not stage_layers:
-            logger.error("No stage layers found")
+        if not topology:
+            logger.error("Could not fetch topology from API. Ensure model is loaded via dnet-tui and topology is configured.")
+            logger.error("Issue-73 investigation requires a loaded model with topology.")
             sys.exit(1)
+
+        # Extract model name and layer assignments from topology
+        model_name = topology.get("model")
+        if not model_name:
+            logger.error("Topology found but no model name. This should not happen with a properly loaded model.")
+            sys.exit(1)
+
+        logger.info(f"Auto-detected model: {model_name}")
+
+        stage_layers = extract_stage_layers_from_topology(topology)
+        if not stage_layers:
+            logger.error("Could not extract stage layers from topology.")
+            sys.exit(1)
+
+        logger.info(f"Auto-detected {len(stage_layers)} stages from topology")
+
+        # Get model metadata
+        metadata = get_model_metadata(model_name)
+        logger.info(f"Loaded metadata for model with {metadata.num_layers} layers")
 
         # Calculate budget for each stage
         stage_budgets = []

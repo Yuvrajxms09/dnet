@@ -164,7 +164,9 @@ class ShardRuntime:
         # Also capture process RSS for comparison
         try:
             import resource
-            snapshot["process_rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            # On macOS, ru_maxrss is in bytes; convert to MB
+            rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            snapshot["process_rss_mb"] = rss_bytes / (1024 * 1024)
         except Exception:
             snapshot["process_rss_mb"] = 0
 
