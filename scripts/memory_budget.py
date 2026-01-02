@@ -14,7 +14,6 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import json
-import requests
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -24,20 +23,26 @@ from dnet.utils.logger import logger
 
 
 def parse_layer_ranges(ranges: List[str]) -> List[List[int]]:
-    """Parse layer range strings like '0-39' into lists of integers."""
+    """Parse layer range strings like '0-39' or '0-15,32-47' into lists of integers."""
     result = []
     for range_str in ranges:
-        if "-" in range_str:
-            start, end = range_str.split("-")
-            result.append(list(range(int(start), int(end) + 1)))
-        else:
-            result.append([int(range_str)])
+        layer_list = []
+        # Split by comma for multiple ranges like "0-15,32-47"
+        for part in range_str.split(","):
+            part = part.strip()
+            if "-" in part:
+                start, end = part.split("-")
+                layer_list.extend(range(int(start), int(end) + 1))
+            else:
+                layer_list.append(int(part))
+        result.append(layer_list)
     return result
 
 
 def get_topology_from_api(api_url: str) -> Optional[Dict[str, Any]]:
     """Fetch topology information from running API server."""
     try:
+        import requests
         response = requests.get(f"{api_url}/v1/topology", timeout=5)
         response.raise_for_status()
         return response.json()
