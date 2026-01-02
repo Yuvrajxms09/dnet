@@ -9,21 +9,21 @@ mkdir -p "$RESULTS_DIR"
 
 # Run budget calculator with different pool sizes
 echo "=== Running Memory Budget Calculator ==="
-python3 scripts/memory_budget.py \
+uv run python3 scripts/memory_budget.py \
   --model Qwen/Qwen3-32B-MLX-bf16 \
   --api-url "http://localhost:8080" \
   --seq-len 2048 \
   --pools 512 \
   > "$RESULTS_DIR/budget_default_pools.txt"
 
-python3 scripts/memory_budget.py \
+uv run python3 scripts/memory_budget.py \
   --model Qwen/Qwen3-32B-MLX-bf16 \
   --api-url "http://localhost:8080" \
   --seq-len 2048 \
   --pools 128 \
   > "$RESULTS_DIR/budget_small_pools.txt"
 
-python3 scripts/memory_budget.py \
+uv run python3 scripts/memory_budget.py \
   --model Qwen/Qwen3-32B-MLX-bf16 \
   --api-url "http://localhost:8080" \
   --seq-len 2048 \

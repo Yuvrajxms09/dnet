@@ -9,7 +9,7 @@ mkdir -p "$RESULTS_DIR"
 
 # Run budget calculator for different KV precisions
 echo "=== Running Memory Budget Calculator ==="
-python3 scripts/memory_budget.py \
+uv run python3 scripts/memory_budget.py \
   --model Qwen/Qwen3-32B-MLX-bf16 \
   --api-url "http://localhost:8080" \
   --seq-len 2048 \
@@ -17,7 +17,7 @@ python3 scripts/memory_budget.py \
   --pools 512 \
   > "$RESULTS_DIR/budget_fp16_kv.txt"
 
-python3 scripts/memory_budget.py \
+uv run python3 scripts/memory_budget.py \
   --model Qwen/Qwen3-32B-MLX-bf16 \
   --api-url "http://localhost:8080" \
   --seq-len 2048 \
