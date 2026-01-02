@@ -51,11 +51,15 @@ run_test() {
     vm_stat >> "$TEST_DIR/memory_before.txt" 2>/dev/null || echo "vm_stat not available" >> "$TEST_DIR/memory_before.txt"
 
     # Run inference
+    # Get the actual loaded model name from topology
+    MODEL_NAME=$(curl -s "$BASE_URL/v1/topology" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('model', 'Qwen/Qwen3-32B-MLX-8bit'))" 2>/dev/null || echo "Qwen/Qwen3-32B-MLX-8bit")
+    echo "Using model: $MODEL_NAME"
+
     echo "Running inference..."
     START=$(date +%s)
     curl -s -X POST "$BASE_URL/v1/chat/completions" \
       -H "Content-Type: application/json" \
-      -d '{"model": "Qwen/Qwen3-32B-MLX-bf16", "messages": [{"role": "user", "content": "hi there"}], "max_tokens": 50}' \
+      -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"hi there\"}], \"max_tokens\": 50}" \
       > "$TEST_DIR/response.json"
 
     END=$(date +%s)
@@ -67,7 +71,7 @@ run_test() {
 
     # Extract memory snapshots from logs
     echo "Extracting memory snapshots from logs..."
-    for log_file in ~/.dria/dnet/dnet-shard-*.log; do
+    for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
         if [ -f "$log_file" ]; then
             grep "\[MEMORY_SNAPSHOT\]" "$log_file" > "$TEST_DIR/memory_snapshots.txt" 2>/dev/null || true
         fi

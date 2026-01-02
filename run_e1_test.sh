@@ -75,7 +75,7 @@ run_test() {
     # Extract memory snapshots from logs
     echo "Extracting memory snapshots from logs..."
     # Find shard log files (assuming they follow the pattern dnet-shard-*.log)
-    for log_file in ~/.dria/dnet/dnet-shard-*.log; do
+    for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
         if [ -f "$log_file" ]; then
             grep "\[MEMORY_SNAPSHOT\]" "$log_file" > "$TEST_DIR/memory_snapshots.txt" 2>/dev/null || true
         fi
