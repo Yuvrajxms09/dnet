@@ -86,7 +86,7 @@ echo "✓ Config verified: DNET_TRANSPORT_COMPRESS=$CURRENT_COMPRESS"
 # Run budget calculator first (auto-detects model and topology from loaded system)
 echo "Running memory budget calculator..."
 uv run python3 scripts/memory_budget.py \
-  --seq-len 2048 \
+  --seq-len 4096 \
   --pools 512 \
   > "$RESULTS_DIR/budget_baseline.txt"
 
