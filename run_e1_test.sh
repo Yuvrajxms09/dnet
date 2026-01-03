@@ -37,6 +37,12 @@ run_test() {
 
     echo "=== Running $name test ==="
 
+    # Stop services to allow config reload
+    echo "Stopping services for config change..."
+    pkill -f "dnet-api" || true
+    pkill -f "dnet-shard" || true
+    sleep 2
+
     # Setup config
     cp "$config" .env || { echo "Config file $config not found"; exit 1; }
     echo "Config loaded:"
@@ -44,6 +50,17 @@ run_test() {
 
     TEST_DIR="$RESULTS_DIR/$name"
     mkdir -p "$TEST_DIR"
+
+    # Start services with new config
+    echo "Starting services with new config..."
+    # Note: You'll need to start your shards and API manually here
+    # For example:
+    # ./dnet-api &  # Start API
+    # ./dnet-shard shard-1 &  # Start shard 1
+    # ./dnet-shard shard-2 &  # Start shard 2
+    echo "Please start your dnet-api and dnet-shard processes now..."
+    echo "Press Enter when services are running and model is loaded..."
+    read -r
 
     # Check if services are running
     if ! curl -s -f "$BASE_URL/health" > /dev/null; then
@@ -164,32 +181,64 @@ EOF
 }
 
 # Run E1 tests: fp16 wire vs qsparse8_v1 compression
-run_test "baseline_fp16" "baseline.config"
-run_test "compressed_qsparse8" "compressed.config"
+echo ""
+echo "IMPORTANT: Tests must be run sequentially with service restarts between them."
+echo "The script will stop services, change config, then wait for you to restart services."
+echo ""
 
-       echo ""
-       echo "Tests completed. Results in $RESULTS_DIR"
-       echo ""
-       echo "Files created per test:"
-       echo "  response.json          - Inference API response"
-       echo "  memory_monitoring.log  - External memory monitoring (every 0.5s)"
-       echo "  peak_memory_analysis.txt - Peak memory statistics from monitoring"
-       echo "  comm_budget.txt        - Communication costs (bytes/token)"
-       echo "  comm_analysis.txt      - Communication statistics"
-       echo "  config_log.txt         - Runtime configuration verification"
-       echo "  budget_comparison.txt  - Budget vs actual comparison"
-       echo "  summary.txt            - Test summary"
-       echo ""
-       echo "To analyze E1 (fp16 vs qsparse8_v1 compression):"
-       echo "1. Budget calculator: $RESULTS_DIR/budget_baseline.txt"
-       echo "2. Peak memory: Compare */peak_memory_analysis.txt between baseline and compressed"
-       echo "3. Communication: Compare */comm_analysis.txt (bytes/token) between variants"
-       echo "4. Config verification: Check */config_log.txt for compression settings"
-       echo ""
-       echo "Key metrics for H1 hypothesis:"
-       echo "  - Lower peak memory in compressed vs baseline = wire format matters"
-       echo "  - Lower bytes/token in compressed = compression working"
-       echo "  - Same memory = wire format not bottleneck (investigate H2/H3/H4)"
-       echo ""
-       echo "Run comparison script:"
-       echo "  ./compare_e1_results.sh $RESULTS_DIR/baseline_fp16 $RESULTS_DIR/compressed_qsparse8"
+echo "=== Test 1: Baseline (fp16 wire, no compression) ==="
+run_test "baseline_fp16" "baseline.config"
+
+echo ""
+echo "=== Test 1 Complete ==="
+echo "Results saved to: $RESULTS_DIR/baseline_fp16/"
+echo ""
+echo "=== Next: Test 2 (qsparse8_v1 compression) ==="
+echo "The script will now stop services and setup compressed config."
+echo "After services restart with new config, run:"
+echo "  ./run_e1_test.sh compressed"
+echo ""
+
+# Check if argument provided for single test
+if [ $# -eq 1 ]; then
+    case $1 in
+        "baseline")
+            run_test "baseline_fp16" "baseline.config"
+            ;;
+        "compressed")
+            run_test "compressed_qsparse8" "compressed.config"
+            ;;
+        *)
+            echo "Usage: $0 [baseline|compressed]"
+            echo "Run without args for full workflow instructions"
+            exit 1
+            ;;
+    esac
+else
+    echo ""
+    echo "Run with argument for single test:"
+    echo "  ./run_e1_test.sh baseline    # Run only baseline test"
+    echo "  ./run_e1_test.sh compressed  # Run only compressed test"
+fi
+
+echo ""
+echo "Files created per test:"
+echo "  response.json          - Inference API response"
+echo "  memory_monitoring.log  - External memory monitoring (every 0.5s)"
+echo "  peak_memory_analysis.txt - Peak memory statistics from monitoring"
+echo "  comm_budget.txt        - Communication costs (bytes/token)"
+echo "  comm_analysis.txt      - Communication statistics"
+echo "  config_log.txt         - Runtime configuration verification"
+echo "  budget_comparison.txt  - Budget vs actual comparison"
+echo "  summary.txt            - Test summary"
+echo ""
+echo "To run complete E1 test suite:"
+echo "1. ./run_e1_test.sh baseline    # Run baseline test"
+echo "2. Restart dnet-api and dnet-shard services"
+echo "3. ./run_e1_test.sh compressed  # Run compressed test"
+echo "4. ./compare_e1_results.sh e1_results_*/baseline_fp16 e1_results_*/compressed_qsparse8"
+echo ""
+echo "Key metrics for H1 hypothesis:"
+echo "  - Lower peak memory in compressed vs baseline = wire format matters"
+echo "  - Lower bytes/token in compressed = compression working"
+echo "  - Same memory = wire format not bottleneck (investigate H2/H3/H4)"
