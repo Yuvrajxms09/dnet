@@ -32,6 +32,13 @@ echo "Baseline:   $DIR1"
 echo "Comparison: $DIR2"
 echo ""
 
+# Extract test types
+TYPE1=$(basename "$DIR1" | sed 's/e1_\([^_]*\)_.*$/\1/')
+TYPE2=$(basename "$DIR2" | sed 's/e1_\([^_]*\)_.*$/\1/')
+
+echo "Test Types: $TYPE1 vs $TYPE2"
+echo ""
+
 echo "=== Active Config Comparison ==="
 echo "--- $DIR1 ---"
 cat "$DIR1/active_config.txt" 2>/dev/null || echo "(not found)"
@@ -72,10 +79,15 @@ echo "=============================================="
 echo "INTERPRETATION"
 echo "=============================================="
 echo ""
-echo "If $DIR2 shows:"
-echo "  - Lower peak memory → H1 confirmed (compression helps)"
-echo "  - Lower bytes per activation → Wire compression working"
-echo "  - Same memory as $DIR1 → H1 not the cause, investigate H2/H3/H4"
+echo "Interpretation:"
+echo "  baseline vs compressed/sparse: Tests if fp16 sparse compression helps"
+echo "  baseline vs q8: Tests if Q8 quantization (like DLlama Q80) closes the gap"
+echo ""
+echo "Expected results:"
+echo "  - Lower peak memory → Wire format matters (H1 confirmed)"
+echo "  - Lower bytes per activation → Compression working"
+echo "  - Same memory → Wire format not the bottleneck (investigate H2/H3/H4)"
+echo "  - Q8 shows bigger improvement than sparse → True quantization needed"
 echo ""
 echo "For detailed analysis, compare:"
 echo "  diff $DIR1/analysis.txt $DIR2/analysis.txt"

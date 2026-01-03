@@ -1,22 +1,9 @@
 #!/bin/bash
 # Run E1: Inter-stage dtype test - ONE CONFIG PER RUN
-# 
-# Usage:
-#   ./run_e1_test.sh baseline     # Test with fp16 wire (current default)
-#   ./run_e1_test.sh compressed   # Test with qsparse8_v1 compression
 #
-# IMPORTANT: You must restart shards between different configs!
-# The config is read at shard startup, not during runtime.
+# Usage: SHARD1_IP=x.x.x.x SHARD2_IP=y.y.y.y ./run_e1_test.sh [baseline|compressed]
 #
-# Workflow:
-#   1. Copy baseline.config to .env on BOTH shard machines
-#   2. Start API and shards, load model via dnet-tui
-#   3. ./run_e1_test.sh baseline
-#   4. Stop shards and API
-#   5. Copy compressed.config to .env on BOTH shard machines
-#   6. Start API and shards, load model via dnet-tui
-#   7. ./run_e1_test.sh compressed
-#   8. Compare e1_baseline_*/analysis.txt vs e1_compressed_*/analysis.txt
+# IMPORTANT: Restart shards between configs. Config is read at startup.
 
 set -e
 
@@ -30,11 +17,15 @@ case "$CONFIG_NAME" in
     compressed)
         CONFIG_FILE="compressed.config"
         ;;
+    q8)
+        CONFIG_FILE="q8.config"
+        ;;
     *)
-        echo "Usage: $0 [baseline|compressed]"
+        echo "Usage: $0 [baseline|compressed|q8]"
         echo ""
         echo "  baseline   - Test with fp16 wire dtype (default)"
-        echo "  compressed - Test with qsparse8_v1 compression"
+        echo "  compressed - Test with sparse fp16 compression"
+        echo "  q8         - Test with Q8 quantization + compression (like DLlama Q80)"
         echo ""
         echo "IMPORTANT: Restart shards with the matching .env config before running each test!"
         exit 1
@@ -45,12 +36,7 @@ BASE_URL="http://localhost:8080"
 RESULTS_DIR="e1_${CONFIG_NAME}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 
-echo "=============================================="
-echo "E1 Test: $CONFIG_NAME"
-echo "Expected config: $CONFIG_FILE"
-echo "Results will be in: $RESULTS_DIR"
-echo "=============================================="
-echo ""
+echo "=== E1 Test: $CONFIG_NAME (Results: $RESULTS_DIR) ==="
 
 # Verify the config file exists (for documentation purposes)
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -67,40 +53,60 @@ else
 fi
 echo ""
 
-# Auto-detect model from topology
-echo "=== Detecting Model from Running API ==="
-MODEL_NAME=$(curl -s "http://localhost:8080/v1/topology" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('model', 'unknown'))
-except:
-    print('unknown')
-")
+# Get model name from environment or use default
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-32B-MLX-8bit}"
+echo "Using Model: $MODEL_NAME"
+echo ""
 
-if [ "$MODEL_NAME" = "unknown" ] || [ -z "$MODEL_NAME" ]; then
-    echo "ERROR: Could not detect model from topology."
-    echo "Is the model loaded via dnet-tui?"
-    echo "Is the API running at $BASE_URL?"
+# Generate deterministic manual topology
+if [ -z "$SHARD1_IP" ] || [ -z "$SHARD2_IP" ]; then
+    echo "ERROR: SHARD1_IP and SHARD2_IP required"
     exit 1
 fi
 
-echo "Detected Model: $MODEL_NAME"
-echo ""
-
-# Run budget calculator (auto-detects model and topology)
-echo "=== Running Memory Budget Calculator ==="
-uv run python3 scripts/memory_budget.py \
-  --seq-len 2048 \
-  --pools 512 \
-  | tee "$RESULTS_DIR/budget.txt"
-echo ""
+TOPOLOGY_JSON=$(uv run python3 scripts/generate_manual_topology.py "$MODEL_NAME" "$SHARD1_IP" "$SHARD2_IP" 2>/dev/null)
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to generate topology"
+    exit 1
+fi
 
 # Check if API is reachable
 if ! curl -s -f "$BASE_URL/health" > /dev/null; then
     echo "ERROR: API not running at $BASE_URL"
     exit 1
 fi
+
+# Prepare manual topology (deterministic layer assignment)
+echo "=== Preparing Manual Topology ==="
+echo "$TOPOLOGY_JSON" | curl -s -X POST "$BASE_URL/v1/prepare_topology_manual" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  > "$RESULTS_DIR/topology_response.json"
+
+if [ $? -ne 0 ] || ! grep -q "assignments" "$RESULTS_DIR/topology_response.json"; then
+    echo "ERROR: Failed to prepare manual topology"
+    cat "$RESULTS_DIR/topology_response.json"
+    exit 1
+fi
+
+echo "Manual topology prepared successfully"
+echo ""
+
+# Load model with prepared topology
+echo "=== Loading Model with Manual Topology ==="
+echo "$TOPOLOGY_JSON" | curl -s -X POST "$BASE_URL/v1/load_model" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  > "$RESULTS_DIR/load_model_response.json"
+
+if [ $? -ne 0 ] || ! grep -q "success.*true" "$RESULTS_DIR/load_model_response.json"; then
+    echo "ERROR: Failed to load model"
+    cat "$RESULTS_DIR/load_model_response.json"
+    exit 1
+fi
+
+echo "Model loaded successfully with manual topology"
+echo ""
 
 # Memory before inference
 echo "=== Capturing Memory Before Inference ==="
@@ -241,27 +247,5 @@ echo "Analysis saved to $RESULTS_DIR/analysis.txt"
 echo ""
 
 # Final summary
-echo "=============================================="
-echo "✓ E1 Test ($CONFIG_NAME) Completed"
-echo "=============================================="
-echo ""
-echo "Results in: $RESULTS_DIR/"
-echo ""
-echo "Key files to examine:"
-echo "  1. budget.txt          - Theoretical memory per stage"
-echo "  2. memory_snapshots.txt - Actual MLX memory usage"
-echo "  3. stage_memory.txt    - Component breakdown (weights/pools/activations)"
-echo "  4. analysis.txt        - Combined summary"
-echo ""
-echo "To compare theoretical vs actual, look for the GAP:"
-echo "  - If Stage X budget says 20GB but snapshot shows 28GB"
-echo "  - That 8GB gap points to hidden overhead (H1/H4)"
-echo ""
-if [ "$CONFIG_NAME" = "baseline" ]; then
-    echo "NEXT STEP: To test compressed config:"
-    echo "  1. Stop shards and API"
-    echo "  2. Copy compressed.config to .env on both shard machines"
-    echo "  3. Restart shards and API, load model"
-    echo "  4. Run: ./run_e1_test.sh compressed"
-    echo "  5. Compare e1_baseline_*/analysis.txt vs e1_compressed_*/analysis.txt"
-fi
+echo "✓ E1 Test ($CONFIG_NAME) completed: $RESULTS_DIR"
+echo "Key files: budget.txt, memory_snapshots.txt, analysis.txt"

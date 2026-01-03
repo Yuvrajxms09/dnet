@@ -41,13 +41,35 @@ def to_bytes(
     if should_compress:
         try:
             from dnet.compression.wire import compress_tensor_to_protobuf_data
+
+            # Check if we should quantize (Q8)
+            quant_dict = None
+            if wire_dtype_str == "q8":
+                try:
+                    quantized = mx.quantize(tensor, group_size=64, bits=8)
+                    quant_dict = {
+                        "scales": quantized["scales"],
+                        "biases": quantized.get("biases"),
+                        "bits": 8,
+                        "group_size": 64,
+                        "mode": "affine"
+                    }
+                    # Use the quantized data for compression
+                    tensor = quantized["data"]
+                    logger.debug("[Q8] Quantized tensor for compression: shape=%s dtype=%s",
+                               tensor.shape, tensor.dtype)
+                except Exception as qe:
+                    logger.warning("Q8 quantization failed, falling back to fp16 compression: %s", qe)
+
             data, shape, dtype_meta = compress_tensor_to_protobuf_data(
                 tensor,
                 compression_percentage=compression_percentage,
+                quant=quant_dict,
             )
             logger.debug(
-                "[COMPRESS] size_before=%d size_after=%d ratio=%.2f dtype=%s",
-                tensor_bytes, len(data), len(data) / tensor_bytes if tensor_bytes > 0 else 0, dtype_meta
+                "[COMPRESS] size_before=%d size_after=%d ratio=%.2f dtype=%s quant=%s",
+                tensor_bytes, len(data), len(data) / tensor_bytes if tensor_bytes > 0 else 0,
+                dtype_meta, "q8" if quant_dict else "none"
             )
             return data, dtype_meta
         except Exception as e:

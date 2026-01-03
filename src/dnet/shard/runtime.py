@@ -115,9 +115,11 @@ class ShardRuntime:
         _wd = (self._transport_settings.wire_dtype or "fp16").strip().lower()
         if _wd in {"bf16", "bfloat16"}:
             self._wire_dtype_str = "bfloat16"
+        elif _wd == "q8":
+            self._wire_dtype_str = "q8"  # Special case for Q8 quantization + compression
         else:
             self._wire_dtype_str = "float16"
-        self._wire_mx_dtype = mlx_dtype_map[self._wire_dtype_str]
+        self._wire_mx_dtype = mlx_dtype_map["float16"]  # Always use fp16 as base for quantization
 
         # Log active config for Issue #73 verification
         logger.info(

@@ -13,7 +13,6 @@ Environment variables are loaded from:
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field
@@ -264,9 +263,8 @@ class DnetSettings(BaseSettings):
     topology: TopologySettings = Field(default_factory=TopologySettings)
 
 
-@lru_cache
 def get_settings() -> DnetSettings:
-    """Get cached settings instance."""
+    """Get settings instance (reloads from .env file each time for Issue #73 testing)."""
     return DnetSettings()
 
 
