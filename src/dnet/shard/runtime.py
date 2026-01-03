@@ -119,6 +119,18 @@ class ShardRuntime:
             self._wire_dtype_str = "float16"
         self._wire_mx_dtype = mlx_dtype_map[self._wire_dtype_str]
 
+        # Log active config for Issue #73 verification
+        logger.info(
+            "[CONFIG] shard=%s wire_dtype=%s compress=%s "
+            "input_pool=%dMB output_pool=%dMB kv_mode=%s",
+            self.shard_id,
+            self._transport_settings.wire_dtype,
+            self._transport_settings.compress,
+            self._compute_settings.input_pool_mb,
+            self._compute_settings.output_pool_mb,
+            settings.kv_cache.mode,
+        )
+
         # Compute serialization and MLX lock
         self._compute_busy = threading.Event()
         self._mlx_lock = threading.Lock()
