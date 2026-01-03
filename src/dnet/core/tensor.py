@@ -31,8 +31,8 @@ def to_bytes(
         tensor = mx.array(tensor)
 
     # Cast to desired wire dtype
-    if str(tensor.dtype) != wire_dtype_str:
-        tensor = tensor.astype(wire_mx_dtype)
+        if str(tensor.dtype) != wire_dtype_str:
+            tensor = tensor.astype(wire_mx_dtype)
 
     # Check if we should compress
     tensor_bytes = tensor.size * tensor.dtype.size
@@ -78,5 +78,5 @@ def to_bytes(
             # Fall through to uncompressed path
 
     # Uncompressed path
-    data = tensor_to_bytes(tensor)
+        data = tensor_to_bytes(tensor)
     return data, wire_dtype_str
