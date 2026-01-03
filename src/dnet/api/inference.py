@@ -138,7 +138,7 @@ class InferenceManager:
                 if hasattr(y, "astype")
                 else np.array(list(map(int, y)), dtype=np.int32)
             )
-            tok_bytes = to_bytes(
+            tok_bytes, _ = to_bytes(
                 tok_np,
                 wire_dtype_str="int32",
                 wire_mx_dtype=mx.int32,

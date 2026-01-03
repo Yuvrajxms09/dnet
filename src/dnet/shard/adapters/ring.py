@@ -267,7 +267,7 @@ class RingAdapter(TopologyAdapter):
             logger.error("Streaming disabled or next node not connected; cannot send")
             return
         try:
-            data = self.codec.serialize(msg, self.transport_settings)
+            data, dtype_str = self.codec.serialize(msg, self.transport_settings)
         except Exception as e:
             logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
             return
@@ -292,16 +292,20 @@ class RingAdapter(TopologyAdapter):
                 estimated_tokens = max(1, int(bytes_sent / (wire_dtype_size * hidden_size)))
                 bytes_per_token = bytes_sent / estimated_tokens if estimated_tokens > 0 else 0
 
+                # Check if compression was applied (dtype contains metadata)
+                is_compressed = "|" in dtype_str
+
                 logger.info(
                     "[COMM_BUDGET] stage=%s direction=outbound nonce=%s "
-                    "bytes=%d activation_mb=%.2f bytes_per_token=%.1f compression=%s",
+                    "bytes=%d activation_mb=%.2f bytes_per_token=%.1f compression=%s dtype=%s",
                     self.runtime.shard_id, msg.nonce, bytes_sent, activation_size_mb,
-                    bytes_per_token, "enabled" if self.transport_settings.compress else "disabled"
+                    bytes_per_token, "applied" if is_compressed else "disabled", dtype_str
                 )
         except Exception:
             # Silent failure for comm logging
             pass
-        msg.dtype = self.runtime._wire_dtype_str
+        # dtype_str already set by codec.serialize (includes compression metadata if applied)
+        msg.dtype = dtype_str
         request = msg.to_proto(data)
         request.timestamp = int(time.time() * 1000)
 

@@ -136,9 +136,12 @@ class ActivationCodec:
 
         return None
 
-    def serialize(self, msg: ActivationMessage, transport_config) -> bytes:
+    def serialize(self, msg: ActivationMessage, transport_config) -> tuple[bytes, str]:
         """
         Reads from output pool/tensor, compresses, and returns bytes + wire dtype.
+
+        Returns:
+            tuple[bytes, str]: (serialized data, dtype string with optional compression metadata)
         """
         shaped = msg.tensor
         if shaped is None:
@@ -148,7 +151,7 @@ class ActivationCodec:
             data_size = int(np.prod(msg.shape))
             shaped = output_buffer[:data_size].reshape(msg.shape)
 
-        data = to_bytes(
+        data, dtype_str = to_bytes(
             shaped,
             wire_dtype_str=self.runtime._wire_dtype_str,
             wire_mx_dtype=self.runtime._wire_mx_dtype,
@@ -156,6 +159,9 @@ class ActivationCodec:
             compress_min_bytes=transport_config.compress_min_bytes,
         )
 
+        # Update message dtype to include compression metadata if applicable
+        msg.dtype = dtype_str
+
         # Clean up reference immediately to assist GC
         msg.tensor = None
-        return data
+        return data, dtype_str

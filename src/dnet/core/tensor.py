@@ -1,6 +1,7 @@
 import numpy as np
 import mlx.core as mx
 from dnet.utils.serialization import dtype_map, tensor_to_bytes
+from dnet.utils.logger import logger
 
 
 def to_bytes(
@@ -10,39 +11,49 @@ def to_bytes(
     wire_mx_dtype: mx.Dtype,
     compress: bool = False,
     compress_min_bytes: int = 65536,
-) -> bytes:
+    compression_percentage: float = 90.0,
+) -> tuple[bytes, str]:
     """Serialize an MLX/Numpy tensor to bytes with the given wire dtype.
 
     Args:
         tensor: MLX or NumPy array
         wire_dtype_str: Canonical dtype string (e.g., "float16", "bfloat16")
         wire_mx_dtype: MLX dtype to cast to when `tensor` is MLX
-        compress: Whether to compress payload (currently not applied)
+        compress: Whether to compress payload using sparse compression
         compress_min_bytes: Minimum size for compression to kick in
+        compression_percentage: Percentage of columns to keep (higher = more data kept)
 
     Returns:
-        bytes: Serialized tensor data
+        tuple[bytes, str]: (Serialized tensor data, dtype string with metadata)
     """
-    # NB: Compression is intentionally disabled for decode path; keep parity.
-    _ = compress
-    _ = compress_min_bytes
-
-    # Cast to desired wire dtype without extra copies when possible
-    try:
-        wire_np_dtype = dtype_map[wire_dtype_str]
-    except Exception:
-        wire_np_dtype = np.float16
-
+    # Convert numpy to MLX if needed for compression
     if isinstance(tensor, np.ndarray):
-        if tensor.dtype != wire_np_dtype:
-            tensor = tensor.astype(wire_np_dtype, copy=False)
-    else:
-        if str(tensor.dtype) != wire_dtype_str:
-            tensor = tensor.astype(wire_mx_dtype)
+        tensor = mx.array(tensor)
 
-    if isinstance(tensor, np.ndarray):
-        data = tensor.tobytes(order="C")
-    else:
-        data = tensor_to_bytes(tensor)
+    # Cast to desired wire dtype
+    if str(tensor.dtype) != wire_dtype_str:
+        tensor = tensor.astype(wire_mx_dtype)
 
-    return data
+    # Check if we should compress
+    tensor_bytes = tensor.size * tensor.dtype.size
+    should_compress = compress and tensor_bytes >= compress_min_bytes
+
+    if should_compress:
+        try:
+            from dnet.compression.wire import compress_tensor_to_protobuf_data
+            data, shape, dtype_meta = compress_tensor_to_protobuf_data(
+                tensor,
+                compression_percentage=compression_percentage,
+            )
+            logger.debug(
+                "[COMPRESS] size_before=%d size_after=%d ratio=%.2f dtype=%s",
+                tensor_bytes, len(data), len(data) / tensor_bytes if tensor_bytes > 0 else 0, dtype_meta
+            )
+            return data, dtype_meta
+        except Exception as e:
+            logger.warning("Compression failed, falling back to raw: %s", e)
+            # Fall through to uncompressed path
+
+    # Uncompressed path
+    data = tensor_to_bytes(tensor)
+    return data, wire_dtype_str
