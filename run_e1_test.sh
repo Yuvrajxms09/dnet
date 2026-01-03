@@ -51,11 +51,24 @@ run_test() {
         return 1
     fi
 
-    # Memory before
-    echo "Capturing memory before inference..."
-    ps aux | head -1 > "$TEST_DIR/memory_before.txt"
-    ps aux | grep -E "(dnet-api|dnet-shard)" | grep -v grep >> "$TEST_DIR/memory_before.txt" || true
-    vm_stat >> "$TEST_DIR/memory_before.txt" 2>/dev/null || echo "vm_stat not available" >> "$TEST_DIR/memory_before.txt"
+    # Start external memory monitoring
+    echo "Starting external memory monitoring..."
+    MEMORY_LOG="$TEST_DIR/memory_monitoring.log"
+    MONITOR_PID=""
+
+    # Start background memory monitoring (samples every 0.5 seconds during inference)
+    (
+        while true; do
+            echo "=== $(date +%s) ===" >> "$MEMORY_LOG"
+            ps aux | head -1 >> "$MEMORY_LOG"
+            ps aux | grep -E "(dnet-api|dnet-shard)" | grep -v grep >> "$MEMORY_LOG" || true
+            echo "--- vm_stat ---" >> "$MEMORY_LOG"
+            vm_stat >> "$MEMORY_LOG" 2>/dev/null || echo "vm_stat not available" >> "$MEMORY_LOG"
+            echo "" >> "$MEMORY_LOG"
+            sleep 0.5
+        done
+    ) &
+    MONITOR_PID=$!
 
     # Run inference
     echo "Running inference..."
@@ -67,60 +80,116 @@ run_test() {
 
     END=$(date +%s)
 
-    # Memory after
-    echo "Capturing memory after inference..."
-    ps aux | grep -E "(dnet-api|dnet-shard)" | grep -v grep > "$TEST_DIR/memory_after.txt" || true
-    vm_stat >> "$TEST_DIR/memory_after.txt" 2>/dev/null || echo "vm_stat not available" >> "$TEST_DIR/memory_after.txt"
+    # Stop memory monitoring
+    echo "Stopping memory monitoring..."
+    kill $MONITOR_PID 2>/dev/null || true
+    wait $MONITOR_PID 2>/dev/null || true
 
-    # Extract memory snapshots from logs
-    echo "Extracting memory snapshots from logs..."
-    # Find shard log files (assuming they follow the pattern dnet-shard-*.log)
+    # Extract peak memory from monitoring log
+    echo "Analyzing peak memory from monitoring..." > "$TEST_DIR/peak_memory_analysis.txt"
+    echo "Total monitoring duration: $((END - START)) seconds" >> "$TEST_DIR/peak_memory_analysis.txt"
+
+    # Extract RSS values for dnet processes
+    grep "dnet-" "$MEMORY_LOG" | grep -o " [0-9]\+ " | sort -n | tail -5 >> "$TEST_DIR/peak_memory_analysis.txt"
+    echo "Peak RSS values (KB):" >> "$TEST_DIR/peak_memory_analysis.txt"
+    grep "dnet-" "$MEMORY_LOG" | grep -o " [0-9]\+ " | sort -nr | head -3 >> "$TEST_DIR/peak_memory_analysis.txt"
+
+    # Extract communication budget and other metrics from logs
+    echo "Extracting communication and memory metrics from logs..."
     for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
         if [ -f "$log_file" ]; then
-            grep "\[MEMORY_SNAPSHOT\]" "$log_file" > "$TEST_DIR/memory_snapshots.txt" 2>/dev/null || true
+            # Extract COMM_BUDGET entries (bytes/token metrics)
+            grep "\[COMM_BUDGET\]" "$log_file" >> "$TEST_DIR/comm_budget.txt" 2>/dev/null || true
+
+            # Extract any remaining MEMORY_SNAPSHOT entries (if they exist)
+            grep "\[MEMORY_SNAPSHOT\]" "$log_file" >> "$TEST_DIR/memory_snapshots.txt" 2>/dev/null || true
+
+            # Extract CONFIG entries to verify settings were applied
+            grep "\[CONFIG\]" "$log_file" >> "$TEST_DIR/config_log.txt" 2>/dev/null || true
         fi
     done
 
-    # Analyze snapshots vs budget
-    if [ -f "$TEST_DIR/memory_snapshots.txt" ] && [ -f "$RESULTS_DIR/budget_baseline.txt" ]; then
-        echo "Analyzing memory snapshots vs budget..." > "$TEST_DIR/analysis.txt"
-        echo "Expected budget:" >> "$TEST_DIR/analysis.txt"
-        tail -n 10 "$RESULTS_DIR/budget_baseline.txt" >> "$TEST_DIR/analysis.txt" 2>/dev/null || true
-        echo "" >> "$TEST_DIR/analysis.txt"
-        echo "Actual snapshots:" >> "$TEST_DIR/analysis.txt"
-        cat "$TEST_DIR/memory_snapshots.txt" >> "$TEST_DIR/analysis.txt"
+    # Analyze communication costs
+    if [ -f "$TEST_DIR/comm_budget.txt" ]; then
+        echo "Communication Budget Analysis:" > "$TEST_DIR/comm_analysis.txt"
+        echo "Total communication entries: $(wc -l < "$TEST_DIR/comm_budget.txt")" >> "$TEST_DIR/comm_analysis.txt"
+        echo "" >> "$TEST_DIR/comm_analysis.txt"
+
+        # Extract bytes_per_token values
+        grep "bytes_per_token" "$TEST_DIR/comm_budget.txt" | \
+        sed 's/.*bytes_per_token=\([0-9.]\+\).*/\1/' | \
+        sort -n > "$TEST_DIR/bytes_per_token_values.txt"
+
+        if [ -s "$TEST_DIR/bytes_per_token_values.txt" ]; then
+            echo "Bytes per token statistics:" >> "$TEST_DIR/comm_analysis.txt"
+            echo "Min: $(head -1 "$TEST_DIR/bytes_per_token_values.txt")" >> "$TEST_DIR/comm_analysis.txt"
+            echo "Max: $(tail -1 "$TEST_DIR/bytes_per_token_values.txt")" >> "$TEST_DIR/comm_analysis.txt"
+            echo "Avg: $(awk '{sum+=$1} END {print sum/NR}' "$TEST_DIR/bytes_per_token_values.txt")" >> "$TEST_DIR/comm_analysis.txt"
+        fi
+
+        echo "" >> "$TEST_DIR/comm_analysis.txt"
+        echo "Sample entries:" >> "$TEST_DIR/comm_analysis.txt"
+        head -5 "$TEST_DIR/comm_budget.txt" >> "$TEST_DIR/comm_analysis.txt"
     fi
 
-    # Summary
-    cat > "$TEST_DIR/summary.txt" << EOF
+    # Compare with budget
+    if [ -f "$RESULTS_DIR/budget_baseline.txt" ]; then
+        echo "Budget vs Actual Comparison:" > "$TEST_DIR/budget_comparison.txt"
+        echo "Expected from budget calculator:" >> "$TEST_DIR/budget_comparison.txt"
+        tail -n 10 "$RESULTS_DIR/budget_baseline.txt" >> "$TEST_DIR/budget_comparison.txt" 2>/dev/null || true
+        echo "" >> "$TEST_DIR/budget_comparison.txt"
+
+        if [ -f "$TEST_DIR/peak_memory_analysis.txt" ]; then
+            echo "Actual peak memory from monitoring:" >> "$TEST_DIR/budget_comparison.txt"
+            cat "$TEST_DIR/peak_memory_analysis.txt" >> "$TEST_DIR/budget_comparison.txt"
+        fi
+
+        if [ -f "$TEST_DIR/comm_analysis.txt" ]; then
+            echo "" >> "$TEST_DIR/budget_comparison.txt"
+            echo "Communication costs:" >> "$TEST_DIR/budget_comparison.txt"
+            grep "Avg:" "$TEST_DIR/comm_analysis.txt" >> "$TEST_DIR/budget_comparison.txt" 2>/dev/null || true
+        fi
+    fi
+
+           # Summary
+           cat > "$TEST_DIR/summary.txt" << EOF
 Test: $name
 Config: $config
 Duration: $((END - START))s
 Timestamp: $(date)
+Inference: $(grep -c "choices" "$TEST_DIR/response.json" 2>/dev/null || echo "unknown") completions
 EOF
 
-    echo "✓ $name test completed - results in $TEST_DIR"
+           echo "✓ $name test completed - results in $TEST_DIR"
 }
 
 # Run E1 tests: fp16 wire vs qsparse8_v1 compression
 run_test "baseline_fp16" "baseline.config"
 run_test "compressed_qsparse8" "compressed.config"
 
-echo ""
-echo "Tests completed. Results in $RESULTS_DIR"
-echo ""
-echo "To analyze:"
-echo "1. Budget calculator: $RESULTS_DIR/budget_baseline.txt"
-echo "2. Memory snapshots: $RESULTS_DIR/*/memory_snapshots.txt"
-echo "3. Analysis: $RESULTS_DIR/*/analysis.txt"
-echo "4. Check API/shard logs for:"
-echo "   [MEMORY_SNAPSHOT] entries (actual memory usage)"
-echo "   [PROFILE] entries (weight loading)"
-echo "   [STAGE_MEMORY] entries (stage-wise memory breakdown)"
-echo "   [COMM_BUDGET] entries (inter-stage communication costs)"
-echo ""
-echo "Compare compression effectiveness:"
-echo "  baseline_fp16 vs compressed_qsparse8 activation_mb values"
-echo "  Look for gap between expected budget and actual memory usage"
-echo "  Qwen-32B-BF16 should be easier to analyze than Llama-70B"
-echo "  Check if compression reduces the memory gap"
+       echo ""
+       echo "Tests completed. Results in $RESULTS_DIR"
+       echo ""
+       echo "Files created per test:"
+       echo "  response.json          - Inference API response"
+       echo "  memory_monitoring.log  - External memory monitoring (every 0.5s)"
+       echo "  peak_memory_analysis.txt - Peak memory statistics from monitoring"
+       echo "  comm_budget.txt        - Communication costs (bytes/token)"
+       echo "  comm_analysis.txt      - Communication statistics"
+       echo "  config_log.txt         - Runtime configuration verification"
+       echo "  budget_comparison.txt  - Budget vs actual comparison"
+       echo "  summary.txt            - Test summary"
+       echo ""
+       echo "To analyze E1 (fp16 vs qsparse8_v1 compression):"
+       echo "1. Budget calculator: $RESULTS_DIR/budget_baseline.txt"
+       echo "2. Peak memory: Compare */peak_memory_analysis.txt between baseline and compressed"
+       echo "3. Communication: Compare */comm_analysis.txt (bytes/token) between variants"
+       echo "4. Config verification: Check */config_log.txt for compression settings"
+       echo ""
+       echo "Key metrics for H1 hypothesis:"
+       echo "  - Lower peak memory in compressed vs baseline = wire format matters"
+       echo "  - Lower bytes/token in compressed = compression working"
+       echo "  - Same memory = wire format not bottleneck (investigate H2/H3/H4)"
+       echo ""
+       echo "Run comparison script:"
+       echo "  ./compare_e1_results.sh $RESULTS_DIR/baseline_fp16 $RESULTS_DIR/compressed_qsparse8"

@@ -42,9 +42,10 @@ def to_bytes(
         try:
             from dnet.compression.wire import compress_tensor_to_protobuf_data
 
-            # Check if we should quantize (Q8)
+            # For qsparse8_v1: enable quantization when wire_dtype is fp16
             quant_dict = None
-            if wire_dtype_str == "q8":
+            if wire_dtype_str == "fp16":
+                # Enable qsparse8_v1 quantization
                 try:
                     quantized = mx.quantize(tensor, group_size=64, bits=8)
                     quant_dict = {
@@ -54,12 +55,12 @@ def to_bytes(
                         "group_size": 64,
                         "mode": "affine"
                     }
-                    # Use the quantized data for compression
+                    # Use quantized data for sparse compression
                     tensor = quantized["data"]
-                    logger.debug("[Q8] Quantized tensor for compression: shape=%s dtype=%s",
-                               tensor.shape, tensor.dtype)
+                    logger.debug("[QSPARSE8_V1] Quantized tensor for compression: shape=%s",
+                               tensor.shape)
                 except Exception as qe:
-                    logger.warning("Q8 quantization failed, falling back to fp16 compression: %s", qe)
+                    logger.warning("qsparse8_v1 quantization failed, using sparse_v1: %s", qe)
 
             data, shape, dtype_meta = compress_tensor_to_protobuf_data(
                 tensor,
@@ -69,7 +70,7 @@ def to_bytes(
             logger.debug(
                 "[COMPRESS] size_before=%d size_after=%d ratio=%.2f dtype=%s quant=%s",
                 tensor_bytes, len(data), len(data) / tensor_bytes if tensor_bytes > 0 else 0,
-                dtype_meta, "q8" if quant_dict else "none"
+                dtype_meta, "qsparse8_v1" if quant_dict else "sparse_v1"
             )
             return data, dtype_meta
         except Exception as e:

@@ -39,56 +39,71 @@ TYPE2=$(basename "$DIR2" | sed 's/e1_\([^_]*\)_.*$/\1/')
 echo "Test Types: $TYPE1 vs $TYPE2"
 echo ""
 
-echo "=== Active Config Comparison ==="
+echo "=== Configuration Verification ==="
 echo "--- $DIR1 ---"
-cat "$DIR1/active_config.txt" 2>/dev/null || echo "(not found)"
+cat "$DIR1/config_log.txt" 2>/dev/null || echo "(no config log)"
 echo ""
 echo "--- $DIR2 ---"
-cat "$DIR2/active_config.txt" 2>/dev/null || echo "(not found)"
+cat "$DIR2/config_log.txt" 2>/dev/null || echo "(no config log)"
 echo ""
 
-echo "=== Memory Budget (Theoretical) ==="
-echo "Both should show same theoretical budget (model/topology unchanged)"
+echo "=== Peak Memory from External Monitoring ==="
+echo "--- $DIR1 (peak RSS in KB) ---"
+grep "Peak RSS" "$DIR1/peak_memory_analysis.txt" 2>/dev/null || echo "(no peak analysis)"
 echo ""
-
-echo "=== Memory Snapshots Comparison ==="
-echo "--- $DIR1 (peak memory) ---"
-grep "peak=" "$DIR1/memory_snapshots.txt" 2>/dev/null | tail -5 || echo "(no snapshots)"
-echo ""
-echo "--- $DIR2 (peak memory) ---"
-grep "peak=" "$DIR2/memory_snapshots.txt" 2>/dev/null | tail -5 || echo "(no snapshots)"
-echo ""
-
-echo "=== Stage Memory Comparison ==="
-echo "--- $DIR1 (total memory per stage) ---"
-grep "total=" "$DIR1/stage_memory.txt" 2>/dev/null | tail -5 || echo "(no stage memory)"
-echo ""
-echo "--- $DIR2 (total memory per stage) ---"
-grep "total=" "$DIR2/stage_memory.txt" 2>/dev/null | tail -5 || echo "(no stage memory)"
+echo "--- $DIR2 (peak RSS in KB) ---"
+grep "Peak RSS" "$DIR2/peak_memory_analysis.txt" 2>/dev/null || echo "(no peak analysis)"
 echo ""
 
 echo "=== Communication Budget Comparison ==="
-echo "--- $DIR1 (bytes per activation) ---"
-grep "bytes=" "$DIR1/comm_budget.txt" 2>/dev/null | tail -3 || echo "(no comm budget)"
+echo "--- $DIR1 (bytes/token statistics) ---"
+if [ -f "$DIR1/comm_analysis.txt" ]; then
+    grep -E "(Min:|Max:|Avg:)" "$DIR1/comm_analysis.txt" 2>/dev/null || echo "(no stats)"
+else
+    echo "(no comm analysis)"
+fi
 echo ""
-echo "--- $DIR2 (bytes per activation) ---"
-grep "bytes=" "$DIR2/comm_budget.txt" 2>/dev/null | tail -3 || echo "(no comm budget)"
+echo "--- $DIR2 (bytes/token statistics) ---"
+if [ -f "$DIR2/comm_analysis.txt" ]; then
+    grep -E "(Min:|Max:|Avg:)" "$DIR2/comm_analysis.txt" 2>/dev/null || echo "(no stats)"
+else
+    echo "(no comm analysis)"
+fi
+echo ""
+
+echo "=== Memory Budget vs Actual ==="
+echo "--- $DIR1 ---"
+if [ -f "$DIR1/budget_comparison.txt" ]; then
+    tail -10 "$DIR1/budget_comparison.txt" 2>/dev/null || echo "(no budget comparison)"
+else
+    echo "(no budget comparison)"
+fi
+echo ""
+echo "--- $DIR2 ---"
+if [ -f "$DIR2/budget_comparison.txt" ]; then
+    tail -10 "$DIR2/budget_comparison.txt" 2>/dev/null || echo "(no budget comparison)"
+else
+    echo "(no budget comparison)"
+fi
 echo ""
 
 echo "=============================================="
 echo "INTERPRETATION"
 echo "=============================================="
 echo ""
-echo "Interpretation:"
-echo "  baseline vs compressed/sparse: Tests if fp16 sparse compression helps"
-echo "  baseline vs q8: Tests if Q8 quantization (like DLlama Q80) closes the gap"
+echo "E1 Hypothesis H1: Inter-stage fp16 doubles activation traffic vs qsparse8_v1"
 echo ""
 echo "Expected results:"
-echo "  - Lower peak memory → Wire format matters (H1 confirmed)"
-echo "  - Lower bytes per activation → Compression working"
-echo "  - Same memory → Wire format not the bottleneck (investigate H2/H3/H4)"
-echo "  - Q8 shows bigger improvement than sparse → True quantization needed"
+echo "  - Lower peak memory in qsparse8_v1 → Wire format matters (H1 confirmed)"
+echo "  - Lower bytes/token in qsparse8_v1 → Compression working"
+echo "  - Same memory between variants → Wire format not bottleneck (investigate H2/H3/H4)"
+echo ""
+echo "Key files for analysis:"
+echo "  Peak memory: */peak_memory_analysis.txt"
+echo "  Communication: */comm_analysis.txt"
+echo "  Budget vs actual: */budget_comparison.txt"
+echo "  Raw monitoring: */memory_monitoring.log"
 echo ""
 echo "For detailed analysis, compare:"
-echo "  diff $DIR1/analysis.txt $DIR2/analysis.txt"
+echo "  diff $DIR1/budget_comparison.txt $DIR2/budget_comparison.txt"
 
