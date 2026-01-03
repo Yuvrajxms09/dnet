@@ -1,251 +1,126 @@
 #!/bin/bash
-# Run E1: Inter-stage dtype test - ONE CONFIG PER RUN
-#
-# Usage: SHARD1_IP=x.x.x.x SHARD2_IP=y.y.y.y ./run_e1_test.sh [baseline|compressed]
-#
-# IMPORTANT: Restart shards between configs. Config is read at startup.
+# Run E1: Inter-stage dtype compression test - assumes API/shard are running and model is loaded
 
 set -e
 
-# Parse argument
-CONFIG_NAME="${1:-baseline}"
-
-case "$CONFIG_NAME" in
-    baseline)
-        CONFIG_FILE="baseline.config"
-        ;;
-    compressed)
-        CONFIG_FILE="compressed.config"
-        ;;
-    q8)
-        CONFIG_FILE="q8.config"
-        ;;
-    *)
-        echo "Usage: $0 [baseline|compressed|q8]"
-        echo ""
-        echo "  baseline   - Test with fp16 wire dtype (default)"
-        echo "  compressed - Test with sparse fp16 compression"
-        echo "  q8         - Test with Q8 quantization + compression (like DLlama Q80)"
-        echo ""
-        echo "IMPORTANT: Restart shards with the matching .env config before running each test!"
-        exit 1
-        ;;
-esac
-
 BASE_URL="http://localhost:8080"
-RESULTS_DIR="e1_${CONFIG_NAME}_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="e1_results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 
-echo "=== E1 Test: $CONFIG_NAME (Results: $RESULTS_DIR) ==="
+# Auto-detect model from topology
+MODEL_NAME=$(curl -s "http://localhost:8080/v1/topology" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('model', 'unknown'))
+except:
+    print('unknown')
+")
 
-# Verify the config file exists (for documentation purposes)
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "WARNING: $CONFIG_FILE not found in current directory"
-    echo "Make sure shards were started with the correct .env settings"
-fi
-
-# Show expected config for this test
-echo "=== Expected Config for $CONFIG_NAME ==="
-if [ -f "$CONFIG_FILE" ]; then
-    cat "$CONFIG_FILE"
-else
-    echo "(Config file not found - proceeding anyway)"
-fi
-echo ""
-
-# Get model name from environment or use default
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-32B-MLX-8bit}"
-echo "Using Model: $MODEL_NAME"
-echo ""
-
-# Generate deterministic manual topology
-if [ -z "$SHARD1_IP" ] || [ -z "$SHARD2_IP" ]; then
-    echo "ERROR: SHARD1_IP and SHARD2_IP required"
+if [ "$MODEL_NAME" = "unknown" ] || [ -z "$MODEL_NAME" ]; then
+    echo "ERROR: Could not detect model from topology. Is the model loaded via dnet-tui?"
     exit 1
 fi
 
-TOPOLOGY_JSON=$(uv run python3 scripts/generate_manual_topology.py "$MODEL_NAME" "$SHARD1_IP" "$SHARD2_IP" 2>/dev/null)
-if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to generate topology"
-    exit 1
-fi
+echo "=== Detected Model: $MODEL_NAME ==="
 
-# Check if API is reachable
-if ! curl -s -f "$BASE_URL/health" > /dev/null; then
-    echo "ERROR: API not running at $BASE_URL"
-    exit 1
-fi
+# Run budget calculator first (auto-detects model and topology from loaded system)
+echo "=== Running Memory Budget Calculator ==="
+uv run python3 scripts/memory_budget.py \
+  --seq-len 2048 \
+  --pools 512 \
+  > "$RESULTS_DIR/budget_baseline.txt"
 
-# Prepare manual topology (deterministic layer assignment)
-echo "=== Preparing Manual Topology ==="
-echo "$TOPOLOGY_JSON" | curl -s -X POST "$BASE_URL/v1/prepare_topology_manual" \
-  -H "Content-Type: application/json" \
-  -d @- \
-  > "$RESULTS_DIR/topology_response.json"
+run_test() {
+    local name=$1
+    local config=$2
 
-if [ $? -ne 0 ] || ! grep -q "assignments" "$RESULTS_DIR/topology_response.json"; then
-    echo "ERROR: Failed to prepare manual topology"
-    cat "$RESULTS_DIR/topology_response.json"
-    exit 1
-fi
+    echo "=== Running $name test ==="
 
-echo "Manual topology prepared successfully"
-echo ""
+    # Setup config
+    cp "$config" .env || { echo "Config file $config not found"; exit 1; }
+    echo "Config loaded:"
+    cat .env
 
-# Load model with prepared topology
-echo "=== Loading Model with Manual Topology ==="
-echo "$TOPOLOGY_JSON" | curl -s -X POST "$BASE_URL/v1/load_model" \
-  -H "Content-Type: application/json" \
-  -d @- \
-  > "$RESULTS_DIR/load_model_response.json"
+    TEST_DIR="$RESULTS_DIR/$name"
+    mkdir -p "$TEST_DIR"
 
-if [ $? -ne 0 ] || ! grep -q "success.*true" "$RESULTS_DIR/load_model_response.json"; then
-    echo "ERROR: Failed to load model"
-    cat "$RESULTS_DIR/load_model_response.json"
-    exit 1
-fi
-
-echo "Model loaded successfully with manual topology"
-echo ""
-
-# Memory before inference
-echo "=== Capturing Memory Before Inference ==="
-ps aux | head -1 > "$RESULTS_DIR/memory_before.txt"
-ps aux | grep -E "(dnet-api|dnet-shard|python.*dnet)" | grep -v grep >> "$RESULTS_DIR/memory_before.txt" || true
-vm_stat >> "$RESULTS_DIR/memory_before.txt" 2>/dev/null || echo "vm_stat not available" >> "$RESULTS_DIR/memory_before.txt"
-echo "Saved to $RESULTS_DIR/memory_before.txt"
-
-# Run inference
-echo "=== Running Inference ==="
-START=$(date +%s)
-curl -s -X POST "$BASE_URL/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"Explain the concept of memory management in operating systems in detail.\"}], \"max_tokens\": 100}" \
-  | tee "$RESULTS_DIR/response.json"
-echo ""
-END=$(date +%s)
-DURATION=$((END - START))
-echo "Inference completed in ${DURATION}s"
-echo ""
-
-# Memory after inference
-echo "=== Capturing Memory After Inference ==="
-ps aux | grep -E "(dnet-api|dnet-shard|python.*dnet)" | grep -v grep > "$RESULTS_DIR/memory_after.txt" || true
-vm_stat >> "$RESULTS_DIR/memory_after.txt" 2>/dev/null || echo "vm_stat not available" >> "$RESULTS_DIR/memory_after.txt"
-echo "Saved to $RESULTS_DIR/memory_after.txt"
-
-# Extract memory snapshots from logs
-echo "=== Extracting Memory Snapshots from Logs ==="
-> "$RESULTS_DIR/memory_snapshots.txt"  # Clear/create file
-
-for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
-    if [ -f "$log_file" ]; then
-        echo "--- From $(basename $log_file) ---" >> "$RESULTS_DIR/memory_snapshots.txt"
-        grep "\[MEMORY_SNAPSHOT\]" "$log_file" >> "$RESULTS_DIR/memory_snapshots.txt" 2>/dev/null || echo "(no snapshots)" >> "$RESULTS_DIR/memory_snapshots.txt"
-        echo "" >> "$RESULTS_DIR/memory_snapshots.txt"
+    # Check if services are running
+    if ! curl -s -f "$BASE_URL/health" > /dev/null; then
+        echo "ERROR: API not running at $BASE_URL"
+        return 1
     fi
-done
 
-# Extract stage memory breakdown
-> "$RESULTS_DIR/stage_memory.txt"
-for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
-    if [ -f "$log_file" ]; then
-        echo "--- From $(basename $log_file) ---" >> "$RESULTS_DIR/stage_memory.txt"
-        grep "\[STAGE_MEMORY\]" "$log_file" >> "$RESULTS_DIR/stage_memory.txt" 2>/dev/null || echo "(no stage memory logs)" >> "$RESULTS_DIR/stage_memory.txt"
-        echo "" >> "$RESULTS_DIR/stage_memory.txt"
+    # Memory before
+    echo "Capturing memory before inference..."
+    ps aux | head -1 > "$TEST_DIR/memory_before.txt"
+    ps aux | grep -E "(dnet-api|dnet-shard)" | grep -v grep >> "$TEST_DIR/memory_before.txt" || true
+    vm_stat >> "$TEST_DIR/memory_before.txt" 2>/dev/null || echo "vm_stat not available" >> "$TEST_DIR/memory_before.txt"
+
+    # Run inference
+    echo "Running inference..."
+    START=$(date +%s)
+    curl -s -X POST "$BASE_URL/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"hi there\"}], \"max_tokens\": 50}" \
+      > "$TEST_DIR/response.json"
+
+    END=$(date +%s)
+
+    # Memory after
+    echo "Capturing memory after inference..."
+    ps aux | grep -E "(dnet-api|dnet-shard)" | grep -v grep > "$TEST_DIR/memory_after.txt" || true
+    vm_stat >> "$TEST_DIR/memory_after.txt" 2>/dev/null || echo "vm_stat not available" >> "$TEST_DIR/memory_after.txt"
+
+    # Extract memory snapshots from logs
+    echo "Extracting memory snapshots from logs..."
+    # Find shard log files (assuming they follow the pattern dnet-shard-*.log)
+    for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
+        if [ -f "$log_file" ]; then
+            grep "\[MEMORY_SNAPSHOT\]" "$log_file" > "$TEST_DIR/memory_snapshots.txt" 2>/dev/null || true
+        fi
+    done
+
+    # Analyze snapshots vs budget
+    if [ -f "$TEST_DIR/memory_snapshots.txt" ] && [ -f "$RESULTS_DIR/budget_baseline.txt" ]; then
+        echo "Analyzing memory snapshots vs budget..." > "$TEST_DIR/analysis.txt"
+        echo "Expected budget:" >> "$TEST_DIR/analysis.txt"
+        tail -n 10 "$RESULTS_DIR/budget_baseline.txt" >> "$TEST_DIR/analysis.txt" 2>/dev/null || true
+        echo "" >> "$TEST_DIR/analysis.txt"
+        echo "Actual snapshots:" >> "$TEST_DIR/analysis.txt"
+        cat "$TEST_DIR/memory_snapshots.txt" >> "$TEST_DIR/analysis.txt"
     fi
-done
 
-# Extract communication budget
-> "$RESULTS_DIR/comm_budget.txt"
-for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
-    if [ -f "$log_file" ]; then
-        echo "--- From $(basename $log_file) ---" >> "$RESULTS_DIR/comm_budget.txt"
-        grep "\[COMM_BUDGET\]" "$log_file" >> "$RESULTS_DIR/comm_budget.txt" 2>/dev/null || echo "(no comm budget logs)" >> "$RESULTS_DIR/comm_budget.txt"
-        echo "" >> "$RESULTS_DIR/comm_budget.txt"
-    fi
-done
-
-# Extract active config (to verify settings are applied)
-echo "=== Verifying Active Config ==="
-> "$RESULTS_DIR/active_config.txt"
-for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
-    if [ -f "$log_file" ]; then
-        echo "--- From $(basename $log_file) ---" >> "$RESULTS_DIR/active_config.txt"
-        grep "\[CONFIG\]" "$log_file" | tail -1 >> "$RESULTS_DIR/active_config.txt" 2>/dev/null || echo "(no config log)" >> "$RESULTS_DIR/active_config.txt"
-        echo "" >> "$RESULTS_DIR/active_config.txt"
-    fi
-done
-echo "Active config from shards:"
-cat "$RESULTS_DIR/active_config.txt"
-echo ""
-
-# Verify config matches expected
-echo "=== Config Verification ==="
-if [ "$CONFIG_NAME" = "baseline" ]; then
-    EXPECTED_COMPRESS="False"
-    EXPECTED_WIRE="fp16"
-else
-    EXPECTED_COMPRESS="True"
-    EXPECTED_WIRE="qsparse8_v1"
-fi
-
-if grep -q "compress=$EXPECTED_COMPRESS" "$RESULTS_DIR/active_config.txt" 2>/dev/null; then
-    echo "✓ Compression setting matches expected ($EXPECTED_COMPRESS)"
-else
-    echo "⚠ WARNING: Compression setting may not match expected ($EXPECTED_COMPRESS)"
-    echo "  Check active_config.txt for actual values"
-fi
-echo ""
-
-echo "Extracted log entries to:"
-echo "  - $RESULTS_DIR/memory_snapshots.txt"
-echo "  - $RESULTS_DIR/stage_memory.txt"
-echo "  - $RESULTS_DIR/comm_budget.txt"
-echo ""
-
-# Create analysis summary
-echo "=== Creating Analysis Summary ==="
-cat > "$RESULTS_DIR/analysis.txt" << EOF
-============================================
-E1 TEST ANALYSIS: $CONFIG_NAME
-============================================
-Test: $CONFIG_NAME
-Config: $CONFIG_FILE
-Model: $MODEL_NAME
-Duration: ${DURATION}s
+    # Summary
+    cat > "$TEST_DIR/summary.txt" << EOF
+Test: $name
+Config: $config
+Duration: $((END - START))s
 Timestamp: $(date)
-============================================
-
-THEORETICAL BUDGET (from memory_budget.py):
--------------------------------------------
 EOF
-cat "$RESULTS_DIR/budget.txt" >> "$RESULTS_DIR/analysis.txt" 2>/dev/null || echo "(budget not available)" >> "$RESULTS_DIR/analysis.txt"
 
-cat >> "$RESULTS_DIR/analysis.txt" << EOF
+    echo "✓ $name test completed - results in $TEST_DIR"
+}
 
-ACTUAL MEMORY SNAPSHOTS (from shard logs):
-------------------------------------------
-EOF
-cat "$RESULTS_DIR/memory_snapshots.txt" >> "$RESULTS_DIR/analysis.txt"
+# Run E1 tests: fp16 wire vs qsparse8_v1 compression
+run_test "baseline_fp16" "baseline.config"
+run_test "compressed_qsparse8" "compressed.config"
 
-cat >> "$RESULTS_DIR/analysis.txt" << EOF
-
-STAGE MEMORY BREAKDOWN:
------------------------
-EOF
-cat "$RESULTS_DIR/stage_memory.txt" >> "$RESULTS_DIR/analysis.txt"
-
-cat >> "$RESULTS_DIR/analysis.txt" << EOF
-
-COMMUNICATION BUDGET (bytes per activation):
---------------------------------------------
-EOF
-cat "$RESULTS_DIR/comm_budget.txt" >> "$RESULTS_DIR/analysis.txt"
-
-echo "Analysis saved to $RESULTS_DIR/analysis.txt"
 echo ""
-
-# Final summary
-echo "✓ E1 Test ($CONFIG_NAME) completed: $RESULTS_DIR"
-echo "Key files: budget.txt, memory_snapshots.txt, analysis.txt"
+echo "Tests completed. Results in $RESULTS_DIR"
+echo ""
+echo "To analyze:"
+echo "1. Budget calculator: $RESULTS_DIR/budget_baseline.txt"
+echo "2. Memory snapshots: $RESULTS_DIR/*/memory_snapshots.txt"
+echo "3. Analysis: $RESULTS_DIR/*/analysis.txt"
+echo "4. Check API/shard logs for:"
+echo "   [MEMORY_SNAPSHOT] entries (actual memory usage)"
+echo "   [PROFILE] entries (weight loading)"
+echo "   [STAGE_MEMORY] entries (stage-wise memory breakdown)"
+echo "   [COMM_BUDGET] entries (inter-stage communication costs)"
+echo ""
+echo "Compare compression effectiveness:"
+echo "  baseline_fp16 vs compressed_qsparse8 activation_mb values"
+echo "  Look for gap between expected budget and actual memory usage"
+echo "  Qwen-32B-BF16 should be easier to analyze than Llama-70B"
+echo "  Check if compression reduces the memory gap"
