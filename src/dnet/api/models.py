@@ -298,7 +298,7 @@ class ListModelsResponseModel(BaseModel):
     data: List[ModelObject]
 
 
-type RetrieveModelResponseModel = ModelObject
+RetrieveModelResponseModel = ModelObject
 
 
 # ------------------------
