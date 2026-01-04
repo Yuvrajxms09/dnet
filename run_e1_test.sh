@@ -115,7 +115,7 @@ START=$(date +%s)
 curl -s -X POST "$BASE_URL/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"hi there\"}], \"max_tokens\": 50}" \
-  > "$TEST_DIR/response.json"
+  | tee "$TEST_DIR/response.json"  # Print to console AND save to file
 
 END=$(date +%s)
 
