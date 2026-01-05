@@ -122,8 +122,8 @@ class ActivationCodec:
             shaped,
             wire_dtype_str=self.runtime._wire_dtype_str,
             wire_mx_dtype=self.runtime._wire_mx_dtype,
-            compress=transport_config.compress,
-            compress_min_bytes=transport_config.compress_min_bytes,
+            compress=True,  # Force compression for testing on single shard
+            compress_min_bytes=1024,  # Lower threshold for testing
         )
 
         # Handle both compressed (tuple) and uncompressed (bytes) returns

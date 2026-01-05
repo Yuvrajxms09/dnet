@@ -138,11 +138,14 @@ class InferenceManager:
                 if hasattr(y, "astype")
                 else np.array(list(map(int, y)), dtype=np.int32)
             )
+            # Keep tokens uncompressed (they're small int32 arrays)
             tok_bytes = to_bytes(
                 tok_np,
                 wire_dtype_str="int32",
                 wire_mx_dtype=mx.int32,
+                compress=False,  # Don't compress tokens
             )
+            tok_dtype = "int32"
 
             decoding_config = DecodingConfig(
                 temperature=req.temperature,
