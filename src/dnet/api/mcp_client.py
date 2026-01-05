@@ -162,9 +162,11 @@ class MCPToolClient:
         self._tools: Dict[str, MCPTool] = {}
         self._langchain_tools: List[Any] = []  # LangChain BaseTool instances
         self._mcp_client = None
+        self._tool_registry = None  # ToolRegistry instance
         self._connected: bool = False
 
         # Check available libraries
+        self._toolregistry_available = self._check_toolregistry()
         self._langchain_available = self._check_langchain_adapters()
         self._mcp_sdk_available = self._check_mcp_sdk()
 
@@ -194,6 +196,25 @@ class MCPToolClient:
             return True
         except Exception:
             logger.debug("MCP SDK not available")
+            return False
+
+    def _check_toolregistry(self) -> bool:
+        """Check if ToolRegistry with MCP support is available."""
+        try:
+            import importlib.util
+            if importlib.util.find_spec("toolregistry") is None:
+                return False
+
+            # Try to import and check if MCP registration is available
+            from toolregistry import ToolRegistry
+            registry = ToolRegistry()
+            if not hasattr(registry, 'register_from_mcp'):
+                return False
+
+            logger.debug("✅ ToolRegistry with MCP support available")
+            return True
+        except Exception:
+            logger.debug("ToolRegistry not available or missing MCP support")
             return False
 
     def add_stdio_server(
@@ -289,15 +310,106 @@ class MCPToolClient:
             logger.warning("⚠️ No MCP servers configured")
             return []
 
-        if self._langchain_available:
+        # Prioritize ToolRegistry for better MCP transport support
+        if self._toolregistry_available:
+            return await self._load_tools_toolregistry()
+        elif self._langchain_available:
             return await self._load_tools_langchain()
         elif self._mcp_sdk_available:
             return await self._load_tools_direct()
         else:
             logger.error(
-                "❌ No MCP libraries available. Install: pip install langchain-mcp-adapters"
+                "❌ No MCP libraries available. Install: pip install toolregistry[mcp] langchain-mcp-adapters"
             )
             return []
+
+    async def _load_tools_toolregistry(self) -> List[Any]:
+        """Load tools using ToolRegistry (primary implementation)."""
+        from toolregistry import ToolRegistry
+
+        logger.info(f"🔌 Connecting to {len(self._server_configs)} MCP server(s) via ToolRegistry...")
+
+        try:
+            registry = ToolRegistry()
+            self._tool_registry = registry
+
+            # Convert server configs to ToolRegistry format and register
+            for server_name, config in self._server_configs.items():
+                transport = config.get("transport", "stdio")
+
+                if transport == "http":
+                    # Use URL directly for HTTP transport
+                    url = config.get("url")
+                    headers = config.get("headers", {})
+                    if url:
+                        # ToolRegistry expects HTTP URLs directly
+                        registry.register_from_mcp(url, headers=headers)
+                        logger.debug(f"   📝 Registered HTTP MCP server: {server_name} ({url})")
+                    else:
+                        logger.warning(f"⚠️ No URL provided for HTTP server {server_name}")
+
+                elif transport == "stdio":
+                    # For stdio, create MCP config dict
+                    mcp_config = {
+                        "command": config.get("command"),
+                        "args": config.get("args", []),
+                        "env": config.get("env", {}),
+                    }
+                    registry.register_from_mcp(mcp_config)
+                    logger.debug(f"   📝 Registered stdio MCP server: {server_name}")
+
+                else:
+                    logger.warning(f"⚠️ Unsupported transport '{transport}' for server {server_name}")
+
+            # Get available tools from registry
+            available_tools = registry.get_available_tools()
+            logger.info(f"✅ ToolRegistry loaded {len(available_tools)} tools: {available_tools}")
+
+            # Convert to LangChain-compatible format
+            langchain_tools = []
+            for tool_name in available_tools:
+                try:
+                    # Get tool JSON schema from registry
+                    tool_json = registry.get_tools_json()
+                    tool_info = next((t for t in tool_json if t.get("function", {}).get("name") == tool_name), None)
+
+                    if tool_info:
+                        # Create a wrapper that calls registry.invoke
+                        from langchain_core.tools import tool as langchain_tool
+
+                        @langchain_tool
+                        def tool_wrapper(**kwargs):
+                            """Tool wrapper for ToolRegistry."""
+                            return registry.invoke(tool_name, **kwargs)
+
+                        # Update tool metadata
+                        tool_wrapper.name = tool_name
+                        tool_wrapper.description = tool_info.get("function", {}).get("description", "")
+                        tool_wrapper.args_schema = None  # Could be enhanced
+
+                        langchain_tools.append(tool_wrapper)
+
+                        # Also store in our MCPTool format
+                        mcp_tool = MCPTool(
+                            name=tool_name,
+                            description=tool_info.get("function", {}).get("description", ""),
+                            parameters=tool_info.get("function", {}).get("parameters", {}),
+                            server_name=server_name,
+                            _langchain_tool=tool_wrapper,
+                        )
+                        self._tools[tool_name] = mcp_tool
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to convert tool {tool_name}: {e}")
+
+            self._langchain_tools = langchain_tools
+            self._connected = True
+            logger.info(f"✅ Loaded {len(langchain_tools)} tools from ToolRegistry")
+            return langchain_tools
+
+        except Exception as e:
+            logger.error(f"❌ Failed to load MCP tools via ToolRegistry: {e}")
+            raise
 
     async def _load_tools_langchain(self) -> List[Any]:
         """Load tools using langchain-mcp-adapters MultiServerMCPClient."""
@@ -444,7 +556,10 @@ class MCPToolClient:
         logger.debug(f"   Arguments: {arguments}")
 
         try:
-            if mcp_tool._langchain_tool is not None:
+            # Try ToolRegistry execution first if available
+            if self._tool_registry and tool_name in self._tool_registry.get_available_tools():
+                result = self._tool_registry.invoke(tool_name, **arguments)
+            elif mcp_tool._langchain_tool is not None:
                 # Use LangChain tool's invoke method
                 tool = mcp_tool._langchain_tool
                 if hasattr(tool, "ainvoke"):

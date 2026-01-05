@@ -888,8 +888,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Try MCP client first
-                if has_mcp and tool_name in self._mcp_client.get_tool_names():
+                # Try ToolRegistry first (better MCP transport support)
+                if has_registry and tool_name in self._tool_registry.get_available_tools():
+                    result = self._tool_registry.invoke(tool_name, **arguments)
+                # Fallback to MCP client
+                elif has_mcp and tool_name in self._mcp_client.get_tool_names():
                     # MCP client execution is async, need to run in event loop
                     try:
                         result = asyncio.create_task(
@@ -900,9 +903,6 @@ Important: Only output JSON when you actually want to call tools. For normal res
                         result = asyncio.run(
                             self._mcp_client.execute_tool(tool_name, arguments)
                         )
-                # Fallback to ToolRegistry
-                elif has_registry:
-                    result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
                     raise ValueError(f"Tool '{tool_name}' not found in any backend")
 
@@ -959,12 +959,12 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Try MCP client first if tool is registered
-                if has_mcp and tool_name in mcp_tool_names:
-                    result = await self._mcp_client.execute_tool(tool_name, arguments)
-                # Fallback to ToolRegistry
-                elif has_registry:
+                # Try ToolRegistry first (better MCP transport support)
+                if has_registry and tool_name in self._tool_registry.get_available_tools():
                     result = self._tool_registry.invoke(tool_name, **arguments)
+                # Fallback to MCP client
+                elif has_mcp and tool_name in mcp_tool_names:
+                    result = await self._mcp_client.execute_tool(tool_name, arguments)
                 else:
                     raise ValueError(
                         f"Tool '{tool_name}' not found. Available MCP tools: {mcp_tool_names}"
