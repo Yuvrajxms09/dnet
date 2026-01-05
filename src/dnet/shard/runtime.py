@@ -361,6 +361,40 @@ class ShardRuntime:
             return
         self.policy.process(activation_msg)
 
+        # Log memory snapshot after processing for issue-73 analysis
+        self._log_memory_snapshot(activation_msg.nonce)
+
+    def _log_memory_snapshot(self, nonce: str) -> None:
+        """Log detailed memory breakdown for issue-73 stage-wise analysis."""
+        try:
+            # Model weights memory
+            weights_mb = 0
+            if self.model and hasattr(self.model, 'weight_info'):
+                for layer_tensors in self.model.weight_info.values():
+                    for tensor in layer_tensors.values():
+                        weights_mb += tensor.size_bytes
+                weights_mb /= (1024 * 1024)  # Convert to MB
+
+            # KV cache memory (estimate)
+            kv_mb = 0
+            if self.kv_cache_config.enabled and self._kv_by_nonce:
+                # Rough estimate: assume 2 bytes per token per layer per head
+                num_layers = len(self.model.layer_ids) if self.model else 0
+                kv_mb = len(self._kv_by_nonce) * num_layers * 128 * 2 / (1024 * 1024)
+
+            # Pool memory
+            pool_mb = self.input_pool_mb + self.output_pool_mb
+
+            # Total estimate
+            total_mb = weights_mb + kv_mb + pool_mb
+
+            logger.info(f"[MEMORY_SNAPSHOT] shard={self.shard_id}, nonce={nonce}, "
+                       f"weights={weights_mb:.1f}MB, kv={kv_mb:.1f}MB, pools={pool_mb:.1f}MB, "
+                       f"total={total_mb:.1f}MB")
+
+        except Exception as e:
+            logger.debug(f"Memory snapshot logging failed: {e}")
+
     def _compute_worker(self) -> None:
         while self.running:
             try:
