@@ -143,6 +143,9 @@ for log_file in ~/.dria/dnet/logs/dnet-shard-*.log; do
         # Extract MEMORY_SNAPSHOT entries (stage-wise memory analysis)
         grep "\[MEMORY_SNAPSHOT\]" "$log_file" >> "$TEST_DIR/memory_snapshots.txt" 2>/dev/null || true
 
+        # Extract compute method calls for debugging
+        grep "Runtime\.compute.*called" "$log_file" >> "$TEST_DIR/compute_calls.txt" 2>/dev/null || true
+
         # Extract CONFIG entries to verify settings were applied
         grep "\[CONFIG\]" "$log_file" >> "$TEST_DIR/config_log.txt" 2>/dev/null || true
     fi
@@ -196,6 +199,12 @@ if [ -f "$RESULTS_DIR/budget_baseline.txt" ]; then
         # Extract peak memory values from snapshots
         grep "total=" "$TEST_DIR/memory_snapshots.txt" | sed 's/.*total=\([0-9.]\+\)MB.*/\1/' | sort -n | tail -1 | xargs -I {} echo "Peak stage memory: {} MB" >> "$TEST_DIR/budget_comparison.txt" 2>/dev/null || true
     fi
+
+    if [ -f "$TEST_DIR/compute_calls.txt" ]; then
+        echo "" >> "$TEST_DIR/budget_comparison.txt"
+        echo "Compute method calls:" >> "$TEST_DIR/budget_comparison.txt"
+        echo "Total compute calls: $(wc -l < "$TEST_DIR/compute_calls.txt")" >> "$TEST_DIR/budget_comparison.txt"
+    fi
 fi
 
 # Summary
@@ -218,6 +227,8 @@ echo "  memory_monitoring.log   - External memory monitoring (every 0.5s)"
 echo "  peak_memory_analysis.txt - Peak memory statistics from monitoring"
 echo "  comm_budget.txt         - Communication costs (bytes/token)"
 echo "  comm_analysis.txt       - Communication statistics"
+echo "  memory_snapshots.txt    - Stage-wise memory snapshots"
+echo "  compute_calls.txt       - Compute method call tracking"
 echo "  config_log.txt          - Runtime configuration verification"
 echo "  budget_comparison.txt   - Budget vs actual comparison"
 echo "  summary.txt             - Test summary"

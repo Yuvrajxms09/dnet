@@ -356,6 +356,8 @@ class ShardRuntime:
 
     def compute(self, activation_msg: ActivationMessage) -> None:
         """Replacement for _process_activation in the original shard node."""
+        logger.info(f"DEBUG: Runtime.compute() called for nonce={activation_msg.nonce}, layer={activation_msg.layer_id}")
+
         if not self.policy:
             logger.error("Runtime %s: no compute policy configured", self.shard_id)
             return
