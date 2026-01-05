@@ -6,7 +6,7 @@ import mlx.core as mx
 import numpy as np
 from typing import Optional, Any, List, Union, Dict
 
-# Try to import MCP client (our new implementation)
+# Import MCP client
 try:
     from .mcp_client import (
         MCPToolClient,
@@ -112,7 +112,7 @@ class InferenceManager:
         self._mcp_client: Optional[MCPToolClient] = None
         if MCP_CLIENT_AVAILABLE:
             self._mcp_client = MCPToolClient()
-            logger.info("✅ MCPToolClient initialized for MCP tool integration")
+            logger.info("MCPToolClient initialized for MCP tool integration")
 
         # Legacy toolregistry (fallback)
         self._tool_registry: Optional[ToolRegistry] = self._setup_tool_registry()
@@ -132,8 +132,6 @@ class InferenceManager:
 
     async def generate_stream(self, req: ChatRequestModel):
         """Generator for chat completion chunks."""
-        logger.debug(f"generate_stream called: model={req.model}")
-
         if not self.model_manager.tokenizer:
             raise RuntimeError(
                 "Inference manager not ready (ring not connected or tokenizer not loaded)"
@@ -347,23 +345,17 @@ class InferenceManager:
             }
 
         # Parse tool calls if tools were available
-        logger.debug("🔍 Checking for tool calls in generate_stream response")
         tool_calls = None
         final_content = final_text
         available_tools = self._bound_tools or req.tools or []
         if available_tools:
-            logger.info(
-                f"🛠️ Tools available ({len(available_tools)}), attempting to parse tool calls"
-            )
             parsed_calls = self._parse_tool_calls_langchain_style(final_text)
             if parsed_calls:
-                logger.info(f"✅ Found {len(parsed_calls)} tool calls in response")
+                logger.info(f"Found {len(parsed_calls)} tool calls in response")
                 # Convert parsed dicts to ToolCall objects
                 tool_calls = self._convert_to_tool_call_objects(parsed_calls)
                 final_content = self._format_tool_call_response(final_text, tool_calls)
-                logger.debug("📝 Formatted response content (tool calls present)")
             else:
-                logger.debug("📝 No tool calls found, using original content")
                 final_content = final_text
 
         final_message = ChatMessage(
@@ -642,7 +634,7 @@ If you want to respond conversationally without using tools, use the "__conversa
                     tool_calls.append(tool_call)
 
             except Exception as e:
-                logger.warning(f"⚠️ Failed to convert tool call: {e}")
+                logger.warning(f"Failed to convert tool call: {e}")
                 continue
 
         return tool_calls
@@ -670,7 +662,6 @@ If you want to respond conversationally without using tools, use the "__conversa
 
                 if TOOL_REGISTRY_AVAILABLE:
                     registry.register_from_mcp(transport, with_namespace=namespace)
-                    logger.info(f"Registered MCP tools from {transport}")
 
             except Exception as e:
                 logger.error(f"Failed to register MCP tools from {config}: {e}")
@@ -703,8 +694,6 @@ If you want to respond conversationally without using tools, use the "__conversa
                     }
                 )
 
-                logger.info(f"Executed tool {tool_call.name} successfully")
-
             except Exception as e:
                 logger.error(f"Tool execution failed for {tool_call.name}: {e}")
                 results.append(
@@ -719,46 +708,28 @@ If you want to respond conversationally without using tools, use the "__conversa
 
     def _create_langchain_tool_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """Create LangChain-style tool prompt (no grammar constraints, just instructions)."""
-        logger.debug(f"🔧 Creating tool prompt with {len(tools)} provided tools")
-
         all_tools = list(tools)  # Start with provided tools
-        logger.debug(f"📋 Initial tools count: {len(all_tools)}")
 
         # Add tools from ToolRegistry if available
         if TOOL_REGISTRY_AVAILABLE and self._tool_registry:
             try:
                 registry_tools = self._tool_registry.get_tools_json()
-                logger.debug(f"📚 Found {len(registry_tools)} tools in registry")
-
                 # Filter out duplicates by name
                 existing_names = {t.get("function", {}).get("name") for t in all_tools}
-                added_count = 0
                 for reg_tool in registry_tools:
                     reg_name = reg_tool.get("function", {}).get("name")
                     if reg_name and reg_name not in existing_names:
                         all_tools.append(reg_tool)
                         existing_names.add(reg_name)
-                        added_count += 1
-                        logger.debug(f"✅ Added registry tool: {reg_name}")
-
-                logger.debug(
-                    f"📈 Total tools after registry merge: {len(all_tools)} (+{added_count} from registry)"
-                )
 
             except Exception as e:
-                logger.error(f"❌ Failed to get tools from registry: {e}")
-                logger.debug("Registry error details:", exc_info=True)
-        else:
-            logger.debug("📚 ToolRegistry not available or not initialized")
+                logger.error(f"Failed to get tools from registry: {e}")
 
         if not all_tools:
-            logger.warning("⚠️ No tools available for prompt generation")
             return ""
 
-        logger.debug(f"🛠️ Generating prompt for {len(all_tools)} tools")
-
         tool_summaries = []
-        for i, tool in enumerate(all_tools):
+        for tool in all_tools:
             if tool.get("type") == "function" and "function" in tool:
                 func = tool["function"]
                 name = func.get("name", "unknown")
@@ -768,12 +739,8 @@ If you want to respond conversationally without using tools, use the "__conversa
                 short_desc = desc.split(".")[0][:100] if desc else ""
                 summary = f"- {name}: {short_desc}"
                 tool_summaries.append(summary)
-                logger.debug(f"📝 Tool {i + 1}: {name} - {short_desc[:50]}...")
-            else:
-                logger.warning(f"⚠️ Malformed tool definition at index {i}: {tool}")
 
         tools_section = "\n".join(tool_summaries)
-        logger.debug(f"📄 Generated tools section with {len(tool_summaries)} summaries")
 
         prompt = f"""
 
@@ -787,21 +754,13 @@ For general conversation or when no tools are needed, respond with plain text.
 
 Important: Only output JSON when you actually want to call tools. For normal responses, just write naturally."""
 
-        logger.debug(f"📋 Final prompt length: {len(prompt)} characters")
-        logger.debug(f"🎯 Prompt preview: {prompt[:200]}...")
-
         return prompt
 
     def _parse_tool_calls_langchain_style(
         self, content: str
     ) -> Optional[List[Dict[str, Any]]]:
         """Parse tool calls using LangChain-style robust parsing (no grammar required)."""
-        logger.debug(
-            f"🔍 Starting tool call parsing for content length: {len(content)}"
-        )
-
         if not content or not content.strip():
-            logger.debug("📭 Empty content, no tool calls to parse")
             return None
 
         # Remove common prefixes/suffixes that models sometimes add
@@ -831,66 +790,31 @@ Important: Only output JSON when you actually want to call tools. For normal res
         for prefix in prefixes_to_remove:
             if clean_content.startswith(prefix):
                 clean_content = clean_content[len(prefix) :].strip()
-                logger.debug(
-                    f"🧹 Removed prefix '{prefix}', content now: {clean_content[:100]}..."
-                )
-
-        if len(clean_content) != original_length:
-            logger.debug(
-                f"📏 Content cleaned from {original_length} to {len(clean_content)} chars"
-            )
 
         # Try direct JSON parsing first
-        logger.debug("🎯 Attempting direct JSON parsing...")
         try:
             data = json.loads(clean_content)
-            logger.debug(f"✅ Valid JSON parsed: {type(data)}")
-
             if isinstance(data, dict) and "tool_calls" in data:
                 calls = data["tool_calls"]
                 if isinstance(calls, list) and calls:
-                    logger.info(
-                        f"🎉 SUCCESS: Parsed {len(calls)} tool calls via direct JSON"
-                    )
-                    for i, call in enumerate(calls):
-                        logger.debug(
-                            f"🔧 Call {i + 1}: {call.get('function', {}).get('name', 'unknown')}"
-                        )
                     return calls
-                else:
-                    logger.debug(
-                        f"⚠️ JSON has tool_calls but it's not a valid list: {calls}"
-                    )
-        except json.JSONDecodeError as e:
-            logger.debug(f"❌ Direct JSON parsing failed: {e}")
-            logger.debug(f"📄 Content that failed: {clean_content[:200]}...")
+        except json.JSONDecodeError:
+            pass
 
         # Fallback: Extract JSON from mixed text (LangChain-style)
-        logger.debug("🔄 Attempting JSON extraction from mixed text...")
         json_candidates = self._extract_json_from_text(clean_content)
-        logger.debug(f"📋 Found {len(json_candidates)} JSON candidates")
 
-        for i, candidate in enumerate(json_candidates):
+        for candidate in json_candidates:
             try:
-                logger.debug(f"🧪 Testing candidate {i + 1}: {candidate[:100]}...")
                 data = json.loads(candidate)
                 if isinstance(data, dict) and "tool_calls" in data:
                     calls = data["tool_calls"]
                     if isinstance(calls, list) and calls:
-                        logger.info(
-                            f"🎉 SUCCESS: Parsed {len(calls)} tool calls via extracted JSON"
-                        )
-                        for j, call in enumerate(calls):
-                            logger.debug(
-                                f"🔧 Call {j + 1}: {call.get('function', {}).get('name', 'unknown')}"
-                            )
                         return calls
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug(f"❌ Candidate {i + 1} failed: {e}")
+            except (json.JSONDecodeError, TypeError):
                 continue
 
         # Check for single tool call format (OpenAI style)
-        logger.debug("🔄 Checking for single tool call format...")
         try:
             data = json.loads(clean_content)
             if isinstance(data, dict) and "function" in data:
@@ -900,16 +824,10 @@ Important: Only output JSON when you actually want to call tools. For normal res
                     "type": "function",
                     "function": data["function"],
                 }
-                logger.info("🎉 SUCCESS: Converted single tool call format")
-                logger.debug(
-                    f"🔧 Single call: {tool_call['function'].get('name', 'unknown')}"
-                )
                 return [tool_call]
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.debug(f"❌ Single tool call format failed: {e}")
+        except (json.JSONDecodeError, KeyError):
+            pass
 
-        logger.warning("🚫 No tool calls found in content")
-        logger.debug(f"📄 Final content analyzed: {clean_content[:300]}...")
         return None
 
     def _extract_json_from_text(self, text: str) -> List[str]:
@@ -940,105 +858,77 @@ Important: Only output JSON when you actually want to call tools. For normal res
         self, tool_calls: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Execute tool calls using MCP client or ToolRegistry."""
-        logger.info(f"🔨 Starting execution of {len(tool_calls)} tool calls")
-
         # Check if we have any execution capability
         has_mcp = MCP_CLIENT_AVAILABLE and self._mcp_client
         has_registry = TOOL_REGISTRY_AVAILABLE and self._tool_registry
 
         if not has_mcp and not has_registry:
-            logger.error("❌ No tool execution backend available")
+            logger.error("No tool execution backend available")
             return []
 
         results = []
-        for i, tc in enumerate(tool_calls):
-            logger.debug(f"🎯 Processing tool call {i + 1}/{len(tool_calls)}")
-
+        for tc in tool_calls:
             tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             func = tc.get("function", {})
             tool_name = func.get("name", "")
 
-            logger.debug(f"🛠️ Tool: {tool_name}, ID: {tool_id}")
-
             # Parse arguments
             args_raw = func.get("arguments", "{}")
-            logger.debug(f"📝 Raw arguments: {str(args_raw)[:200]}...")
-
             if isinstance(args_raw, str):
                 try:
                     arguments = json.loads(args_raw)
-                    logger.debug(f"✅ Parsed arguments: {arguments}")
                 except json.JSONDecodeError as e:
                     arguments = {}
-                    logger.warning(f"⚠️ Failed to parse tool arguments: {e}")
-                    logger.debug(f"📄 Raw args that failed: {args_raw[:100]}")
+                    logger.warning(f"Failed to parse tool arguments: {e}")
             else:
                 arguments = args_raw
-                logger.debug(f"📋 Arguments were already parsed: {arguments}")
 
-            logger.info(f"🚀 Executing tool: {tool_name} with {len(arguments)} args")
+            logger.info(f"Executing tool: {tool_name}")
 
             try:
                 result = None
 
                 # Try MCP client first
                 if has_mcp and tool_name in self._mcp_client.get_tool_names():
-                    logger.debug(f"🔧 Executing via MCP client: {tool_name}")
                     # MCP client execution is async, need to run in event loop
                     try:
-                        # We're in async context, create a task
                         result = asyncio.create_task(
                             self._mcp_client.execute_tool(tool_name, arguments)
                         )
-                        # Wait for result (this might need adjustment based on context)
                         result = asyncio.get_event_loop().run_until_complete(result)
                     except RuntimeError:
-                        # No running loop, use asyncio.run
                         result = asyncio.run(
                             self._mcp_client.execute_tool(tool_name, arguments)
                         )
                 # Fallback to ToolRegistry
                 elif has_registry:
-                    logger.debug(f"🔧 Executing via ToolRegistry: {tool_name}")
                     result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
                     raise ValueError(f"Tool '{tool_name}' not found in any backend")
 
                 result_str = str(result)
-                logger.info(
-                    f"✅ Tool '{tool_name}' executed successfully (result: {len(result_str)} chars)"
-                )
-                logger.debug(f"📄 Result preview: {result_str[:200]}...")
-
                 results.append(
                     {"tool_call_id": tool_id, "content": result_str, "success": True}
                 )
 
             except Exception as e:
                 error_msg = f"Tool execution failed: {e}"
-                logger.error(f"❌ Tool '{tool_name}' failed: {e}")
-                logger.debug("Full error details:", exc_info=True)
-
+                logger.error(f"Tool '{tool_name}' failed: {e}")
                 results.append(
                     {"tool_call_id": tool_id, "content": error_msg, "success": False}
                 )
 
-        logger.info(
-            f"📊 Tool execution complete: {len(results)} results ({sum(1 for r in results if r['success'])} successful)"
-        )
         return results
 
     async def _execute_tool_calls_async(
         self, tool_calls: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Execute tool calls asynchronously using MCP client or ToolRegistry."""
-        logger.info(f"🔨 Starting async execution of {len(tool_calls)} tool calls")
-
         has_mcp = MCP_CLIENT_AVAILABLE and self._mcp_client
         has_registry = TOOL_REGISTRY_AVAILABLE and self._tool_registry
 
         if not has_mcp and not has_registry:
-            logger.error("❌ No tool execution backend available (MCP or ToolRegistry)")
+            logger.error("No tool execution backend available (MCP or ToolRegistry)")
             return [
                 {
                     "tool_call_id": "error",
@@ -1048,24 +938,20 @@ Important: Only output JSON when you actually want to call tools. For normal res
             ]
 
         mcp_tool_names = self._mcp_client.get_tool_names() if has_mcp else []
-        logger.debug(f"📋 Available MCP tools: {mcp_tool_names}")
 
         results = []
-        for i, tc in enumerate(tool_calls):
+        for tc in tool_calls:
             tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             func = tc.get("function", {})
             tool_name = func.get("name", "")
-
-            logger.info(f"🔧 [{i + 1}/{len(tool_calls)}] Executing tool: {tool_name}")
 
             # Parse arguments
             args_raw = func.get("arguments", "{}")
             if isinstance(args_raw, str):
                 try:
                     arguments = json.loads(args_raw)
-                    logger.debug(f"   📝 Parsed arguments: {arguments}")
                 except json.JSONDecodeError as e:
-                    logger.warning(f"   ⚠️ Failed to parse arguments: {e}")
+                    logger.warning(f"Failed to parse arguments: {e}")
                     arguments = {}
             else:
                 arguments = args_raw
@@ -1075,11 +961,9 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
                 # Try MCP client first if tool is registered
                 if has_mcp and tool_name in mcp_tool_names:
-                    logger.debug("   🌐 Executing via MCP client")
                     result = await self._mcp_client.execute_tool(tool_name, arguments)
                 # Fallback to ToolRegistry
                 elif has_registry:
-                    logger.debug("   📦 Executing via ToolRegistry")
                     result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
                     raise ValueError(
@@ -1087,14 +971,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
                     )
 
                 result_str = str(result)
-                logger.info(f"   ✅ Success! Result: {len(result_str)} chars")
-                logger.debug(f"   📄 Preview: {result_str[:200]}...")
-
                 results.append(
                     {"tool_call_id": tool_id, "content": result_str, "success": True}
                 )
             except Exception as e:
-                logger.error(f"   ❌ Tool '{tool_name}' failed: {e}")
+                logger.error(f"Tool '{tool_name}' failed: {e}")
                 results.append(
                     {
                         "tool_call_id": tool_id,
@@ -1103,10 +984,6 @@ Important: Only output JSON when you actually want to call tools. For normal res
                     }
                 )
 
-        successful = sum(1 for r in results if r.get("success"))
-        logger.info(
-            f"📊 Tool execution complete: {successful}/{len(results)} successful"
-        )
         return results
 
     async def _generate_single_completion(
@@ -1127,24 +1004,15 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Execute tools and continue conversation (for research use cases).
         This is a standalone agent-style method that doesn't interfere with normal chat completions.
         """
-        user_query = req.messages[-1].content[:100] if req.messages else "empty"
-        logger.info(f"🚀 Starting AGENT EXECUTION FLOW for: '{user_query}'")
-        logger.debug(
-            f"📋 Agent request: tools={len(req.tools) if req.tools else 0}, messages={len(req.messages)}"
-        )
-
         # Step 1: Generate initial response (may contain tool calls)
-        logger.info("📝 Step 1: Generating initial response with potential tool calls")
         initial_response = await self._generate_single_completion(req)
 
         choice = initial_response.choices[0]
         if not choice.message or not choice.message.tool_calls:
             # No tool calls, return normal response
-            logger.info("No tool calls generated, returning normal response")
             return initial_response
 
         tool_calls = choice.message.tool_calls
-        logger.info(f"⚙️ Step 2: Executing {len(tool_calls)} tool calls")
 
         # Convert ToolCall objects to dict format for execution
         tool_calls_dict = [
@@ -1157,7 +1025,6 @@ Important: Only output JSON when you actually want to call tools. For normal res
             }
             for tc in tool_calls
         ]
-        logger.debug(f"🔄 Converted {len(tool_calls)} ToolCall objects to dict format")
 
         tool_results = await self._execute_tool_calls_async(tool_calls_dict)
 
@@ -1200,31 +1067,19 @@ Important: Only output JSON when you actually want to call tools. For normal res
         guidance_content = "Based on the tool results above, provide a comprehensive and well-structured answer to my original question. Extract and organize the key information from the tool outputs."
         guidance_msg = ChatMessage(role="user", content=guidance_content)
         new_messages.append(guidance_msg)
-        logger.debug(f"📝 Added synthesis guidance: {guidance_content[:100]}...")
 
         # Step 4: Generate final synthesized response
-        logger.info("🎯 Step 4: Generating final synthesized response")
         final_req = req.model_copy(
             update={
                 "messages": new_messages,
                 "tools": None,  # Don't include tools in final generation
             }
         )
-        logger.debug(f"📋 Final request: {len(new_messages)} messages, no tools")
 
         final_response = await self._generate_single_completion(final_req)
 
         # Mark as tool-synthesized response
         final_response.choices[0].finish_reason = ChatCompletionReason.STOP
-        final_content = (
-            final_response.choices[0].message.content
-            if final_response.choices[0].message
-            else ""
-        )
-        logger.info(
-            f"🎉 AGENT COMPLETE: Generated {len(final_content)} char synthesized response"
-        )
-        logger.debug(f"📄 Final answer preview: {final_content[:200]}...")
 
         return final_response
 
@@ -1242,19 +1097,13 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Returns:
             InferenceManager: Self for method chaining
         """
-        logger.info(f"🔧 Binding {len(tools)} tools to inference manager")
-
         bound_tools = []
         for tool in tools:
             tool_def = self._convert_tool_to_definition(tool)
             if tool_def:
                 bound_tools.append(tool_def)
-                logger.debug(
-                    f"✅ Bound tool: {tool_def.get('function', {}).get('name', 'unknown')}"
-                )
 
         self._bound_tools = bound_tools
-        logger.info(f"🎯 Successfully bound {len(self._bound_tools)} tools")
         return self
 
     def _convert_tool_to_definition(self, tool: Any) -> Optional[Dict[str, Any]]:
@@ -1361,11 +1210,9 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 env={"EXA_API_KEY": os.getenv("EXA_API_KEY")}
             )
         """
-        logger.info(f"🔗 Registering MCP server '{server_name}' via stdio...")
-
         if not MCP_CLIENT_AVAILABLE:
             logger.error(
-                "❌ MCP client not available. Install: pip install langchain-mcp-adapters mcp"
+                "MCP client not available. Install: pip install langchain-mcp-adapters mcp"
             )
             return False
 
@@ -1396,13 +1243,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 if tool not in self._bound_tools:
                     self._bound_tools.append(tool)
 
-            logger.info(f"✅ MCP server '{server_name}' registered successfully")
-            logger.info(f"📋 Total tools available: {len(self._bound_tools)}")
+            logger.info(f"MCP server '{server_name}' registered successfully")
             return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to register MCP server '{server_name}': {e}")
-            logger.debug("MCP registration error details:", exc_info=True)
+            logger.error(f"Failed to register MCP server '{server_name}': {e}")
             return False
 
     async def register_mcp_http(
@@ -1427,10 +1272,8 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 headers={"Authorization": "Bearer token"}
             )
         """
-        logger.info(f"🔗 Registering MCP server '{server_name}' via HTTP...")
-
         if not MCP_CLIENT_AVAILABLE:
-            logger.error("❌ MCP client not available")
+            logger.error("MCP client not available")
             return False
 
         try:
@@ -1455,11 +1298,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 if tool not in self._bound_tools:
                     self._bound_tools.append(tool)
 
-            logger.info(f"✅ MCP server '{server_name}' (HTTP) registered successfully")
+            logger.info(f"MCP server '{server_name}' (HTTP) registered successfully")
             return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to register MCP server '{server_name}': {e}")
+            logger.error(f"Failed to register MCP server '{server_name}': {e}")
             return False
 
     async def register_mcp_sse(
@@ -1477,11 +1320,8 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Returns:
             bool: True if registration successful
         """
-        logger.info(f"🔗 Registering MCP server '{server_name}' via SSE...")
-        logger.info("   Note: HTTP transport is now preferred over SSE")
-
         if not MCP_CLIENT_AVAILABLE:
-            logger.error("❌ MCP client not available")
+            logger.error("MCP client not available")
             return False
 
         try:
@@ -1506,11 +1346,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 if tool not in self._bound_tools:
                     self._bound_tools.append(tool)
 
-            logger.info(f"✅ MCP server '{server_name}' (SSE) registered successfully")
+            logger.info(f"MCP server '{server_name}' (SSE) registered successfully")
             return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to register MCP server '{server_name}': {e}")
+            logger.error(f"Failed to register MCP server '{server_name}': {e}")
             return False
 
     async def register_mcp_preset(
@@ -1536,12 +1376,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
             await manager.register_mcp_preset("exa", env={"EXA_API_KEY": "..."})
         """
         if not MCP_CLIENT_AVAILABLE:
-            logger.error("❌ MCP client not available")
+            logger.error("MCP client not available")
             return False
 
         if preset_name not in MCP_SERVER_PRESETS:
-            logger.error(f"❌ Unknown MCP preset: {preset_name}")
-            logger.info(f"📋 Available presets: {list(MCP_SERVER_PRESETS.keys())}")
+            logger.error(f"Unknown MCP preset: {preset_name}")
             return False
 
         preset = MCP_SERVER_PRESETS[preset_name]
@@ -1558,7 +1397,7 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 final_env[preset["env_key"]] = env_value
             else:
                 logger.warning(
-                    f"⚠️ Environment variable {preset['env_key']} not set for preset '{preset_name}'"
+                    f"Environment variable {preset['env_key']} not set for preset '{preset_name}'"
                 )
 
         return await self.register_mcp_stdio(
@@ -1597,7 +1436,7 @@ Important: Only output JSON when you actually want to call tools. For normal res
             })
         """
         if not MCP_CLIENT_AVAILABLE:
-            logger.error("❌ MCP client not available")
+            logger.error("MCP client not available")
             return False
 
         try:
@@ -1609,13 +1448,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 if tool not in self._bound_tools:
                     self._bound_tools.append(tool)
 
-            logger.info(
-                f"✅ Registered {len(config)} MCP servers with {len(tools)} total tools"
-            )
+            logger.info(f"Registered {len(config)} MCP servers")
             return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to register MCP servers: {e}")
+            logger.error(f"Failed to register MCP servers: {e}")
             return False
 
     def register_mcp_tools(
@@ -1634,7 +1471,7 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Returns:
             bool: Always returns False with a deprecation warning
         """
-        logger.warning("⚠️ register_mcp_tools() is DEPRECATED!")
+        logger.warning("register_mcp_tools() is DEPRECATED!")
         logger.warning("   MCP servers use stdio or SSE transport, NOT HTTP URLs.")
         logger.warning("   Use register_mcp_stdio() or register_mcp_preset() instead.")
         logger.warning("")
@@ -1664,13 +1501,13 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Returns:
             bool: Always returns False with a deprecation warning
         """
-        logger.warning("⚠️ register_mcp_tools_async() is DEPRECATED!")
+        logger.warning("register_mcp_tools_async() is DEPRECATED!")
         logger.warning("   Use register_mcp_preset() or register_mcp_stdio() instead.")
 
         # If it looks like a preset name, try to use the preset
         if transport in ["exa", "github", "brave-search", "filesystem", "fetch"]:
             logger.info(
-                f"💡 Detected preset name '{transport}', using register_mcp_preset()"
+                f"Detected preset name '{transport}', using register_mcp_preset()"
             )
             return await self.register_mcp_preset(transport)
 
@@ -1711,15 +1548,12 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
     def get_registered_tools(self) -> List[str]:
         """Get list of all registered tool names from all sources."""
-        logger.debug("📋 Querying registered tools...")
-
         all_tools = []
 
         # Get tools from MCP client
         if MCP_CLIENT_AVAILABLE and self._mcp_client:
             mcp_tools = self._mcp_client.get_tool_names()
             all_tools.extend(mcp_tools)
-            logger.debug(f"📦 MCP tools: {len(mcp_tools)}")
 
         # Get tools from ToolRegistry (legacy)
         if TOOL_REGISTRY_AVAILABLE and self._tool_registry:
@@ -1729,9 +1563,8 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 for tool in registry_tools:
                     if tool not in all_tools:
                         all_tools.append(tool)
-                logger.debug(f"📦 ToolRegistry tools: {len(registry_tools)}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to get ToolRegistry tools: {e}")
+                logger.warning(f"Failed to get ToolRegistry tools: {e}")
 
         # Get tools from bound tools
         for tool in self._bound_tools:
@@ -1739,7 +1572,6 @@ Important: Only output JSON when you actually want to call tools. For normal res
             if name and name not in all_tools:
                 all_tools.append(name)
 
-        logger.debug(f"✅ Total registered tools: {len(all_tools)}")
         return all_tools
 
     def get_all_tools_openai_format(self) -> List[Dict[str, Any]]:
@@ -1917,73 +1749,3 @@ class StructuredOutputInferenceManager:
             # Agent will call WeatherResponse tool with structured data when ready to respond
         """
         return StructuredOutputInferenceManager(self.inference_manager, schema)
-
-
-
-# Test function for structured output
-def test_structured_output():
-    """Test the LangGraph-style structured output functionality."""
-    from pydantic import BaseModel, Field
-
-    # Mock InferenceManager for testing
-    class MockInferenceManager:
-        def __init__(self):
-            self._bound_tools = []
-
-        def bind_tools(self, tools):
-            bound_tools = []
-            for tool in tools:
-                tool_def = self._convert_tool_to_definition(tool)
-                if tool_def:
-                    bound_tools.append(tool_def)
-            self._bound_tools = bound_tools
-            return self
-
-        def _convert_tool_to_definition(self, tool):
-            if hasattr(tool, "__annotations__") and hasattr(tool, "model_json_schema"):
-                try:
-                    schema = tool.model_json_schema()
-                    return {
-                        "type": "function",
-                        "function": {
-                            "name": tool.__name__,
-                            "description": getattr(tool, "__doc__", "").strip(),
-                            "parameters": schema,
-                        },
-                    }
-                except:
-                    pass
-            return None
-
-        def get_bound_tools(self):
-            return self._bound_tools.copy()
-
-    # Test structured output schema
-    class WeatherResponse(BaseModel):
-        """Structured weather response."""
-
-        temperature: float = Field(description="Temperature in Fahrenheit")
-        wind_direction: str = Field(description="Wind direction")
-        wind_speed: float = Field(description="Wind speed in mph")
-
-    # Test StructuredOutputInferenceManager
-    base_llm = MockInferenceManager()
-    structured_llm = StructuredOutputInferenceManager(base_llm, WeatherResponse)
-
-    # Check that structured output tool was created
-    tools = structured_llm.get_bound_tools()
-    print(f"✅ Structured output tool created: {len(tools)} tools")
-    for tool in tools:
-        name = tool.get("function", {}).get("name", "unknown")
-        print(f"  - {name}")
-
-    # Test schema conversion
-    schema_tool = structured_llm._schema_to_tool(WeatherResponse)
-    print(f"✅ Schema converted to tool: {schema_tool['function']['name']}")
-
-    print("✅ Structured output functionality implemented!")
-    return True
-
-
-if __name__ == "__main__":
-    test_structured_output()
