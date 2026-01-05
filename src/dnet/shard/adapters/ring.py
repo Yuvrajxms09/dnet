@@ -267,11 +267,12 @@ class RingAdapter(TopologyAdapter):
             logger.error("Streaming disabled or next node not connected; cannot send")
             return
         try:
-            data = self.codec.serialize(msg, self.transport_settings)
+            data, dtype_str = self.codec.serialize(msg, self.transport_settings)
         except Exception as e:
             logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
             return
-        msg.dtype = self.runtime._wire_dtype_str
+        msg.dtype = dtype_str  # Use the dtype returned by serialize (may be compressed metadata)
+        print(f"DEBUG: Sending activation - nonce: {msg.nonce}, compressed: {'|' in dtype_str}, dtype: {dtype_str[:50]}...")
         request = msg.to_proto(data)
         request.timestamp = int(time.time() * 1000)
 

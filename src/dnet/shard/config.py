@@ -75,7 +75,7 @@ class TransportConfig:
     stream_idle_s: float = 2.0
     send_retries: int = 3
     explicit_eor: bool = False
-    compress: bool = False
+    compress: bool = True  # Enable compression by default for issue-73 testing
     compress_min_bytes: int = 65536
 
     @classmethod
