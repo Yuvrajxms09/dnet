@@ -110,6 +110,7 @@ class ActivationCodec:
         """
         Reads from output pool/tensor, compresses, and returns bytes + dtype metadata.
         """
+        print(f"DEBUG: Codec serialize called for msg nonce={msg.nonce}, layer={msg.layer_id}")
         shaped = msg.tensor
         if shaped is None:
             if self.runtime.output_pool is None:

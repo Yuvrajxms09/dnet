@@ -42,6 +42,7 @@ def to_bytes(
     # Check if we should compress
     tensor_size_bytes = tensor.size * tensor.dtype.size
     should_compress = compress and tensor_size_bytes >= compress_min_bytes
+    print(f"DEBUG: to_bytes - size: {tensor_size_bytes} bytes, compress: {compress}, threshold: {compress_min_bytes}, should_compress: {should_compress}")
 
     if should_compress:
         print(f"DEBUG: Compressing tensor with qsparse8_v1 - size: {tensor_size_bytes} bytes, shape: {tensor.shape}")
