@@ -100,6 +100,62 @@ async def serve(
         await grpc_server.start()
         await http_server.start(shutdown_trigger=stop_event.wait)
 
+        # Register MCP tools
+        import os
+
+        # Try to register Exa MCP tools if API key is available
+        # Using Exa's remote HTTP MCP server (simplest approach)
+        # See: https://github.com/exa-labs/exa-mcp-server
+        exa_api_key = os.getenv("EXA_API_KEY")
+        if exa_api_key:
+            try:
+                # Use Exa's remote HTTP MCP server
+                # Available tools: web_search_exa, get_code_context_exa, deep_search_exa, etc.
+                exa_url = f"https://mcp.exa.ai/mcp?exaApiKey={exa_api_key}&tools=web_search_exa,get_code_context_exa"
+                success = await inference_manager.register_mcp_http(
+                    server_name="exa", url=exa_url
+                )
+                if success:
+                    logger.info("✅ Exa MCP tools registered successfully via HTTP")
+                else:
+                    logger.warning("⚠️ Failed to register Exa MCP tools via HTTP")
+            except Exception as e:
+                logger.warning(f"Failed to register Exa MCP tools: {e}")
+        else:
+            logger.info("ℹ️ EXA_API_KEY not set, skipping Exa MCP registration")
+            logger.info("   Set EXA_API_KEY environment variable to enable Exa tools")
+
+        # Register GitHub MCP (official, remote HTTP)
+        # See: https://github.com/github/github-mcp-server
+        # Requires: GITHUB_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN
+        github_token = os.getenv("GITHUB_TOKEN") or os.getenv(
+            "GITHUB_PERSONAL_ACCESS_TOKEN"
+        )
+        if github_token:
+            try:
+                github_url = "https://api.githubcopilot.com/mcp/"
+                success = await inference_manager.register_mcp_http(
+                    server_name="github",
+                    url=github_url,
+                    headers={"Authorization": f"Bearer {github_token}"},
+                )
+                if success:
+                    logger.info("✅ GitHub MCP tools registered successfully via HTTP")
+                else:
+                    logger.warning("⚠️ Failed to register GitHub MCP tools via HTTP")
+            except Exception as e:
+                logger.warning(f"Failed to register GitHub MCP tools: {e}")
+        else:
+            logger.info("ℹ️ GITHUB_TOKEN not set, skipping GitHub MCP registration")
+            logger.info(
+                "   Set GITHUB_TOKEN environment variable to enable GitHub tools"
+            )
+
+        # You can also register other MCP servers:
+        # - GitHub: await inference_manager.register_mcp_preset("github")
+        # - Brave Search: await inference_manager.register_mcp_preset("brave-search")
+        # - Custom HTTP: await inference_manager.register_mcp_http("name", "url")
+
         mode = "static" if hostfile else "dynamic"
         tui.update_status(f"Running on HTTP:{http_port} gRPC:{grpc_port} ({mode})")
         await stop_event.wait()

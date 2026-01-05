@@ -48,11 +48,26 @@ class RingInferenceError(BaseModel):
 # ------------------------
 
 
-class ChatMessage(BaseModel):
-    """A single message in a chat conversation."""
+class ToolCall(BaseModel):
+    """A tool call made by the model.
 
-    role: str  # "system" | "user" | "assistant" | "tool" | "developer" # TODO: use Literal?
-    content: str
+    Compatible with LangChain/OpenAI format.
+    """
+
+    name: str
+    args: Dict[str, Any]
+    id: Optional[str] = None
+
+
+class ChatMessage(BaseModel):
+    """A single message in a chat conversation.
+
+    Compatible with OpenAI format.
+    """
+
+    role: str  # "system" | "user" | "assistant" | "developer" # TODO: use Literal?
+    content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
 
 
 class ChatParams(BaseModel):
@@ -78,7 +93,9 @@ class ChatParams(BaseModel):
     # prediction: NOT USED
     # presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)  # NOTE: unused
     # prompt_cache_key: Optional[str] = Field(default=None)  # NOTE: unused
-    # TODO: response_format:
+    response_format: Optional[Dict[str, Any]] = Field(
+        default=None
+    )  # OpenAI-compatible response format (json_schema, etc.)
     # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
     # service_tier: Optional[str] = Field(default=None)  # NOTE: unused
     stop: Union[str, List[str]] = Field(default_factory=list)
@@ -86,8 +103,12 @@ class ChatParams(BaseModel):
     stream: bool = Field(default=False)
     # stream_options:  # NOTE: unused
     temperature: float = Field(default=1.0, ge=0, le=2)
-    # tool_choice: # NOTE: unused, later with tool calling
-    # tools: # NOTE: unused, later with tool calling
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(
+        default=None
+    )  # Tool choice strategy
+    tools: Optional[List[Dict[str, Any]]] = Field(
+        default=None
+    )  # Available tools for function calling
     top_logprobs: int = Field(default=0, ge=0, le=20)
     top_p: float = Field(default=1.0, ge=0, le=1)
     verbosity: Literal["low", "medium", "high"] = Field(default="medium")  # TODO: used?
@@ -298,7 +319,7 @@ class ListModelsResponseModel(BaseModel):
     data: List[ModelObject]
 
 
-type RetrieveModelResponseModel = ModelObject
+RetrieveModelResponseModel = ModelObject
 
 
 # ------------------------

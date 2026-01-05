@@ -91,6 +91,10 @@ class HTTPServer:
             methods=["POST"],
         )
         self.app.add_api_route("/v1/devices", self.get_devices, methods=["GET"])
+        # Agent endpoint - full tool execution loop
+        self.app.add_api_route(
+            "/v1/agent/completions", self.agent_completions, methods=["POST"]
+        )
 
     async def health(self) -> HealthResponse:
         return HealthResponse(
@@ -136,6 +140,30 @@ class HTTPServer:
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
             return await self.inference_manager.chat_completions(req)
+
+    async def agent_completions(self, req: ChatRequestModel):
+        """
+        Agent-style completions with automatic tool execution.
+
+        This endpoint:
+        1. Generates a response (which may include tool_calls)
+        2. Automatically executes any tool calls via MCP/ToolRegistry
+        3. Passes tool results back to the model
+        4. Generates a final synthesized response
+
+        Use this for research/agentic use cases where you want
+        the model to use tools and synthesize results automatically.
+        """
+        if not self.model_manager.current_model_id:
+            from fastapi import HTTPException, status
+
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No model loaded. Please load a model via /v1/load_model first.",
+            )
+
+        # Use the agent execution flow
+        return await self.inference_manager.execute_tools_and_continue(req)
 
     async def load_model(self, req: APILoadModelRequest) -> APILoadModelResponse:
         try:
