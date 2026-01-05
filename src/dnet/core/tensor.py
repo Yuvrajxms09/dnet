@@ -10,7 +10,7 @@ def to_bytes(
     wire_mx_dtype: mx.Dtype,
     compress: bool = False,
     compress_min_bytes: int = 65536,
-) -> tuple[bytes, str]:
+) -> bytes | tuple[bytes, str]:
     """Serialize an MLX/Numpy tensor to bytes with the given wire dtype.
 
     Args:
@@ -21,7 +21,8 @@ def to_bytes(
         compress_min_bytes: Minimum size for compression to kick in
 
     Returns:
-        tuple[bytes, str]: (Serialized tensor data, dtype metadata string)
+        bytes: Serialized tensor data (uncompressed case - backward compatibility)
+        tuple[bytes, str]: (Serialized tensor data, dtype metadata string) when compressed
     """
     from dnet.compression.wire import compress_tensor_to_protobuf_data
 
@@ -74,11 +75,11 @@ def to_bytes(
             print(f"DEBUG: Compression failed: {e}, falling back to uncompressed")
             should_compress = False
 
-    # Normal uncompressed path
+    # Normal uncompressed path - return just bytes for backward compatibility
     if isinstance(tensor, np.ndarray):
         data = tensor.tobytes(order="C")
     else:
         data = tensor_to_bytes(tensor)
 
-    print(f"DEBUG: Using uncompressed tensor - size: {len(data)} bytes")
-    return data, wire_dtype_str
+    print(f"DEBUG: Using uncompressed tensor - size: {len(data)} bytes, compress={compress}, size_bytes={tensor_size_bytes}")
+    return data

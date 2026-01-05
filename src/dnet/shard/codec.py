@@ -118,7 +118,7 @@ class ActivationCodec:
             data_size = int(np.prod(msg.shape))
             shaped = output_buffer[:data_size].reshape(msg.shape)
 
-        data, dtype_str = to_bytes(
+        result = to_bytes(
             shaped,
             wire_dtype_str=self.runtime._wire_dtype_str,
             wire_mx_dtype=self.runtime._wire_mx_dtype,
@@ -126,7 +126,16 @@ class ActivationCodec:
             compress_min_bytes=transport_config.compress_min_bytes,
         )
 
+        # Handle both compressed (tuple) and uncompressed (bytes) returns
+        if isinstance(result, tuple):
+            data, dtype_str = result
+            compressed = True
+        else:
+            data = result
+            dtype_str = self.runtime._wire_dtype_str
+            compressed = False
+
         # Clean up reference immediately to assist GC
         msg.tensor = None
-        print(f"DEBUG: Serialized tensor - compressed: {'|' in dtype_str}, dtype: {dtype_str[:50]}...")
+        print(f"DEBUG: Serialized tensor - compressed: {compressed}, dtype: {dtype_str[:50]}...")
         return data, dtype_str
