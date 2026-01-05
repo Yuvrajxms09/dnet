@@ -88,7 +88,7 @@ echo "Running memory budget calculator..."
 uv run python3 scripts/memory_budget.py \
   --seq-len 4096 \
   --pools 512 \
-  > "../$RESULTS_DIR/budget_baseline.txt"
+  > "$RESULTS_DIR/budget_baseline.txt"
 
 # Start external memory monitoring
 echo "Starting external memory monitoring..."
