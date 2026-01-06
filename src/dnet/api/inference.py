@@ -1033,7 +1033,9 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 # Fallback to ToolRegistry
                 elif has_registry:
                     logger.debug(f"🔧 Executing via ToolRegistry (fallback): {tool_name}")
-                    result = self._tool_registry.invoke(tool_name, **arguments)
+                    # Use subscript notation for ToolRegistry: registry[tool_name](**args)
+                    tool_func = self._tool_registry[tool_name]
+                    result = tool_func(**arguments)
                     logger.debug(f"✅ ToolRegistry execution successful for {tool_name}")
                 else:
                     available_mcp = mcp_tool_names if has_mcp else []
