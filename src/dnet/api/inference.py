@@ -117,6 +117,13 @@ class InferenceManager:
         # Legacy toolregistry (fallback)
         self._tool_registry: Optional[ToolRegistry] = self._setup_tool_registry()
 
+        # Persistent event loop for MCP async operations
+        # This avoids "Task group is not initialized" errors with HTTP transport
+        # when making multiple calls (asyncio.run() creates new loop each time)
+        self._mcp_event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._mcp_loop_external: bool = False
+        self._setup_mcp_event_loop()
+
         # LangChain-compatible tool binding
         self._bound_tools: List[Dict[str, Any]] = []
 
@@ -651,6 +658,46 @@ If you want to respond conversationally without using tools, use the "__conversa
         logger.info("ToolRegistry initialized for MCP tool execution")
         return registry
 
+    def _setup_mcp_event_loop(self) -> None:
+        """Set up persistent event loop for MCP async operations.
+
+        This avoids "Task group is not initialized" errors with HTTP transport
+        when making multiple calls (asyncio.run() creates new loop each time).
+        """
+        try:
+            asyncio.get_running_loop()
+            self._mcp_loop_external = True
+            logger.debug("Detected external event loop (e.g., in async context)")
+        except RuntimeError:
+            self._mcp_loop_external = False
+            logger.debug("No external event loop detected")
+
+        # Create dedicated event loop for MCP operations
+        self._mcp_event_loop = asyncio.new_event_loop()
+        logger.debug("Created dedicated event loop for MCP operations")
+
+    def _run_mcp_async(self, coro) -> Any:
+        """Run async MCP coroutine using persistent event loop.
+
+        This method ensures we reuse the same event loop across calls,
+        which is required for MCP HTTP transport's streamable-http implementation.
+        """
+        if self._mcp_loop_external:
+            # We're in an environment with a running loop
+            # Use threading to run in our persistent loop without conflicts
+            import concurrent.futures
+
+            def run_in_thread():
+                asyncio.set_event_loop(self._mcp_event_loop)
+                return self._mcp_event_loop.run_until_complete(coro)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_in_thread)
+                return future.result()
+        else:
+            # Use our persistent loop directly
+            return self._mcp_event_loop.run_until_complete(coro)
+
     def _register_mcp_tools(
         self, registry: ToolRegistry, mcp_configs: List[Dict[str, Any]]
     ) -> None:
@@ -888,21 +935,16 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Try ToolRegistry first (better MCP transport support)
-                if has_registry and tool_name in self._tool_registry.get_available_tools():
+                # Try MCP client first
+                if has_mcp and tool_name in self._mcp_client.get_tool_names():
+                    # MCP client execution is async, use persistent event loop
+                    # This avoids "Task group is not initialized" errors with HTTP transport
+                    result = self._run_mcp_async(
+                        self._mcp_client.execute_tool(tool_name, arguments)
+                    )
+                # Fallback to ToolRegistry
+                elif has_registry:
                     result = self._tool_registry.invoke(tool_name, **arguments)
-                # Fallback to MCP client
-                elif has_mcp and tool_name in self._mcp_client.get_tool_names():
-                    # MCP client execution is async, need to run in event loop
-                    try:
-                        result = asyncio.create_task(
-                            self._mcp_client.execute_tool(tool_name, arguments)
-                        )
-                        result = asyncio.get_event_loop().run_until_complete(result)
-                    except RuntimeError:
-                        result = asyncio.run(
-                            self._mcp_client.execute_tool(tool_name, arguments)
-                        )
                 else:
                     raise ValueError(f"Tool '{tool_name}' not found in any backend")
 
@@ -959,12 +1001,12 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Try ToolRegistry first (better MCP transport support)
-                if has_registry and tool_name in self._tool_registry.get_available_tools():
-                    result = self._tool_registry.invoke(tool_name, **arguments)
-                # Fallback to MCP client
-                elif has_mcp and tool_name in mcp_tool_names:
+                # Try MCP client first if tool is registered
+                if has_mcp and tool_name in mcp_tool_names:
                     result = await self._mcp_client.execute_tool(tool_name, arguments)
+                # Fallback to ToolRegistry
+                elif has_registry:
+                    result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
                     raise ValueError(
                         f"Tool '{tool_name}' not found. Available MCP tools: {mcp_tool_names}"
@@ -1593,6 +1635,15 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Called by gRPC servicer when a token is received from a shard.
         """
         self.adapter.resolve_token(nonce, result)
+
+    def __del__(self):
+        """Cleanup persistent MCP event loop on destruction."""
+        if hasattr(self, '_mcp_event_loop') and self._mcp_event_loop and not self._mcp_event_loop.is_closed():
+            try:
+                self._mcp_event_loop.close()
+                logger.debug("Closed MCP event loop")
+            except Exception as e:
+                logger.debug(f"Error closing MCP event loop: {e}")
 
 
 class StructuredOutputInferenceManager:
