@@ -54,18 +54,41 @@ class ActivationCodec:
 
             # Tokens (Integer sequences)
             elif activation.dtype == "tokens":
-                tokens = np.frombuffer(activation.data, dtype=np.int32)
+                logger.debug(f"🔍 Deserializing tokens for nonce {request.nonce}: data_len={len(activation.data)}, shape={activation.shape}, dtype={activation.dtype}")
+                try:
+                    tokens = np.frombuffer(activation.data, dtype=np.int32)
+                    logger.debug(f"✅ np.frombuffer succeeded: tokens.shape={tokens.shape}, tokens[:5]={tokens[:5] if len(tokens) > 0 else 'empty'}")
+                except Exception as e:
+                    logger.error(f"❌ np.frombuffer failed for nonce {request.nonce}: {e}, data_len={len(activation.data)}, data_type={type(activation.data)}")
+                    raise
+
                 shp = (int(len(tokens)),)
+                logger.debug(f"📏 Calculated shape: {shp}")
+
                 pool_id = self.runtime.input_pool.allocate_for_layer(
                     layer_id=activation.layer_id, dtype=mx.int32, shape=shp
                 )
+                logger.debug(f"🏗️ Pool allocation: pool_id={pool_id}")
+
                 if pool_id is not None:
                     buffer = self.runtime.input_pool.get_buffer(pool_id)
-                    buffer[: len(tokens)] = tokens
+                    logger.debug(f"📊 Buffer info: buffer.shape={buffer.shape}, len(tokens)={len(tokens)}")
+
+                    try:
+                        buffer[: len(tokens)] = tokens
+                        logger.debug("✅ Buffer copy succeeded")
+                    except Exception as e:
+                        logger.error(f"❌ Buffer copy failed for nonce {request.nonce}: {e}")
+                        raise
+
                     msg = ActivationMessage.from_proto(request, pool_id)
                     msg.dtype = "tokens"
                     msg.shape = shp
+                    logger.debug("✅ Token deserialization completed successfully")
                     return msg
+                else:
+                    logger.error(f"❌ Pool allocation failed for nonce {request.nonce}")
+                    return None
 
             # Standard Raw Tensors
             else:
@@ -98,7 +121,10 @@ class ActivationCodec:
                     return ActivationMessage.from_proto(request, pool_id)
 
         except Exception as e:
-            logger.error(f"Deserialization error for nonce {request.nonce}: {e}")
+            logger.error(f"💥 Deserialization error for nonce {request.nonce}: {e}")
+            logger.error(f"   Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"   Traceback: {traceback.format_exc()}")
             # Cleanup if allocation happened but fill failed
             if pool_id is not None:
                 self.runtime.input_pool.release(pool_id)
