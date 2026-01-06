@@ -1398,11 +1398,16 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 transport = url
 
             # Register using ToolRegistry's MCP support (async version since we're in async context)
-            await self._tool_registry.register_from_mcp_async(transport, with_namespace=True)
+            # Disable namespacing to keep tool names simple for model understanding
+            await self._tool_registry.register_from_mcp_async(transport, with_namespace=False)
 
             # Get registered tools and bind them (like MCP client does)
             registry_tools = self._tool_registry.get_tools_json()
             logger.info(f"ToolRegistry returned {len(registry_tools)} tools for {server_name}")
+
+            # Debug: Log actual tool names
+            tool_names = [t.get('function', {}).get('name', 'unknown') for t in registry_tools[:5]]
+            logger.debug(f"📋 Sample tool names: {tool_names}")
 
             # Bind tools to inference manager (now that streaming errors are fixed)
             for tool in registry_tools:
