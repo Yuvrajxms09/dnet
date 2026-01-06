@@ -1382,10 +1382,11 @@ Important: Only output JSON when you actually want to call tools. For normal res
             registry_tools = self._tool_registry.get_tools_json()
             logger.info(f"ToolRegistry returned {len(registry_tools)} tools for {server_name}")
 
-            # TEMP: Don't bind tools to avoid potential format compatibility issues
-            # The old branch used MCP client tools which had tested format
-            # ToolRegistry tools might have incompatible format causing streaming errors
-            # Tools are still registered and available for execution via ToolRegistry
+            # Bind tools to inference manager (now that streaming errors are fixed)
+            for tool in registry_tools:
+                if tool not in self._bound_tools:
+                    self._bound_tools.append(tool)
+            logger.info(f"✅ Bound {len(registry_tools)} tools from {server_name} to inference manager")
 
             logger.info(f"Registered and bound {len(registry_tools)} tools from {server_name} MCP server")
 

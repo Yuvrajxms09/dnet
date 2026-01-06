@@ -107,20 +107,26 @@ async def serve(
         # Using Exa's remote HTTP MCP server (simplest approach)
         # See: https://github.com/exa-labs/exa-mcp-server
         exa_api_key = os.getenv("EXA_API_KEY")
+        logger.info(f"🔍 Checking EXA_API_KEY: {'SET' if exa_api_key else 'NOT SET'}")
         if exa_api_key:
+            logger.info(f"🔧 Attempting Exa MCP registration with key: {exa_api_key[:10]}...")
             try:
                 # Use Exa's remote HTTP MCP server
                 # Available tools: web_search_exa, get_code_context_exa, deep_search_exa, etc.
                 exa_url = f"https://mcp.exa.ai/mcp?exaApiKey={exa_api_key}&tools=web_search_exa,get_code_context_exa"
+                logger.info(f"🌐 Exa URL: {exa_url}")
                 success = await inference_manager.register_mcp_http(
                     server_name="exa", url=exa_url
                 )
                 if success:
                     logger.info("✅ Exa MCP tools registered successfully via HTTP")
+                    bound_tools = inference_manager.get_bound_tools()
+                    logger.info(f"📊 Exa tools bound: {len(bound_tools)}")
                 else:
                     logger.warning("⚠️ Failed to register Exa MCP tools via HTTP")
             except Exception as e:
-                logger.warning(f"Failed to register Exa MCP tools: {e}")
+                logger.error(f"❌ Failed to register Exa MCP tools: {e}")
+                logger.debug("Exa registration error details:", exc_info=True)
         else:
             logger.info("ℹ️ EXA_API_KEY not set, skipping Exa MCP registration")
             logger.info("   Set EXA_API_KEY environment variable to enable Exa tools")
@@ -131,9 +137,12 @@ async def serve(
         github_token = os.getenv("GITHUB_TOKEN") or os.getenv(
             "GITHUB_PERSONAL_ACCESS_TOKEN"
         )
+        logger.info(f"🔍 Checking GITHUB_TOKEN: {'SET' if github_token else 'NOT SET'}")
         if github_token:
+            logger.info(f"🔧 Attempting GitHub MCP registration with token: {github_token[:10]}...")
             try:
                 github_url = "https://api.githubcopilot.com/mcp/"
+                logger.info(f"🌐 GitHub URL: {github_url}")
                 success = await inference_manager.register_mcp_http(
                     server_name="github",
                     url=github_url,
@@ -141,10 +150,13 @@ async def serve(
                 )
                 if success:
                     logger.info("✅ GitHub MCP tools registered successfully via HTTP")
+                    bound_tools = inference_manager.get_bound_tools()
+                    logger.info(f"📊 GitHub tools bound: {len(bound_tools)}")
                 else:
                     logger.warning("⚠️ Failed to register GitHub MCP tools via HTTP")
             except Exception as e:
-                logger.warning(f"Failed to register GitHub MCP tools: {e}")
+                logger.error(f"❌ Failed to register GitHub MCP tools: {e}")
+                logger.debug("GitHub registration error details:", exc_info=True)
         else:
             logger.info("ℹ️ GITHUB_TOKEN not set, skipping GitHub MCP registration")
             logger.info(
