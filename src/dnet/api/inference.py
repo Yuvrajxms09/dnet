@@ -132,12 +132,17 @@ class InferenceManager:
 
     async def generate_stream(self, req: ChatRequestModel):
         """Generator for chat completion chunks."""
+        logger.info(f"🚀 generate_stream START: model={req.model}")
+        logger.debug(f"   Request details: messages={len(req.messages) if req.messages else 0}, tools={len(req.tools) if req.tools else 0}")
+
         if not self.model_manager.tokenizer:
+            logger.error("❌ generate_stream FAILED: No tokenizer available")
             raise RuntimeError(
                 "Inference manager not ready (ring not connected or tokenizer not loaded)"
             )
 
         tokenizer = self.model_manager.tokenizer
+        logger.debug("✅ Tokenizer ready, proceeding with generation")
 
         try:
             if (
@@ -150,11 +155,14 @@ class InferenceManager:
                 # Add tool system message if tools are available (LangChain-style)
                 # Use bound tools (LangChain approach) or request tools (backward compatibility)
                 available_tools = self._bound_tools or req.tools or []
+                logger.debug(f"🛠️ Tool check: bound_tools={len(self._bound_tools)}, req_tools={len(req.tools) if req.tools else 0}, available={len(available_tools)}")
                 if available_tools:
+                    logger.debug("📝 Generating tool system message...")
                     tool_system_msg = self._create_langchain_tool_prompt(
                         available_tools
                     )
                     message_dicts.append({"role": "system", "content": tool_system_msg})
+                    logger.debug(f"✅ Tool system message added ({len(tool_system_msg)} chars)")
 
                 for m in req.messages:
                     msg_dict = {"role": m.role, "content": m.content or ""}
@@ -165,25 +173,31 @@ class InferenceManager:
                     add_generation_prompt=True,
                     tokenize=False,
                 )
+                logger.debug(f"📝 Chat template applied, prompt length: {len(prompt_text)}")
             else:
                 prompt_text = (
                     "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
                 )
+                logger.debug("📝 Using fallback prompt format")
         except Exception as e:
-            logger.warning(f"Failed to apply chat template: {e}, using fallback")
+            logger.warning(f"⚠️ Failed to apply chat template: {e}, using fallback")
             prompt_parts = []
 
             # Add tool system message if tools are provided (LangChain-style)
             if req.tools:
+                logger.debug("📝 Adding tools to fallback prompt")
                 tool_system_msg = self._create_langchain_tool_prompt(req.tools)
                 prompt_parts.append(f"System: {tool_system_msg}")
 
             prompt_parts.extend(m.content or "" for m in req.messages)
             prompt_parts.append("Assistant:")
             prompt_text = "\n".join(prompt_parts)
+            logger.debug(f"📝 Fallback prompt created, length: {len(prompt_text)}")
 
+        logger.debug("🔢 Encoding prompt to tokens...")
         prompt_tokens = tokenizer.encode(prompt_text)
         prompt_array = mx.array(prompt_tokens)
+        logger.info(f"✅ Prompt encoded: {len(prompt_tokens)} tokens")
 
         stop_id_sequences = []
         if req.stop:
@@ -206,10 +220,12 @@ class InferenceManager:
 
         completion_reason = ChatCompletionReason.LENGTH
 
+        logger.debug("🔄 Resetting cache and starting inference")
         await self.adapter.reset_cache()
 
+        logger.debug("📤 Yielding initial chunk with assistant role")
         # Yield initial chunk with role
-        yield ChatResponseModel(
+        initial_chunk = ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
@@ -221,9 +237,14 @@ class InferenceManager:
             created=int(time.time()),
             model=req.model,
         )
+        logger.debug(f"📦 Initial chunk created: {len(initial_chunk.model_dump_json())} bytes")
+        yield initial_chunk
 
+        logger.info(f"🔄 Starting inference loop: max_tokens={req.max_tokens}")
         y = prompt_array
-        for _ in range(req.max_tokens):
+        generated_tokens = 0
+        for i in range(req.max_tokens):
+            logger.debug(f"🔄 Token {i+1}/{req.max_tokens}: preparing data")
             tok_np = (
                 y.astype(mx.int32)
                 if hasattr(y, "astype")
@@ -234,6 +255,7 @@ class InferenceManager:
                 wire_dtype_str="int32",
                 wire_mx_dtype=mx.int32,
             )
+            logger.debug(f"📊 Token data prepared: {len(tok_bytes)} bytes")
 
             decoding_config = DecodingConfig(
                 temperature=req.temperature,
@@ -246,6 +268,7 @@ class InferenceManager:
                 grammar_json_schema=grammar_json_schema,
             )
 
+            logger.debug("📤 Sending tokens to shard...")
             # Send tokens to first shard
             await self.adapter.send_tokens(
                 tokens=tok_bytes,
@@ -255,8 +278,10 @@ class InferenceManager:
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
             )
+            logger.debug("⏳ Awaiting token response...")
             result = await self.adapter.await_token(nonce, timeout_s=300.0)
             token = int(result.token_id)
+            logger.debug(f"✅ Token received: {token}")
 
             # Accumulate logprobs
             token_logprobs = []
@@ -276,8 +301,9 @@ class InferenceManager:
             delta_text = full_text[last_text_len:]
             last_text_len = len(full_text)
 
+            logger.debug(f"📦 Creating chunk: delta='{delta_text[:50]}...', token={token}")
             # Yield chunk
-            yield ChatResponseModel(
+            chunk = ChatResponseModel(
                 id=nonce,
                 choices=[
                     ChatChoice(
@@ -297,20 +323,37 @@ class InferenceManager:
                 model=req.model,
             )
 
+            try:
+                chunk_json = chunk.model_dump_json(exclude_none=True)
+                logger.debug(f"📦 Chunk JSON created: {len(chunk_json)} bytes")
+                yield chunk
+                logger.debug("✅ Chunk yielded successfully")
+            except Exception as e:
+                logger.error(f"❌ Failed to serialize chunk: {e}")
+                logger.debug(f"   Chunk data: {chunk}")
+                raise
+
             # stopping criteria
             if token == tokenizer.eos_token_id:
+                logger.debug(f"🛑 EOS token detected ({tokenizer.eos_token_id}), stopping generation")
                 completion_reason = ChatCompletionReason.STOP
                 break
 
             y = mx.array([token], dtype=mx.int32)
+            generated_tokens += 1
+            logger.debug(f"🔄 Continuing with token {generated_tokens} generated so far")
 
+        logger.debug("🏁 Finalizing detokenizer...")
         detokenizer.finalize()
         final_text = detokenizer.text
+        logger.info(f"📝 Final text generated: {len(final_text)} chars")
+        logger.debug(f"📝 Final text preview: {final_text[:200]}...")
 
         # Strip special tokens from output
         # mlx-lm's NaiveStreamingDetokenizer calls tokenizer.decode() without skip_special_tokens=True
         # (see: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tokenizer_utils.py)
         # So we strip them manually as a post-processing step
+        logger.debug("🧹 Stripping special tokens...")
         SPECIAL_TOKENS_TO_STRIP = [
             "<|im_end|>",  # Qwen, ChatML format
             "<|im_start|>",  # Qwen, ChatML format
@@ -321,9 +364,11 @@ class InferenceManager:
             "<|assistant|>",  # Some chat templates
             "<|user|>",  # Some chat templates
         ]
+        original_length = len(final_text)
         for token in SPECIAL_TOKENS_TO_STRIP:
             final_text = final_text.replace(token, "")
         final_text = final_text.strip()
+        logger.debug(f"🧹 Special tokens stripped: {original_length} -> {len(final_text)} chars")
 
         metrics_dict = None
         t_end = time.perf_counter()
@@ -345,27 +390,44 @@ class InferenceManager:
             }
 
         # Parse tool calls if tools were available
+        logger.debug(f"🔍 Starting tool call processing for final text")
         tool_calls = None
         final_content = final_text
         available_tools = self._bound_tools or req.tools or []
-        if available_tools:
-            parsed_calls = self._parse_tool_calls_langchain_style(final_text)
-            if parsed_calls:
-                logger.info(f"Found {len(parsed_calls)} tool calls in response")
-                # Convert parsed dicts to ToolCall objects
-                tool_calls = self._convert_to_tool_call_objects(parsed_calls)
-                final_content = self._format_tool_call_response(final_text, tool_calls)
-            else:
-                final_content = final_text
+        logger.debug(f"🛠️ Tool availability: bound={len(self._bound_tools)}, req={len(req.tools) if req.tools else 0}, available={len(available_tools)}")
 
+        if available_tools:
+            logger.info(f"🛠️ Tools available ({len(available_tools)}), attempting to parse tool calls")
+            try:
+                parsed_calls = self._parse_tool_calls_langchain_style(final_text)
+                logger.debug(f"🔍 Parse result: {len(parsed_calls) if parsed_calls else 0} tool calls")
+                if parsed_calls:
+                    logger.info(f"✅ Found {len(parsed_calls)} tool calls in response")
+                    # Convert parsed dicts to ToolCall objects
+                    tool_calls = self._convert_to_tool_call_objects(parsed_calls)
+                    final_content = self._format_tool_call_response(final_text, tool_calls)
+                    logger.debug(f"📝 Formatted response content (tool calls present)")
+                    logger.debug(f"📋 Tool calls: {[tc.name for tc in tool_calls] if tool_calls else []}")
+                else:
+                    logger.debug("📝 No tool calls found, using original content")
+                    final_content = final_text
+            except Exception as e:
+                logger.error(f"❌ Tool parsing failed: {e}")
+                logger.debug("Tool parsing error details:", exc_info=True)
+                final_content = final_text
+        else:
+            logger.debug("📝 No tools available, skipping tool parsing")
+
+        logger.debug("📝 Creating final message and chunk")
         final_message = ChatMessage(
             role="assistant",
             content=final_content,
             tool_calls=tool_calls,
         )
+        logger.debug(f"📝 Final message created: content={len(final_content)} chars, tool_calls={len(tool_calls) if tool_calls else 0}")
 
         # Final chunk
-        yield ChatResponseModel(
+        final_chunk = ChatResponseModel(
             id=nonce,
             choices=[
                 ChatChoice(
@@ -384,6 +446,17 @@ class InferenceManager:
                 total_tokens=len(prompt_tokens) + len(tokens),
             ),
         )
+
+        try:
+            final_chunk_json = final_chunk.model_dump_json(exclude_none=True)
+            logger.info(f"🏁 generate_stream COMPLETE: final chunk {len(final_chunk_json)} bytes")
+            logger.debug(f"📊 Generation stats: prompt_tokens={len(prompt_tokens)}, completion_tokens={len(tokens)}, total={len(prompt_tokens) + len(tokens)}")
+            yield final_chunk
+            logger.debug("✅ Final chunk yielded successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to serialize final chunk: {e}")
+            logger.debug(f"   Final chunk data: {final_chunk}")
+            raise
 
     async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
         """
@@ -767,75 +840,35 @@ Important: Only output JSON when you actually want to call tools. For normal res
         clean_content = content.strip()
         original_length = len(clean_content)
 
-        # Remove think tags
-        import re
-
-        clean_content = re.sub(
-            r"<think>.*?</think>", "", clean_content, flags=re.DOTALL
-        ).strip()
-
-        # Remove special tokens
-        special_tokens = [
-            "<|im_end|>",
-            "<|im_start|>",
-            "<|endoftext|>",
-            "</s>",
-            "<|eot_id|>",
-            "<|end|>",
-        ]
-        for token in special_tokens:
-            clean_content = clean_content.replace(token, "").strip()
-
         prefixes_to_remove = ["Assistant:", "AI:", "Response:"]
         for prefix in prefixes_to_remove:
             if clean_content.startswith(prefix):
                 clean_content = clean_content[len(prefix) :].strip()
-                logger.debug(f"🧹 Removed prefix '{prefix}', content now: {clean_content[:100]}...")
-
-        if len(clean_content) != original_length:
-            logger.debug(f"📏 Content cleaned from {original_length} to {len(clean_content)} chars")
 
         # Try direct JSON parsing first
-        logger.debug("🎯 Attempting direct JSON parsing...")
         try:
             data = json.loads(clean_content)
-            logger.debug(f"✅ Valid JSON parsed: {type(data)}")
-
             if isinstance(data, dict) and "tool_calls" in data:
                 calls = data["tool_calls"]
                 if isinstance(calls, list) and calls:
-                    logger.info(f"🎉 SUCCESS: Parsed {len(calls)} tool calls via direct JSON")
-                    for i, call in enumerate(calls):
-                        logger.debug(f"🔧 Call {i+1}: {call.get('function', {}).get('name', 'unknown')}")
                     return calls
-                else:
-                    logger.debug(f"⚠️ JSON has tool_calls but it's not a valid list: {calls}")
-        except json.JSONDecodeError as e:
-            logger.debug(f"❌ Direct JSON parsing failed: {e}")
-            logger.debug(f"📄 Content that failed: {clean_content[:200]}...")
+        except json.JSONDecodeError:
+            pass
 
         # Fallback: Extract JSON from mixed text (LangChain-style)
-        logger.debug("🔄 Attempting JSON extraction from mixed text...")
         json_candidates = self._extract_json_from_text(clean_content)
-        logger.debug(f"📋 Found {len(json_candidates)} JSON candidates")
 
-        for i, candidate in enumerate(json_candidates):
+        for candidate in json_candidates:
             try:
-                logger.debug(f"🧪 Testing candidate {i+1}: {candidate[:100]}...")
                 data = json.loads(candidate)
                 if isinstance(data, dict) and "tool_calls" in data:
                     calls = data["tool_calls"]
                     if isinstance(calls, list) and calls:
-                        logger.info(f"🎉 SUCCESS: Parsed {len(calls)} tool calls via extracted JSON")
-                        for j, call in enumerate(calls):
-                            logger.debug(f"🔧 Call {j+1}: {call.get('function', {}).get('name', 'unknown')}")
                         return calls
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug(f"❌ Candidate {i+1} failed: {e}")
+            except (json.JSONDecodeError, TypeError):
                 continue
 
         # Check for single tool call format (OpenAI style)
-        logger.debug("🔄 Checking for single tool call format...")
         try:
             data = json.loads(clean_content)
             if isinstance(data, dict) and "function" in data:
@@ -845,14 +878,10 @@ Important: Only output JSON when you actually want to call tools. For normal res
                     "type": "function",
                     "function": data["function"],
                 }
-                logger.info(f"🎉 SUCCESS: Converted single tool call format")
-                logger.debug(f"🔧 Single call: {tool_call['function'].get('name', 'unknown')}")
                 return [tool_call]
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.debug(f"❌ Single tool call format failed: {e}")
+        except (json.JSONDecodeError, KeyError):
+            pass
 
-        logger.warning("🚫 No tool calls found in content")
-        logger.debug(f"📄 Final content analyzed: {clean_content[:300]}...")
         return None
 
     def _extract_json_from_text(self, text: str) -> List[str]:
@@ -966,42 +995,33 @@ Important: Only output JSON when you actually want to call tools. For normal res
         logger.debug(f"📋 Available MCP tools: {mcp_tool_names}")
 
         results = []
-        for i, tc in enumerate(tool_calls):
+        for tc in tool_calls:
             tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             func = tc.get("function", {})
             tool_name = func.get("name", "")
-
-            logger.info(f"🔧 [{i+1}/{len(tool_calls)}] Executing tool: {tool_name}")
 
             # Parse arguments
             args_raw = func.get("arguments", "{}")
             if isinstance(args_raw, str):
                 try:
                     arguments = json.loads(args_raw)
-                    logger.debug(f"   📝 Parsed arguments: {arguments}")
                 except json.JSONDecodeError as e:
-                    logger.warning(f"   ⚠️ Failed to parse arguments: {e}")
+                    logger.warning(f"Failed to parse arguments: {e}")
                     arguments = {}
-            else:
-                arguments = args_raw
 
             try:
                 result = None
 
                 # Try MCP client first if tool is registered
                 if has_mcp and tool_name in mcp_tool_names:
-                    logger.debug(f"   🌐 Executing via MCP client")
                     result = await self._mcp_client.execute_tool(tool_name, arguments)
                 # Fallback to ToolRegistry
                 elif has_registry:
-                    logger.debug(f"   📦 Executing via ToolRegistry")
                     result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
                     raise ValueError(f"Tool '{tool_name}' not found. Available MCP tools: {mcp_tool_names}")
 
                 result_str = str(result)
-                logger.info(f"   ✅ Success! Result: {len(result_str)} chars")
-                logger.debug(f"   📄 Preview: {result_str[:200]}...")
 
                 results.append({
                     "tool_call_id": tool_id,
@@ -1009,17 +1029,13 @@ Important: Only output JSON when you actually want to call tools. For normal res
                     "success": True
                 })
             except Exception as e:
-                logger.error(f"   ❌ Tool '{tool_name}' failed: {e}")
-                logger.debug("Full error details:", exc_info=True)
-
+                logger.error(f"Tool execution failed for {tool_name}: {e}")
                 results.append({
                     "tool_call_id": tool_id,
                     "content": f"Tool execution failed: {e}",
                     "success": False
                 })
 
-        successful = sum(1 for r in results if r.get('success'))
-        logger.info(f"📊 Tool execution complete: {successful}/{len(results)} successful")
         return results
 
     async def _generate_single_completion(
@@ -1369,10 +1385,10 @@ Important: Only output JSON when you actually want to call tools. For normal res
             registry_tools = self._tool_registry.get_tools_json()
             logger.info(f"ToolRegistry returned {len(registry_tools)} tools for {server_name}")
 
-            # Bind tools to inference manager (like MCP client does)
-            for tool in registry_tools:
-                if tool not in self._bound_tools:
-                    self._bound_tools.append(tool)
+            # TEMP: Don't bind tools to avoid potential format compatibility issues
+            # The old branch used MCP client tools which had tested format
+            # ToolRegistry tools might have incompatible format causing streaming errors
+            # Tools are still registered and available for execution via ToolRegistry
 
             logger.info(f"Registered and bound {len(registry_tools)} tools from {server_name} MCP server")
 

@@ -129,14 +129,35 @@ class HTTPServer:
             )
 
         if req.stream:
+            import logging
+            logger = logging.getLogger(__name__)
 
             async def stream_generator():
-                async for chunk in self.inference_manager.generate_stream(req):
-                    # Use model_dump_json with exclude_none to omit empty fields like 'message' in chunks
-                    data = chunk.model_dump_json(exclude_none=True)
-                    yield f"data: {data}\n\n"
-                yield "data: [DONE]\n\n"
+                logger.info("🌊 HTTP API: Starting stream generation")
+                chunk_count = 0
+                try:
+                    async for chunk in self.inference_manager.generate_stream(req):
+                        chunk_count += 1
+                        logger.debug(f"🌊 HTTP API: Processing chunk {chunk_count}")
+                        # Use model_dump_json with exclude_none to omit empty fields like 'message' in chunks
+                        data = chunk.model_dump_json(exclude_none=True)
+                        logger.debug(f"🌊 HTTP API: Chunk JSON created: {len(data)} bytes")
+                        chunk_data = f"data: {data}\n\n"
+                        logger.debug(f"🌊 HTTP API: Yielding chunk {chunk_count}: {len(chunk_data)} bytes")
+                        yield chunk_data
 
+                    logger.info(f"🌊 HTTP API: Stream complete, {chunk_count} chunks yielded")
+                    done_data = "data: [DONE]\n\n"
+                    logger.debug(f"🌊 HTTP API: Yielding DONE marker: {len(done_data)} bytes")
+                    yield done_data
+                    logger.info("🌊 HTTP API: Stream generation finished successfully")
+
+                except Exception as e:
+                    logger.error(f"🌊 HTTP API: Stream generation failed: {e}")
+                    logger.debug("Stream generation error details:", exc_info=True)
+                    raise
+
+            logger.info("🌊 HTTP API: Creating StreamingResponse")
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
             return await self.inference_manager.chat_completions(req)
