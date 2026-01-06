@@ -46,6 +46,7 @@ class ActivationMessage:
     repetition_penalty: float = 1.0
     min_p: float = 0.0
     min_tokens_to_keep: int = 1
+    grammar_json_schema: Optional[str] = None
 
     @classmethod
     def from_proto(cls, proto_msg: ActivationRequest, pool_id: int = 0):
@@ -74,6 +75,9 @@ class ActivationMessage:
             min_tokens_to_keep=proto_msg.min_tokens_to_keep
             if proto_msg.HasField("min_tokens_to_keep")
             else 1,
+            grammar_json_schema=proto_msg.grammar_json_schema
+            if proto_msg.HasField("grammar_json_schema")
+            else None,
         )
 
     def to_proto(self, data: bytes) -> ActivationRequest:
@@ -98,6 +102,7 @@ class ActivationMessage:
             repetition_penalty=self.repetition_penalty,
             min_p=self.min_p,
             min_tokens_to_keep=self.min_tokens_to_keep,
+            grammar_json_schema=self.grammar_json_schema,
         )
 
 

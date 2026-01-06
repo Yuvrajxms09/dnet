@@ -12,3 +12,4 @@ class DecodingConfig:
     logit_bias: dict[int, float] | None = None
     min_p: float = 0.0
     min_tokens_to_keep: int = 1
+    grammar_json_schema: str | None = None  # JSON schema for grammar-constrained generation

@@ -41,6 +41,7 @@ dependencies = [
   "toolregistry[mcp]>=0.4.14",
   "langchain-mcp-adapters>=0.2.1",  # LangChain MCP integration
   "mcp>=1.25.0",  # MCP Python SDK
+  "outlines>=1.2.0",  # Structured generation with grammar constraints
 ]
 
 [project.optional-dependencies]

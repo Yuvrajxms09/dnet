@@ -24,6 +24,10 @@ class OffloadPolicy(ComputePolicy):
     Handles 'offload' and 'sliding_fit' modes.
     """
 
+    # Cache grammar states by nonce to maintain state across token generations
+    # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
+    _grammar_states: dict = {}
+
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
         local_count = max(1, len(self.runtime.assigned_layers))
         requested_w = max(1, int(req.window_size))
@@ -339,7 +343,30 @@ class OffloadPolicy(ComputePolicy):
                                 repetition_penalty=msg.repetition_penalty,
                                 min_p=msg.min_p,
                                 min_tokens_to_keep=msg.min_tokens_to_keep,
+                                grammar_json_schema=getattr(msg, "grammar_json_schema", None),
                             )
+
+                            # Get or create grammar state (cached by nonce for multi-token generation)
+                            grammar_state = None
+                            grammar_schema = getattr(msg, "grammar_json_schema", None)
+                            if grammar_schema:
+                                nonce = getattr(msg, "nonce", None)
+                                if nonce in OffloadPolicy._grammar_states:
+                                    grammar_state = OffloadPolicy._grammar_states[nonce]
+                                    # Check if grammar state was already terminated - if so, don't reuse it
+                                    if grammar_state is not None and getattr(
+                                        grammar_state, "_terminated", False
+                                    ):
+                                        del OffloadPolicy._grammar_states[nonce]
+                                        grammar_state = None
+
+                                if grammar_state is None:
+                                    logger.debug(f"Creating new grammar state for nonce {nonce}")
+                                    grammar_state = Sampler.create_grammar_state(
+                                        grammar_schema, self.runtime.tokenizer, y.shape[-1]
+                                    )
+                                    if grammar_state:
+                                        OffloadPolicy._grammar_states[nonce] = grammar_state
 
                             sampler = Sampler()
                             result = sampler.sample(
@@ -347,6 +374,7 @@ class OffloadPolicy(ComputePolicy):
                                 config=decoding_config,
                                 req_logprobs=msg.req_logprobs,
                                 req_top_logprobs=msg.req_top_logprobs,
+                                grammar_state=grammar_state,
                             )
 
                             token_id = result.token_id

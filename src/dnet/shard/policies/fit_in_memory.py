@@ -16,6 +16,10 @@ from .base import register_policy, ComputePolicy
 class FitInMemoryPolicy(ComputePolicy):
     """Everything fits - no offloading needed"""
 
+    # Cache grammar states by nonce to maintain state across token generations
+    # TODO: Add TTL-based cleanup for _grammar_states to prevent memory growth
+    _grammar_states: dict = {}
+
     def configure_policy_for_model(self, req: ShardLoadModelRequest) -> None:
         self._mode = "fit"
         local_count = max(1, len(self.runtime.assigned_layers))
@@ -146,7 +150,30 @@ class FitInMemoryPolicy(ComputePolicy):
                                 repetition_penalty=msg.repetition_penalty,
                                 min_p=msg.min_p,
                                 min_tokens_to_keep=msg.min_tokens_to_keep,
+                                grammar_json_schema=getattr(msg, "grammar_json_schema", None),
                             )
+
+                            # Get or create grammar state (cached by nonce for multi-token generation)
+                            grammar_state = None
+                            grammar_schema = getattr(msg, "grammar_json_schema", None)
+                            if grammar_schema:
+                                nonce = getattr(msg, "nonce", None)
+                                if nonce in FitInMemoryPolicy._grammar_states:
+                                    grammar_state = FitInMemoryPolicy._grammar_states[nonce]
+                                    # Check if grammar state was already terminated - if so, don't reuse it
+                                    if grammar_state is not None and getattr(
+                                        grammar_state, "_terminated", False
+                                    ):
+                                        del FitInMemoryPolicy._grammar_states[nonce]
+                                        grammar_state = None
+
+                                if grammar_state is None:
+                                    logger.debug(f"Creating new grammar state for nonce {nonce}")
+                                    grammar_state = Sampler.create_grammar_state(
+                                        grammar_schema, self.runtime.tokenizer, y.shape[-1]
+                                    )
+                                    if grammar_state:
+                                        FitInMemoryPolicy._grammar_states[nonce] = grammar_state
 
                             sampler = Sampler()
                             result = sampler.sample(
@@ -154,6 +181,7 @@ class FitInMemoryPolicy(ComputePolicy):
                                 config=decoding_config,
                                 req_logprobs=msg.req_logprobs,
                                 req_top_logprobs=msg.req_top_logprobs,
+                                grammar_state=grammar_state,
                             )
 
                             token_id = result.token_id

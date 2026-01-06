@@ -29,6 +29,28 @@ class ChatCompletionReason(str, Enum):
     STOP = "stop"
 
 
+class StructuredOutputsParams(BaseModel):
+    """Parameters for structured output generation."""
+
+    json: Optional[Dict[str, Any]] = Field(default=None)
+
+    @field_validator("json")
+    @classmethod
+    def validate_json_schema(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("JSON schema must be a dictionary")
+        if "type" not in v:
+            raise ValueError("JSON schema must have a 'type' field")
+        try:
+            import json
+            json.dumps(v)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"JSON schema must be JSON serializable: {e}")
+        return v
+
+
 class RingInferenceError(BaseModel):
     """Error response for ring inference."""
 
@@ -96,6 +118,9 @@ class ChatParams(BaseModel):
     response_format: Optional[Dict[str, Any]] = Field(
         default=None
     )  # OpenAI-compatible response format (json_schema, etc.)
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
+        default=None
+    )  # Structured output parameters for grammar-constrained generation
     # safety_identifier: Optional[str] = Field(default=None)  # NOTE: unused
     # service_tier: Optional[str] = Field(default=None)  # NOTE: unused
     stop: Union[str, List[str]] = Field(default_factory=list)

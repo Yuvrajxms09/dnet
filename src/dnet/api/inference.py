@@ -43,6 +43,7 @@ from .models import (
     ChatUsage,
     ChatCompletionReason,
     ChatLogProbs,
+    StructuredOutputsParams,
     ToolCall,
 )
 from .cluster import ClusterManager
@@ -255,6 +256,16 @@ class InferenceManager:
             )
             logger.debug(f"📊 Token data prepared: {len(tok_bytes)} bytes")
 
+            # Convert OpenAI response_format to internal structured_outputs format
+            if req.response_format and req.response_format.get("type") == "json_schema":
+                json_schema = req.response_format["json_schema"]["schema"]
+                req.structured_outputs = StructuredOutputsParams(json=json_schema)
+
+            # Get grammar JSON schema for structured output
+            grammar_json_schema = None
+            if req.structured_outputs and req.structured_outputs.json:
+                grammar_json_schema = json.dumps(req.structured_outputs.json)
+
             decoding_config = DecodingConfig(
                 temperature=req.temperature,
                 top_p=req.top_p,
@@ -263,7 +274,11 @@ class InferenceManager:
                 min_tokens_to_keep=req.min_tokens_to_keep
                 if hasattr(req, "min_tokens_to_keep")
                 else 1,
+                grammar_json_schema=grammar_json_schema,
             )
+
+            logger.debug("📤 Sending tokens to shard...")
+            # Send tokens to first shard
 
             logger.debug("📤 Sending tokens to shard...")
             # Send tokens to first shard
@@ -843,9 +858,12 @@ Important: Only output JSON when you actually want to call tools. For normal res
         clean_content = content.strip()
         original_length = len(clean_content)
 
-        # Remove think tags (from proposed code)
+        # Remove think tags (from proposed code) - make more robust
         import re
-        clean_content = re.sub(r'<think>.*?</think>', '', clean_content, flags=re.DOTALL).strip()
+        think_removed = re.sub(r'<think>.*?</think>', '', clean_content, flags=re.DOTALL | re.IGNORECASE).strip()
+        if len(think_removed) != len(clean_content):
+            logger.debug(f"🧹 Removed think tags: {len(clean_content)} -> {len(think_removed)} chars")
+        clean_content = think_removed
 
         # Remove special tokens (from proposed code)
         special_tokens = ['<|im_end|>', '<|im_start|>', '<|endoftext|>', '</s>', '<|eot_id|>', '<|end|>']
@@ -856,6 +874,8 @@ Important: Only output JSON when you actually want to call tools. For normal res
         for prefix in prefixes_to_remove:
             if clean_content.startswith(prefix):
                 clean_content = clean_content[len(prefix) :].strip()
+
+        logger.debug(f"🧹 After cleaning ({len(clean_content)} chars): {clean_content[:300]}...")
 
         # Try direct JSON parsing first
         try:
@@ -1089,7 +1109,7 @@ Important: Only output JSON when you actually want to call tools. For normal res
         # Convert tool_results back to ToolRegistry expected format for message reconstruction
         tool_responses = {result["tool_call_id"]: result["content"] for result in tool_results}
 
-        # Use ToolRegistry's built-in message reconstruction
+        # Uses ToolRegistry's built-in method - correct!
         assistant_tool_messages = self._tool_registry.recover_tool_call_assistant_message(
             tool_calls, tool_responses
         )
