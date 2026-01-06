@@ -206,8 +206,6 @@ class InferenceManager:
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
 
-        # Grammar JSON schema (removed structured outputs support)
-        grammar_json_schema = None
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
@@ -265,7 +263,6 @@ class InferenceManager:
                 min_tokens_to_keep=req.min_tokens_to_keep
                 if hasattr(req, "min_tokens_to_keep")
                 else 1,
-                grammar_json_schema=grammar_json_schema,
             )
 
             logger.debug("📤 Sending tokens to shard...")
