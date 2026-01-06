@@ -998,17 +998,10 @@ Important: Only output JSON when you actually want to call tools. For normal res
             ]
 
         mcp_tool_names = self._mcp_client.get_tool_names() if has_mcp else []
-        registry_tool_names = list(self._tool_registry.get_available_tools()) if has_registry else []
-        logger.debug(f"📋 Available MCP tools: {len(mcp_tool_names)} - {mcp_tool_names[:3]}...")
-        logger.debug(f"📋 Available ToolRegistry tools: {len(registry_tool_names)} - {registry_tool_names[:3]}...")
+        logger.debug(f"📋 Available MCP tools: {mcp_tool_names}")
 
         results = []
-        for i, tc in enumerate(tool_calls):
-            logger.info(f"🎯 Processing tool call {i+1}/{len(tool_calls)}")
-            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            logger.info(f"🛠️ Tool requested: '{tool_name}' (ID: {tool_id})")
+        for tc in tool_calls:
             tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
             func = tc.get("function", {})
             tool_name = func.get("name", "")
@@ -1025,20 +1018,14 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Option B: Prioritize ToolRegistry first (where tools are actually registered)
-                if has_registry:
-                    logger.debug(f"🔧 Executing via ToolRegistry (primary): {tool_name}")
-                    result = self._tool_registry.invoke(tool_name, **arguments)
-                    logger.debug(f"✅ ToolRegistry execution successful for {tool_name}")
-                # Fallback to MCP client (legacy)
-                elif has_mcp and tool_name in mcp_tool_names:
-                    logger.debug(f"🔧 Executing via MCP client (fallback): {tool_name}")
+                # Try MCP client first if tool is registered
+                if has_mcp and tool_name in mcp_tool_names:
                     result = await self._mcp_client.execute_tool(tool_name, arguments)
-                    logger.debug(f"✅ MCP client execution successful for {tool_name}")
+                # Fallback to ToolRegistry
+                elif has_registry:
+                    result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
-                    available_mcp = mcp_tool_names if has_mcp else []
-                    available_registry = list(self._tool_registry.get_available_tools()) if has_registry else []
-                    raise ValueError(f"Tool '{tool_name}' not found. Available MCP tools: {available_mcp}, Available ToolRegistry tools: {available_registry}")
+                    raise ValueError(f"Tool '{tool_name}' not found. Available MCP tools: {mcp_tool_names}")
 
                 result_str = str(result)
 
