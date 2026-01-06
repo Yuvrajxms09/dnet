@@ -1027,19 +1027,26 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
                 # Option A: MCP client first (after syncing both backends during registration)
                 if has_mcp and tool_name in mcp_tool_names:
-                    logger.debug(f"🔧 Executing via MCP client (primary): {tool_name}")
+                    logger.info(f"🔧 Executing via MCP client (primary): {tool_name}")
                     result = await self._mcp_client.execute_tool(tool_name, arguments)
-                    logger.debug(f"✅ MCP client execution successful for {tool_name}")
+                    logger.info(f"✅ MCP client execution successful for {tool_name}")
                 # Fallback to ToolRegistry
                 elif has_registry:
-                    logger.debug(f"🔧 Executing via ToolRegistry (fallback): {tool_name}")
-                    # Use subscript notation for ToolRegistry: registry[tool_name](**args)
-                    tool_func = self._tool_registry[tool_name]
-                    result = tool_func(**arguments)
-                    logger.debug(f"✅ ToolRegistry execution successful for {tool_name}")
+                    logger.info(f"🔧 Executing via ToolRegistry (fallback): {tool_name}")
+                    try:
+                        # Use subscript notation for ToolRegistry: registry[tool_name](**args)
+                        result = self._tool_registry[tool_name](**arguments)
+                        logger.info(f"✅ ToolRegistry execution successful for {tool_name}")
+                    except Exception as reg_error:
+                        logger.error(f"❌ ToolRegistry execution failed: {reg_error}")
+                        logger.debug("ToolRegistry error details:", exc_info=True)
+                        raise reg_error
                 else:
                     available_mcp = mcp_tool_names if has_mcp else []
                     available_registry = list(self._tool_registry.get_available_tools()) if has_registry else []
+                    logger.error(f"❌ Tool '{tool_name}' not found in any backend")
+                    logger.error(f"   Available MCP tools: {available_mcp}")
+                    logger.error(f"   Available ToolRegistry tools: {available_registry}")
                     raise ValueError(f"Tool '{tool_name}' not found. Available MCP tools: {available_mcp}, Available ToolRegistry tools: {available_registry}")
 
                 result_str = str(result)
@@ -1077,15 +1084,22 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Execute tools and continue conversation (for research use cases).
         This is a standalone agent-style method that doesn't interfere with normal chat completions.
         """
+        user_query = req.messages[-1].content[:100] if req.messages else 'empty'
+        logger.info(f"🚀 Starting AGENT EXECUTION FLOW for: '{user_query}'")
+        logger.debug(f"📋 Agent request: tools={len(req.tools) if req.tools else 0}, messages={len(req.messages)}")
+
         # Step 1: Generate initial response (may contain tool calls)
+        logger.info("📝 Step 1: Generating initial response with potential tool calls")
         initial_response = await self._generate_single_completion(req)
 
         choice = initial_response.choices[0]
         if not choice.message or not choice.message.tool_calls:
             # No tool calls, return normal response
+            logger.info("📝 No tool calls generated, returning normal response")
             return initial_response
 
         tool_calls = choice.message.tool_calls
+        logger.info(f"⚙️ Step 2: Found {len(tool_calls)} tool calls to execute")
 
         # Convert ToolCall objects to dict format for execution
         tool_calls_dict = [
@@ -1099,9 +1113,13 @@ Important: Only output JSON when you actually want to call tools. For normal res
             for tc in tool_calls
         ]
 
+        logger.info(f"🔨 Step 2b: Executing {len(tool_calls_dict)} tool calls")
         tool_results = await self._execute_tool_calls_async(tool_calls_dict)
+        successful_results = sum(1 for r in tool_results if r.get('success'))
+        logger.info(f"📊 Tool execution complete: {successful_results}/{len(tool_results)} successful")
 
         # Step 3: Create new conversation with tool results
+        logger.info("🔄 Step 3: Building conversation with tool results")
         new_messages = req.messages.copy()
 
         # Add assistant message with tool calls
@@ -1142,6 +1160,7 @@ Important: Only output JSON when you actually want to call tools. For normal res
         new_messages.append(guidance_msg)
 
         # Step 4: Generate final synthesized response
+        logger.info(f"🎯 Step 4: Generating final response with {len(new_messages)} messages")
         final_req = req.model_copy(
             update={
                 "messages": new_messages,
@@ -1153,6 +1172,9 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
         # Mark as tool-synthesized response
         final_response.choices[0].finish_reason = ChatCompletionReason.STOP
+        final_content = final_response.choices[0].message.content if final_response.choices[0].message else ""
+        logger.info(f"🎉 AGENT COMPLETE: Generated {len(final_content)} char synthesized response")
+        logger.debug(f"📄 Final answer preview: {final_content[:200]}...")
 
         return final_response
 
