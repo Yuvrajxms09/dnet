@@ -207,6 +207,15 @@ class InferenceManager:
                     tokenizer.encode(stop_word, add_special_tokens=False)
                 )
 
+        # Convert OpenAI response_format to internal structured_outputs format
+        if req.response_format and req.response_format.get("type") == "json_schema":
+            json_schema = req.response_format["json_schema"]["schema"]
+            req.structured_outputs = StructuredOutputsParams(json=json_schema)
+
+        # Get grammar JSON schema for structured output
+        grammar_json_schema = None
+        if req.structured_outputs and req.structured_outputs.json:
+            grammar_json_schema = json.dumps(req.structured_outputs.json)
 
         nonce = f"chatcmpl-{uuid.uuid4()}"
         t_start = time.perf_counter()
@@ -256,16 +265,6 @@ class InferenceManager:
             )
             logger.debug(f"📊 Token data prepared: {len(tok_bytes)} bytes")
 
-            # Convert OpenAI response_format to internal structured_outputs format
-            if req.response_format and req.response_format.get("type") == "json_schema":
-                json_schema = req.response_format["json_schema"]["schema"]
-                req.structured_outputs = StructuredOutputsParams(json=json_schema)
-
-            # Get grammar JSON schema for structured output
-            grammar_json_schema = None
-            if req.structured_outputs and req.structured_outputs.json:
-                grammar_json_schema = json.dumps(req.structured_outputs.json)
-
             decoding_config = DecodingConfig(
                 temperature=req.temperature,
                 top_p=req.top_p,
@@ -276,9 +275,6 @@ class InferenceManager:
                 else 1,
                 grammar_json_schema=grammar_json_schema,
             )
-
-            logger.debug("📤 Sending tokens to shard...")
-            # Send tokens to first shard
 
             logger.debug("📤 Sending tokens to shard...")
             # Send tokens to first shard
@@ -505,6 +501,13 @@ class InferenceManager:
 
             if chunk.usage:
                 usage = chunk.usage
+
+        # Clean up structured output responses - remove end tokens
+        if req.structured_outputs and req.structured_outputs.json:
+            full_content = full_content.strip()
+            for token in ["<|im_end|>", "<|endoftext|>", "</s>"]:
+                if token in full_content:
+                    full_content = full_content.split(token)[0].strip()
 
         # Parse tool calls if tools were available (LangChain-style, no grammar)
         tool_calls = None
