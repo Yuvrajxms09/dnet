@@ -5,6 +5,7 @@ import json
 import mlx.core as mx
 import numpy as np
 from typing import Optional, Any, List, Union, Dict
+from .structured_output import StructuredOutputInferenceManager
 
 # Import MCP client
 try:
@@ -71,29 +72,7 @@ async def azip(*async_iterables):
 
 
 class InferenceManager:
-    """Inference manager for dnet with MCP and LangChain-style tool integration.
-
-    Supports:
-    - LangChain-style tool calling (prompting + robust parsing)
-    - Dynamic MCP tool registration (Exa, GitHub, etc.)
-    - Agent-style tool execution with synthesis
-    - OpenAI-compatible API responses
-
-    Example:
-        # Register MCP tools using stdio transport (correct way)
-        await inference_manager.register_mcp_stdio(
-            server_name="exa",
-            command="npx",
-            args=["-y", "@anthropic-ai/exa-mcp-server"],
-            env={"EXA_API_KEY": "your-key"}
-        )
-
-        # Or use presets
-        await inference_manager.register_mcp_preset("exa")
-
-        # Research with automatic tool execution
-        response = await inference_manager.execute_tools_and_continue(request)
-    """
+    """Inference manager for dnet with MCP and LangChain-style tool integration."""
 
     def __init__(
         self,
@@ -132,19 +111,16 @@ class InferenceManager:
         self._api_callback_addr = api_callback_addr
 
     async def generate_stream(self, req: ChatRequestModel):
-        """Generator for chat completion chunks."""
-        logger.info(f"🚀 generate_stream START: model={req.model}")
-        logger.debug(f"   Request details: messages={len(req.messages) if req.messages else 0}, tools={len(req.tools) if req.tools else 0}")
-
+        """
+        Generator for chat completion chunks.
+        """
         if not self.model_manager.tokenizer:
-            logger.error("❌ generate_stream FAILED: No tokenizer available")
             raise RuntimeError(
                 "Inference manager not ready (ring not connected or tokenizer not loaded)"
             )
 
         tokenizer = self.model_manager.tokenizer
-        logger.debug("✅ Tokenizer ready, proceeding with generation")
-
+        
         try:
             if (
                 hasattr(tokenizer, "chat_template")
@@ -153,18 +129,15 @@ class InferenceManager:
                 # Convert messages to dict format
                 message_dicts = []
 
-                # Add tool system message if tools are available (LangChain-style)
                 # Use bound tools (LangChain approach) or request tools (backward compatibility)
                 available_tools = self._bound_tools or req.tools or []
                 logger.debug(f"🛠️ Tool check: bound_tools={len(self._bound_tools)}, req_tools={len(req.tools) if req.tools else 0}, available={len(available_tools)}")
                 if available_tools:
-                    logger.debug("📝 Generating tool system message...")
                     tool_system_msg = self._create_langchain_tool_prompt(
                         available_tools
                     )
                     message_dicts.append({"role": "system", "content": tool_system_msg})
-                    logger.debug(f"✅ Tool system message added ({len(tool_system_msg)} chars)")
-
+                    
                 for m in req.messages:
                     msg_dict = {"role": m.role, "content": m.content or ""}
                     message_dicts.append(msg_dict)
@@ -174,12 +147,10 @@ class InferenceManager:
                     add_generation_prompt=True,
                     tokenize=False,
                 )
-                logger.debug(f"📝 Chat template applied, prompt length: {len(prompt_text)}")
             else:
                 prompt_text = (
                     "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
                 )
-                logger.debug("📝 Using fallback prompt format")
         except Exception as e:
             logger.warning(f"⚠️ Failed to apply chat template: {e}, using fallback")
             prompt_parts = []
@@ -228,10 +199,8 @@ class InferenceManager:
 
         completion_reason = ChatCompletionReason.LENGTH
 
-        logger.debug("🔄 Resetting cache and starting inference")
         await self.adapter.reset_cache()
 
-        logger.debug("📤 Yielding initial chunk with assistant role")
         # Yield initial chunk with role
         initial_chunk = ChatResponseModel(
             id=nonce,
@@ -245,7 +214,6 @@ class InferenceManager:
             created=int(time.time()),
             model=req.model,
         )
-        logger.debug(f"📦 Initial chunk created: {len(initial_chunk.model_dump_json())} bytes")
         yield initial_chunk
 
         logger.info(f"🔄 Starting inference loop: max_tokens={req.max_tokens}")
@@ -263,8 +231,7 @@ class InferenceManager:
                 wire_dtype_str="int32",
                 wire_mx_dtype=mx.int32,
             )
-            logger.debug(f"📊 Token data prepared: {len(tok_bytes)} bytes")
-
+            
             decoding_config = DecodingConfig(
                 temperature=req.temperature,
                 top_p=req.top_p,
@@ -276,7 +243,6 @@ class InferenceManager:
                 grammar_json_schema=grammar_json_schema,
             )
 
-            logger.debug("📤 Sending tokens to shard...")
             # Send tokens to first shard
             await self.adapter.send_tokens(
                 tokens=tok_bytes,
@@ -286,10 +252,8 @@ class InferenceManager:
                 top_logprobs=req.top_logprobs if req.top_logprobs else 0,
                 decoding_config=decoding_config,
             )
-            logger.debug("⏳ Awaiting token response...")
             result = await self.adapter.await_token(nonce, timeout_s=300.0)
             token = int(result.token_id)
-            logger.debug(f"✅ Token received: {token}")
 
             # Accumulate logprobs
             token_logprobs = []
@@ -309,7 +273,6 @@ class InferenceManager:
             delta_text = full_text[last_text_len:]
             last_text_len = len(full_text)
 
-            logger.debug(f"📦 Creating chunk: delta='{delta_text[:50]}...', token={token}")
             # Yield chunk
             chunk = ChatResponseModel(
                 id=nonce,
@@ -1729,158 +1692,3 @@ Important: Only output JSON when you actually want to call tools. For normal res
         """
         self.adapter.resolve_token(nonce, result)
 
-
-class StructuredOutputInferenceManager:
-    """
-    LangGraph-style structured output wrapper for InferenceManager.
-
-    Forces the agent to return responses in a specific structured format by binding
-    the response schema as a tool that must be called (LangGraph "Option 1").
-
-    This ensures the agent provides structured output without requiring a second LLM call.
-    """
-
-    def __init__(self, inference_manager: "InferenceManager", schema: Any):
-        self.inference_manager = inference_manager
-        self.schema = schema
-
-        # Generate tool definition from schema
-        self._structured_output_tool = self._schema_to_tool(schema)
-
-    def _schema_to_tool(self, schema: Any) -> Dict[str, Any]:
-        """Convert Pydantic schema or JSON schema to tool definition."""
-        if hasattr(schema, "model_json_schema"):
-            # Pydantic model
-            json_schema = schema.model_json_schema()
-            return {
-                "type": "function",
-                "function": {
-                    "name": schema.__name__,
-                    "description": getattr(schema, "__doc__", "").strip()
-                    or "Structured response",
-                    "parameters": json_schema,
-                },
-            }
-        elif isinstance(schema, dict):
-            # Raw JSON schema
-            return {
-                "type": "function",
-                "function": {
-                    "name": "StructuredResponse",
-                    "description": "Structured response",
-                    "parameters": schema,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported schema type: {type(schema)}")
-
-    async def chat_completions(self, req: ChatRequestModel) -> ChatResponseModel:
-        """
-        Generate completion with guaranteed structured output.
-
-        The agent will be forced to call the structured output tool to provide its final answer.
-        """
-        # Temporarily bind the structured output tool
-        original_tools = (
-            self.inference_manager._bound_tools.copy()
-            if hasattr(self.inference_manager, "_bound_tools")
-            else []
-        )
-
-        try:
-            # Add structured output tool to bound tools or request tools
-            if hasattr(self.inference_manager, "_bound_tools"):
-                # LangChain-style: add to bound tools
-                self.inference_manager._bound_tools.append(self._structured_output_tool)
-            else:
-                # Fallback: add to request tools
-                if not req.tools:
-                    req.tools = []
-                req.tools.append(self._structured_output_tool)
-
-            # Force tool calling by setting tool_choice
-            if hasattr(req, "tool_choice"):
-                req.tool_choice = "any"  # Force at least one tool call
-
-            # Generate response (agent should call the structured output tool)
-            response = await self.inference_manager.chat_completions(req)
-
-            # Extract structured data from tool calls
-            if response.choices and response.choices[0].message.tool_calls:
-                for tool_call in response.choices[0].message.tool_calls:
-                    tool_name = (
-                        tool_call.name
-                        if hasattr(tool_call, "name")
-                        else tool_call.get("function", {}).get("name", "")
-                    )
-                    if tool_name == self._structured_output_tool["function"]["name"]:
-                        # Parse the structured arguments
-                        if hasattr(tool_call, "args"):
-                            structured_data = tool_call.args
-                        else:
-                            # Handle dict format
-                            args_str = tool_call.get("function", {}).get(
-                                "arguments", "{}"
-                            )
-                            try:
-                                structured_data = (
-                                    json.loads(args_str)
-                                    if isinstance(args_str, str)
-                                    else args_str
-                                )
-                            except:
-                                structured_data = {}
-
-                        # Replace response content with structured data
-                        response.choices[0].message.content = str(structured_data)
-
-                        # Add structured output field to response
-                        response.structured_output = structured_data
-                        break
-
-            return response
-
-        finally:
-            # Restore original tools
-            if hasattr(self.inference_manager, "_bound_tools"):
-                self.inference_manager._bound_tools = original_tools
-
-    def bind_tools(self, tools: List[Any]) -> "StructuredOutputInferenceManager":
-        """
-        Bind additional tools while keeping the structured output tool.
-
-        This allows binding action tools + maintaining structured output.
-        """
-        # Bind tools on the underlying inference manager
-        if hasattr(self.inference_manager, "bind_tools"):
-            self.inference_manager.bind_tools(tools)
-        return self
-
-    def __getattr__(self, name):
-        """Delegate other methods to the underlying inference manager."""
-        return getattr(self.inference_manager, name)
-
-    def with_structured_output(self, schema: Any) -> "StructuredOutputInferenceManager":
-        """
-        Create an inference manager that returns structured output (LangGraph-style).
-
-        This implements the "Option 1: Bind output as tool" approach from LangGraph,
-        where the response schema is bound as a tool that the agent must call to respond.
-
-        Args:
-            schema: Pydantic model or JSON schema for structured output
-
-        Returns:
-            StructuredOutputInferenceManager: Wrapper that ensures structured responses
-
-        Example:
-            class WeatherResponse(BaseModel):
-                temperature: float
-                wind_direction: str
-
-            # Create structured output wrapper
-            structured_llm = inference_manager.with_structured_output(WeatherResponse)
-
-            # Agent will call WeatherResponse tool with structured data when ready to respond
-        """
-        return StructuredOutputInferenceManager(self.inference_manager, schema)
