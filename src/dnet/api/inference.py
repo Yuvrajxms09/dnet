@@ -786,7 +786,8 @@ If you want to respond conversationally without using tools, use the "__conversa
                 name = func.get("name", "unknown")
                 desc = func.get("description", "")
 
-                # Let full description pass (no shortening)
+                # Limit description to 100 chars to prevent context overflow
+                desc = desc[:100] if len(desc) > 100 else desc
                 summary = f"- {name}: {desc}"
                 tool_summaries.append(summary)
 
