@@ -1304,9 +1304,14 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
             # Get registered tools and add to bound tools
             registry_tools = self._tool_registry.get_tools_json()
-            for tool in registry_tools:
-                if tool not in self._bound_tools:
-                    self._bound_tools.append(tool)
+            logger.info(f"ToolRegistry returned {len(registry_tools)} tools for {server_name}")
+
+            # TEMPORARILY DISABLE adding to bound_tools to test if this breaks basic chat
+            # for tool in registry_tools:
+            #     if tool not in self._bound_tools:
+            #         self._bound_tools.append(tool)
+
+            logger.info(f"Registered {len(registry_tools)} tools from {server_name} MCP server (not bound to inference)")
 
             logger.info(f"MCP server '{server_name}' (HTTP) registered successfully via ToolRegistry")
             return True
