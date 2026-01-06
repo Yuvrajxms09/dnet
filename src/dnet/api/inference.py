@@ -1139,18 +1139,9 @@ Important: Only output JSON when you actually want to call tools. For normal res
         )
         new_messages.append(guidance_msg)
 
-        # Add guidance for the model to synthesize the final answer
-        guidance_content = "Based on the tool results above, provide a comprehensive and well-structured answer to my original question. Extract and organize the key information from the tool outputs."
-        guidance_msg = ChatMessage(role="user", content=guidance_content)
-        new_messages.append(guidance_msg)
-
         # Step 4: Generate final synthesized response
         logger.info(f"🎯 Step 4: Generating final response with {len(new_messages)} messages")
-        for i, msg in enumerate(new_messages[-3:]):  # Log last 3 messages
-            logger.debug(f"📝 Message {len(new_messages)-3+i}: role={msg.role}, content_length={len(msg.content)}")
-            if msg.role == "tool":
-                logger.debug(f"🔧 Tool result: name={msg.name}, tool_call_id={msg.tool_call_id}")
-                logger.debug(f"📄 Tool content: {msg.content[:300]}...")
+        logger.debug(f"📋 Final request: {len(new_messages)} messages, no tools")
 
         final_req = req.model_copy(
             update={
