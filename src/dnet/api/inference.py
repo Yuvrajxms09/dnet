@@ -1107,19 +1107,30 @@ Important: Only output JSON when you actually want to call tools. For normal res
         logger.info(f"📊 Tool execution complete: {successful_results}/{len(tool_results)} successful")
 
         # Step 3: Create new conversation with tool results
-        logger.info("🔄 Step 3: Building conversation with tool results using ToolRegistry")
-
-        # Convert tool_results back to ToolRegistry expected format for message reconstruction
-        tool_responses = {result["tool_call_id"]: result["content"] for result in tool_results}
-
-        # Uses ToolRegistry's built-in method - correct!
-        assistant_tool_messages = self._tool_registry.recover_tool_call_assistant_message(
-            tool_calls, tool_responses
-        )
-
-        # Build new message list
         new_messages = req.messages.copy()
-        new_messages.extend(assistant_tool_messages)
+
+        # Add assistant message with tool calls
+        assistant_msg = choice.message.model_copy()
+        new_messages.append(assistant_msg)
+
+        # Add tool results
+        for result in tool_results:
+            tool_call_id = result["tool_call_id"]
+            content = result["content"]
+
+            # Find the corresponding tool call to get the tool name
+            tool_name = "unknown_tool"
+            for tc in tool_calls:
+                if tc.id == tool_call_id:
+                    tool_name = tc.name
+                    break
+
+            new_messages.append(ChatMessage(
+                role="tool",
+                name=tool_name,
+                content=content,
+                tool_call_id=tool_call_id
+            ))
 
         # Add guidance for the model to synthesize the final answer
         guidance_msg = ChatMessage(
