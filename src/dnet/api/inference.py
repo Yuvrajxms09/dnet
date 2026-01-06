@@ -1025,16 +1025,16 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Option B: Prioritize ToolRegistry first (where tools are actually registered)
-                if has_registry:
-                    logger.debug(f"🔧 Executing via ToolRegistry (primary): {tool_name}")
-                    result = self._tool_registry.invoke(tool_name, **arguments)
-                    logger.debug(f"✅ ToolRegistry execution successful for {tool_name}")
-                # Fallback to MCP client (legacy)
-                elif has_mcp and tool_name in mcp_tool_names:
-                    logger.debug(f"🔧 Executing via MCP client (fallback): {tool_name}")
+                # Option A: MCP client first (after syncing both backends during registration)
+                if has_mcp and tool_name in mcp_tool_names:
+                    logger.debug(f"🔧 Executing via MCP client (primary): {tool_name}")
                     result = await self._mcp_client.execute_tool(tool_name, arguments)
                     logger.debug(f"✅ MCP client execution successful for {tool_name}")
+                # Fallback to ToolRegistry
+                elif has_registry:
+                    logger.debug(f"🔧 Executing via ToolRegistry (fallback): {tool_name}")
+                    result = self._tool_registry.invoke(tool_name, **arguments)
+                    logger.debug(f"✅ ToolRegistry execution successful for {tool_name}")
                 else:
                     available_mcp = mcp_tool_names if has_mcp else []
                     available_registry = list(self._tool_registry.get_available_tools()) if has_registry else []
@@ -1409,6 +1409,17 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 if tool not in self._bound_tools:
                     self._bound_tools.append(tool)
             logger.info(f"✅ Bound {len(registry_tools)} tools from {server_name} to inference manager")
+
+            # Option A: Ensure MCP client is initialized and synced for execution consistency
+            # Since tools are registered via ToolRegistry, make sure MCP client is also ready
+            if MCP_CLIENT_AVAILABLE and self._mcp_client is None:
+                logger.info(f"🔄 Initializing MCP client for execution consistency...")
+                try:
+                    self._mcp_client = MCPToolClient()
+                    logger.info("✅ MCP client initialized")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to initialize MCP client: {e}")
+                    logger.debug("MCP client init error details:", exc_info=True)
 
             logger.info(f"Registered and bound {len(registry_tools)} tools from {server_name} MCP server")
 
