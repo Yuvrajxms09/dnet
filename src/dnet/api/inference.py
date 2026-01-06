@@ -888,12 +888,9 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Try ToolRegistry first (includes HTTP MCP tools)
-                if has_registry and tool_name in self._tool_registry.get_available_tools():
-                    result = self._tool_registry.invoke(tool_name, **arguments)
-                # Fallback to MCP client (for stdio MCP tools)
-                elif has_mcp and tool_name in self._mcp_client.get_tool_names():
-                    # MCP client execution is async, run in event loop
+                # Try MCP client first
+                if has_mcp and tool_name in self._mcp_client.get_tool_names():
+                    # MCP client execution is async, need to run in event loop
                     try:
                         result = asyncio.create_task(
                             self._mcp_client.execute_tool(tool_name, arguments)
@@ -903,6 +900,9 @@ Important: Only output JSON when you actually want to call tools. For normal res
                         result = asyncio.run(
                             self._mcp_client.execute_tool(tool_name, arguments)
                         )
+                # Fallback to ToolRegistry
+                elif has_registry:
+                    result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
                     raise ValueError(f"Tool '{tool_name}' not found in any backend")
 
@@ -959,12 +959,12 @@ Important: Only output JSON when you actually want to call tools. For normal res
             try:
                 result = None
 
-                # Try ToolRegistry first (includes HTTP MCP tools)
-                if has_registry and tool_name in self._tool_registry.get_available_tools():
-                    result = self._tool_registry.invoke(tool_name, **arguments)
-                # Fallback to MCP client (for stdio MCP tools)
-                elif has_mcp and tool_name in mcp_tool_names:
+                # Try MCP client first if tool is registered
+                if has_mcp and tool_name in mcp_tool_names:
                     result = await self._mcp_client.execute_tool(tool_name, arguments)
+                # Fallback to ToolRegistry
+                elif has_registry:
+                    result = self._tool_registry.invoke(tool_name, **arguments)
                 else:
                     raise ValueError(
                         f"Tool '{tool_name}' not found. Available MCP tools: {mcp_tool_names}"
@@ -1302,16 +1302,17 @@ Important: Only output JSON when you actually want to call tools. For normal res
             # Register using ToolRegistry's MCP support (async version since we're in async context)
             await self._tool_registry.register_from_mcp_async(transport, with_namespace=True)
 
-            # Get registered tools and add to bound tools
+            # Get registered tools - convert ToolRegistry format to OpenAI format for binding
             registry_tools = self._tool_registry.get_tools_json()
             logger.info(f"ToolRegistry returned {len(registry_tools)} tools for {server_name}")
 
-            # TEMPORARILY DISABLE adding to bound_tools to test if this breaks basic chat
-            # for tool in registry_tools:
-            #     if tool not in self._bound_tools:
-            #         self._bound_tools.append(tool)
+            # Convert ToolRegistry tools to OpenAI format and bind them
+            for tool in registry_tools:
+                # ToolRegistry should already return OpenAI format, but ensure compatibility
+                if tool not in self._bound_tools:
+                    self._bound_tools.append(tool)
 
-            logger.info(f"Registered {len(registry_tools)} tools from {server_name} MCP server (not bound to inference)")
+            logger.info(f"Registered {len(registry_tools)} tools from {server_name} MCP server")
 
             logger.info(f"MCP server '{server_name}' (HTTP) registered successfully via ToolRegistry")
             return True
