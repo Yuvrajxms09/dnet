@@ -843,6 +843,15 @@ Important: Only output JSON when you actually want to call tools. For normal res
         clean_content = content.strip()
         original_length = len(clean_content)
 
+        # Remove think tags (from proposed code)
+        import re
+        clean_content = re.sub(r'<think>.*?</think>', '', clean_content, flags=re.DOTALL).strip()
+
+        # Remove special tokens (from proposed code)
+        special_tokens = ['<|im_end|>', '<|im_start|>', '<|endoftext|>', '</s>', '<|eot_id|>', '<|end|>']
+        for token in special_tokens:
+            clean_content = clean_content.replace(token, '').strip()
+
         prefixes_to_remove = ["Assistant:", "AI:", "Response:"]
         for prefix in prefixes_to_remove:
             if clean_content.startswith(prefix):
@@ -983,88 +992,44 @@ Important: Only output JSON when you actually want to call tools. For normal res
     async def _execute_tool_calls_async(
         self, tool_calls: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Execute tool calls asynchronously using MCP client or ToolRegistry."""
-        has_mcp = MCP_CLIENT_AVAILABLE and self._mcp_client
-        has_registry = TOOL_REGISTRY_AVAILABLE and self._tool_registry
-
-        if not has_mcp and not has_registry:
-            logger.error("No tool execution backend available (MCP or ToolRegistry)")
+        """Execute tool calls using ToolRegistry's batch API."""
+        if not TOOL_REGISTRY_AVAILABLE or not self._tool_registry:
+            logger.error("ToolRegistry not available for tool execution")
             return [
                 {
                     "tool_call_id": "error",
-                    "content": "No tool execution backend available",
+                    "content": "ToolRegistry not available",
                     "success": False,
                 }
             ]
 
-        mcp_tool_names = self._mcp_client.get_tool_names() if has_mcp else []
-        registry_tool_names = list(self._tool_registry.get_available_tools()) if has_registry else []
-        logger.debug(f"📋 Available MCP tools: {len(mcp_tool_names)} - {mcp_tool_names[:3]}...")
-        logger.debug(f"📋 Available ToolRegistry tools: {len(registry_tool_names)} - {registry_tool_names[:3]}...")
+        try:
+            logger.info(f"🔨 Executing {len(tool_calls)} tool calls via ToolRegistry batch API")
+            # Use ToolRegistry's built-in batch execution method
+            tool_responses = self._tool_registry.execute_tool_calls(tool_calls)
 
-        results = []
-        for i, tc in enumerate(tool_calls):
-            logger.info(f"🎯 Processing tool call {i+1}/{len(tool_calls)}")
-            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            logger.info(f"🛠️ Tool requested: '{tool_name}' (ID: {tool_id})")
-            tool_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-
-            # Parse arguments
-            args_raw = func.get("arguments", "{}")
-            if isinstance(args_raw, str):
-                try:
-                    arguments = json.loads(args_raw)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse arguments: {e}")
-                    arguments = {}
-
-            try:
-                result = None
-
-                # Option A: MCP client first (after syncing both backends during registration)
-                if has_mcp and tool_name in mcp_tool_names:
-                    logger.info(f"🔧 Executing via MCP client (primary): {tool_name}")
-                    result = await self._mcp_client.execute_tool(tool_name, arguments)
-                    logger.info(f"✅ MCP client execution successful for {tool_name}")
-                # Fallback to ToolRegistry
-                elif has_registry:
-                    logger.info(f"🔧 Executing via ToolRegistry (fallback): {tool_name}")
-                    try:
-                        # Use subscript notation for ToolRegistry: registry[tool_name](**args)
-                        result = self._tool_registry[tool_name](**arguments)
-                        logger.info(f"✅ ToolRegistry execution successful for {tool_name}")
-                    except Exception as reg_error:
-                        logger.error(f"❌ ToolRegistry execution failed: {reg_error}")
-                        logger.debug("ToolRegistry error details:", exc_info=True)
-                        raise reg_error
-                else:
-                    available_mcp = mcp_tool_names if has_mcp else []
-                    available_registry = list(self._tool_registry.get_available_tools()) if has_registry else []
-                    logger.error(f"❌ Tool '{tool_name}' not found in any backend")
-                    logger.error(f"   Available MCP tools: {available_mcp}")
-                    logger.error(f"   Available ToolRegistry tools: {available_registry}")
-                    raise ValueError(f"Tool '{tool_name}' not found. Available MCP tools: {available_mcp}, Available ToolRegistry tools: {available_registry}")
-
-                result_str = str(result)
-
+            # Convert ToolRegistry response format to expected format
+            results = []
+            for tool_call_id, result in tool_responses.items():
                 results.append({
-                    "tool_call_id": tool_id,
-                    "content": result_str,
+                    "tool_call_id": tool_call_id,
+                    "content": str(result),
                     "success": True
                 })
-            except Exception as e:
-                logger.error(f"Tool execution failed for {tool_name}: {e}")
-                results.append({
-                    "tool_call_id": tool_id,
-                    "content": f"Tool execution failed: {e}",
-                    "success": False
-                })
 
-        return results
+            successful_count = len([r for r in results if r["success"]])
+            logger.info(f"📊 Tool execution complete: {successful_count}/{len(results)} successful")
+            return results
+
+        except Exception as e:
+            logger.error(f"❌ ToolRegistry batch execution failed: {e}")
+            return [
+                {
+                    "tool_call_id": "error",
+                    "content": f"Tool execution failed: {e}",
+                    "success": False,
+                }
+            ]
 
     async def _generate_single_completion(
         self, req: ChatRequestModel
@@ -1119,33 +1084,19 @@ Important: Only output JSON when you actually want to call tools. For normal res
         logger.info(f"📊 Tool execution complete: {successful_results}/{len(tool_results)} successful")
 
         # Step 3: Create new conversation with tool results
-        logger.info("🔄 Step 3: Building conversation with tool results")
+        logger.info("🔄 Step 3: Building conversation with tool results using ToolRegistry")
+
+        # Convert tool_results back to ToolRegistry expected format for message reconstruction
+        tool_responses = {result["tool_call_id"]: result["content"] for result in tool_results}
+
+        # Use ToolRegistry's built-in message reconstruction
+        assistant_tool_messages = self._tool_registry.recover_tool_call_assistant_message(
+            tool_calls, tool_responses
+        )
+
+        # Build new message list
         new_messages = req.messages.copy()
-
-        # Add assistant message with tool calls
-        assistant_msg = choice.message.model_copy()
-        new_messages.append(assistant_msg)
-
-        # Add tool results
-        for result in tool_results:
-            tool_call_id = result["tool_call_id"]
-            content = result["content"]
-
-            # Find the corresponding tool call to get the tool name
-            tool_name = "unknown_tool"
-            for tc in tool_calls:
-                if tc.id == tool_call_id:
-                    tool_name = tc.name
-                    break
-
-            new_messages.append(
-                ChatMessage(
-                    role="tool",
-                    name=tool_name,
-                    content=content,
-                    tool_call_id=tool_call_id,
-                )
-            )
+        new_messages.extend(assistant_tool_messages)
 
         # Add guidance for the model to synthesize the final answer
         guidance_msg = ChatMessage(
@@ -1161,6 +1112,12 @@ Important: Only output JSON when you actually want to call tools. For normal res
 
         # Step 4: Generate final synthesized response
         logger.info(f"🎯 Step 4: Generating final response with {len(new_messages)} messages")
+        for i, msg in enumerate(new_messages[-3:]):  # Log last 3 messages
+            logger.debug(f"📝 Message {len(new_messages)-3+i}: role={msg.role}, content_length={len(msg.content)}")
+            if msg.role == "tool":
+                logger.debug(f"🔧 Tool result: name={msg.name}, tool_call_id={msg.tool_call_id}")
+                logger.debug(f"📄 Tool content: {msg.content[:300]}...")
+
         final_req = req.model_copy(
             update={
                 "messages": new_messages,
