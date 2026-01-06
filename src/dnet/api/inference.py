@@ -1299,8 +1299,8 @@ Important: Only output JSON when you actually want to call tools. For normal res
                 # Simple URL for transport
                 transport = url
 
-            # Register using ToolRegistry's MCP support
-            self._tool_registry.register_from_mcp(transport, with_namespace=True)
+            # Register using ToolRegistry's MCP support (async version since we're in async context)
+            await self._tool_registry.register_from_mcp_async(transport, with_namespace=True)
 
             # Get registered tools and add to bound tools
             registry_tools = self._tool_registry.get_tools_json()
