@@ -373,10 +373,10 @@ class ShardRuntime:
 
             # Model weights memory
             weights_mb = 0
-            if self.model and hasattr(self.model, 'weight_info'):
-                for layer_tensors in self.model.weight_info.values():
-                    for tensor in layer_tensors.values():
-                        weights_mb += tensor.size_bytes
+            if self.model_metadata and hasattr(self.model_metadata, 'weight_info'):
+                for layer_tensors in self.model_metadata.weight_info.values():
+                    for tensor_info in layer_tensors.values():
+                        weights_mb += tensor_info.size_bytes
                 weights_mb /= (1024 * 1024)  # Convert to MB
                 logger.info(f"DEBUG: Calculated weights_mb={weights_mb:.1f}")
 
@@ -389,8 +389,10 @@ class ShardRuntime:
                 logger.info(f"DEBUG: Calculated kv_mb={kv_mb:.1f}")
 
             # Pool memory
-            pool_mb = self.input_pool_mb + self.output_pool_mb
-            logger.info(f"DEBUG: Pool memory: input={self.input_pool_mb}MB, output={self.output_pool_mb}MB, total={pool_mb}MB")
+            input_pool_mb = self.input_pool.pool.total_memory_bytes / (1024 * 1024) if self.input_pool else 0
+            output_pool_mb = self.output_pool.pool.total_memory_bytes / (1024 * 1024) if self.output_pool else 0
+            pool_mb = input_pool_mb + output_pool_mb
+            logger.info(f"DEBUG: Pool memory: input={input_pool_mb:.1f}MB, output={output_pool_mb:.1f}MB, total={pool_mb:.1f}MB")
 
             # Total estimate
             total_mb = weights_mb + kv_mb + pool_mb

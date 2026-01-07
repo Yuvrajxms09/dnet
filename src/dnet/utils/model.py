@@ -287,7 +287,9 @@ def load_embeddings(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
             model.load_weights(list(weights.items()), strict=False)
 
             # Issue-73: Log embedding memory usage for H2 analysis
-            total_embed_mb = sum(tensor.size * tensor.dtype.size for tensor in weights.values()) / (1024 * 1024)
+            from functools import reduce
+            from operator import mul
+            total_embed_mb = sum(reduce(mul, tensor.shape) * tensor.dtype.size for tensor in weights.values()) / (1024 * 1024)
             logger.info(f"[EMBED_LOAD] loaded_tensors={len(weights)}, "
                        f"total_mb={total_embed_mb:.1f}, "
                        f"quantized={has_quant}, "
@@ -365,7 +367,9 @@ def load_lm_head(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
             model.load_weights(list(weights.items()), strict=False)
 
             # Issue-73: Log LM head memory usage for H2 analysis
-            total_lm_mb = sum(tensor.size * tensor.dtype.size for tensor in weights.values()) / (1024 * 1024)
+            from functools import reduce
+            from operator import mul
+            total_lm_mb = sum(reduce(mul, tensor.shape) * tensor.dtype.size for tensor in weights.values()) / (1024 * 1024)
             logger.info(f"[LM_HEAD_LOAD] loaded_tensors={len(weights)}, "
                        f"total_mb={total_lm_mb:.1f}, "
                        f"quantized={has_quant_head}, "
