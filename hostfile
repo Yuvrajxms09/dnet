@@ -1,0 +1,6 @@
+# Format: instance_name ip http_port grpc_port
+# Machine 1 (16GB): shard-1
+shard-1 62.210.193.124 8081 58081
+
+# Machine 2 (32GB): shard-2
+shard-2 62.210.193.228 8082 58082
