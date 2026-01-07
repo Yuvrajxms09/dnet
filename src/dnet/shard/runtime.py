@@ -371,14 +371,16 @@ class ShardRuntime:
         try:
             logger.info(f"DEBUG: Starting memory snapshot for nonce={nonce}")
 
-            # Model weights memory
+            # Model weights memory - FIXED: Only count assigned layers
             weights_mb = 0
             if self.model_metadata and hasattr(self.model_metadata, 'weight_info'):
-                for layer_tensors in self.model_metadata.weight_info.values():
-                    for tensor_info in layer_tensors.values():
-                        weights_mb += tensor_info.size_bytes
+                for abs_layer_idx in self.assigned_layers:  # Only assigned layers
+                    if abs_layer_idx in self.model_metadata.weight_info:
+                        layer_tensors = self.model_metadata.weight_info[abs_layer_idx]
+                        for tensor_info in layer_tensors.values():
+                            weights_mb += tensor_info.size_bytes
                 weights_mb /= (1024 * 1024)  # Convert to MB
-                logger.info(f"DEBUG: Calculated weights_mb={weights_mb:.1f}")
+                logger.info(f"DEBUG: Calculated weights_mb={weights_mb:.1f} for {len(self.assigned_layers)} assigned layers")
 
             # KV cache memory (estimate)
             kv_mb = 0
@@ -394,6 +396,30 @@ class ShardRuntime:
             pool_mb = input_pool_mb + output_pool_mb
             logger.info(f"DEBUG: Pool memory: input={input_pool_mb:.1f}MB, output={output_pool_mb:.1f}MB, total={pool_mb:.1f}MB")
 
+            # Process RSS memory (actual physical RAM usage)
+            import psutil
+            import os
+            try:
+                process = psutil.Process(os.getpid())
+                rss_mb = process.memory_info().rss / (1024 * 1024)
+                logger.info(f"DEBUG: Process RSS: {rss_mb:.1f}MB")
+            except Exception as e:
+                rss_mb = 0
+                logger.warning(f"Failed to get process RSS: {e}")
+
+            # MLX peak memory (if available and accessible)
+            mlx_peak_mb = 0
+            try:
+                # Check if MLX is accessible and has the function
+                import mlx.core as mx_check
+                if hasattr(mx_check, 'get_peak_memory'):
+                    mlx_peak_mb = mx_check.get_peak_memory() / (1024 * 1024)
+                    logger.info(f"DEBUG: MLX peak memory: {mlx_peak_mb:.1f}MB")
+                else:
+                    logger.debug("MLX get_peak_memory not available")
+            except Exception as e:
+                logger.debug(f"MLX peak memory measurement failed: {e}")
+
             # Total estimate
             total_mb = weights_mb + kv_mb + pool_mb
 
@@ -402,6 +428,7 @@ class ShardRuntime:
 
             logger.info(f"[MEMORY_SNAPSHOT] shard={shard_id}, nonce={nonce}, "
                        f"weights={weights_mb:.1f}MB, kv={kv_mb:.1f}MB, pools={pool_mb:.1f}MB, "
+                       f"process_rss={rss_mb:.1f}MB, mlx_peak={mlx_peak_mb:.1f}MB, "
                        f"total={total_mb:.1f}MB")
 
             logger.info(f"DEBUG: Memory snapshot completed successfully")
