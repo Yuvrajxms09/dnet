@@ -4,6 +4,31 @@ from dnet.utils.logger import logger
 from dnet.utils.serialization import dtype_map, tensor_to_bytes
 
 
+def _quantize_8bit_unpacked(tensor: mx.array, group_size: int = 64):
+    """8-bit affine quantization without packing (returns uint8, not packed uint32).
+    
+    mx.quantize packs values into uint32 which breaks our compression pipeline.
+    This produces unpacked uint8 codes with shape matching the input.
+    """
+    D = tensor.shape[-1]
+    R = tensor.size // D
+    G = D // group_size
+    
+    x2d = tensor.reshape(R, D).astype(mx.float32)
+    x_grouped = x2d.reshape(R, G, group_size)
+    
+    mins = x_grouped.min(axis=-1, keepdims=True)
+    maxs = x_grouped.max(axis=-1, keepdims=True)
+    
+    scales = (maxs - mins) / 255.0
+    scales = mx.where(scales == 0, mx.ones_like(scales), scales)
+    biases = mins
+    
+    quantized = mx.clip(mx.round((x_grouped - biases) / scales), 0, 255).astype(mx.uint8)
+    
+    return quantized.reshape(R, D), scales.squeeze(-1), biases.squeeze(-1)
+
+
 def to_bytes(
     tensor: mx.array | np.ndarray,
     *,
@@ -49,22 +74,14 @@ def to_bytes(
         logger.info(f"DEBUG: Compressing tensor with qsparse8_v1 - size: {tensor_size_bytes} bytes, shape: {tensor.shape}")
 
         try:
-            # Quantize to 8-bit
-            quantized, scales, biases = mx.quantize(tensor, bits=8, group_size=64, mode="affine")
-
-            logger.info(f"DEBUG: MLX quantize output - quantized: {quantized.shape}, scales: {scales.shape}, biases: {biases.shape}")
-
-            # Reshape to 2D: compression expects (R, D) format, not (batch, seq, hidden)
-            # mx.quantize preserves input dims but compress_tensor_to_protobuf_data needs flattened 2D
+            # Use unpacked 8-bit quantization (mx.quantize packs into uint32 which breaks compression)
             D = tensor.shape[-1]
             R = tensor.size // D
-            G = scales.size // R
+            G = D // 64
+            
+            quantized_2d, scales_2d, biases_2d = _quantize_8bit_unpacked(tensor, group_size=64)
 
-            quantized_2d = quantized.reshape(R, D)
-            scales_2d = scales.reshape(R, G)
-            biases_2d = biases.reshape(R, G)
-
-            logger.info(f"DEBUG: Reshaped for compression - R={R}, D={D}, G={G}, quantized: {quantized_2d.shape}, scales: {scales_2d.shape}")
+            logger.info(f"DEBUG: Quantized (unpacked) - R={R}, D={D}, G={G}, quantized: {quantized_2d.shape}, scales: {scales_2d.shape}")
 
             # Prepare quantization parameters
             quant_params = {
