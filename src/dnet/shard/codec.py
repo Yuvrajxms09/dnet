@@ -123,6 +123,8 @@ class ActivationCodec:
         compress_enabled = getattr(transport_config, 'compress', True)
         compress_min = getattr(transport_config, 'compress_min_bytes', 65536)
 
+        print(f"DEBUG: Codec compression settings - enabled: {compress_enabled}, min_bytes: {compress_min}, tensor_shape: {shaped.shape}")
+
         result = to_bytes(
             shaped,
             wire_dtype_str=self.runtime._wire_dtype_str,
