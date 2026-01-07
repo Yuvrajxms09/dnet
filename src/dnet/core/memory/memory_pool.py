@@ -317,6 +317,11 @@ class LayerAwareMemoryPool:
             logger.debug(
                 f"Allocated buffer {buffer_id} for layer {layer_id}, shape {shape}"
             )
+            # Issue-73: Log pool allocation for memory analysis
+            logger.info(f"[POOL_ALLOC] layer={layer_id}, shape={shape}, "
+                       f"size_mb={size_bytes/1024/1024:.1f}, "
+                       f"pool_used_mb={self.pool.used_memory/1024/1024:.1f}, "
+                       f"pool_total_mb={self.pool.total_memory_bytes/1024/1024:.1f}")
 
         return buffer_id
 
@@ -356,6 +361,12 @@ class LayerAwareMemoryPool:
         Args:
             buffer_id: Buffer identifier
         """
+        # Issue-73: Log pool release for memory analysis
+        if buffer_id in self.pool.buffer_info:
+            buffer_size = self.pool.buffer_info[buffer_id].size
+            logger.info(f"[POOL_FREE] buffer={buffer_id}, freed_mb={buffer_size/1024/1024:.1f}, "
+                       f"pool_used_mb={self.pool.used_memory/1024/1024:.1f}")
+
         self.pool.release(buffer_id)
 
     def get_buffer(self, buffer_id: int) -> Optional[mx.array]:

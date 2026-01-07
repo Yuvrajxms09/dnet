@@ -281,10 +281,18 @@ def load_embeddings(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
             if "weight" in embed_keys:
                 wt = model_metadata.embed_tokens["weight"]
                 weights[get_model_embed_tokens_name("weight")] = load_weight(
-                    wt, mapped_files
-                )
+                        wt, mapped_files
+                    )
         if weights:
             model.load_weights(list(weights.items()), strict=False)
+
+            # Issue-73: Log embedding memory usage for H2 analysis
+            total_embed_mb = sum(tensor.size * tensor.dtype.size for tensor in weights.values()) / (1024 * 1024)
+            logger.info(f"[EMBED_LOAD] loaded_tensors={len(weights)}, "
+                       f"total_mb={total_embed_mb:.1f}, "
+                       f"quantized={has_quant}, "
+                       f"keys={list(weights.keys())}")
+
         return len(weights)
     finally:
         for mapped_file in mapped_files.values():
@@ -355,6 +363,14 @@ def load_lm_head(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
 
         if weights:
             model.load_weights(list(weights.items()), strict=False)
+
+            # Issue-73: Log LM head memory usage for H2 analysis
+            total_lm_mb = sum(tensor.size * tensor.dtype.size for tensor in weights.values()) / (1024 * 1024)
+            logger.info(f"[LM_HEAD_LOAD] loaded_tensors={len(weights)}, "
+                       f"total_mb={total_lm_mb:.1f}, "
+                       f"quantized={has_quant_head}, "
+                       f"keys={list(weights.keys())}")
+
         return len(weights)
     finally:
         for mapped_file in mapped_files.values():

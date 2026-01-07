@@ -440,6 +440,13 @@ class ShardRuntime:
                 kv_group=self.kv_cache_config.group_size,
             )
             self._kv_by_nonce[nonce] = kv
+
+            # Issue-73: Log KV cache creation for memory analysis
+            num_layers = len(self.assigned_layers) if self.assigned_layers else 0
+            kv_mb = len(self._kv_by_nonce) * num_layers * 128 * (self.kv_cache_config.bits // 8) / (1024 * 1024)
+            logger.info(f"[KV_CREATE] nonce={nonce}, mode={self.kv_cache_config.mode}, "
+                       f"bits={self.kv_cache_config.bits}, layers={num_layers}, "
+                       f"estimated_kv_mb={kv_mb:.1f}, total_active_nonces={len(self._kv_by_nonce)}")
         self._kv_last_seen[nonce] = time.perf_counter()
         return kv
 
