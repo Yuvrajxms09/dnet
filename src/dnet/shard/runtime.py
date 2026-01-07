@@ -382,7 +382,7 @@ class ShardRuntime:
 
             # KV cache memory (estimate)
             kv_mb = 0
-            if self.kv_cache_config and self.kv_cache_config.enabled and self._kv_by_nonce:
+            if self.kv_cache_config and self.kv_cache_config.mode and self._kv_by_nonce:
                 # Rough estimate: assume 2 bytes per token per layer per head
                 num_layers = len(self.model.layer_ids) if self.model else 0
                 kv_mb = len(self._kv_by_nonce) * num_layers * 128 * 2 / (1024 * 1024)

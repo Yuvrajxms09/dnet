@@ -281,8 +281,8 @@ def load_embeddings(model_metadata: ModelMetadata, model: BaseRingModel) -> int:
             if "weight" in embed_keys:
                 wt = model_metadata.embed_tokens["weight"]
                 weights[get_model_embed_tokens_name("weight")] = load_weight(
-                        wt, mapped_files
-                    )
+                    wt, mapped_files
+                )
         if weights:
             model.load_weights(list(weights.items()), strict=False)
 
