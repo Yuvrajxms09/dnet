@@ -126,7 +126,7 @@ class TransportSettings(BaseSettings):
         description="Number of send retries",
     )
     compress: bool = Field(
-        default=False,  # Enable compression by default for issue-73 testing
+        default=True,  # Enable compression by default for issue-73 testing
         description="Enable compression",
     )
     compress_min_bytes: int = Field(
