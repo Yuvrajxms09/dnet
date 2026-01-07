@@ -52,10 +52,24 @@ def to_bytes(
             # Quantize to 8-bit
             quantized, scales, biases = mx.quantize(tensor, bits=8, group_size=64, mode="affine")
 
+            logger.info(f"DEBUG: MLX quantize output - quantized: {quantized.shape}, scales: {scales.shape}, biases: {biases.shape}")
+
+            # Reshape to 2D: compression expects (R, D) format, not (batch, seq, hidden)
+            # mx.quantize preserves input dims but compress_tensor_to_protobuf_data needs flattened 2D
+            D = tensor.shape[-1]
+            R = tensor.size // D
+            G = scales.size // R
+
+            quantized_2d = quantized.reshape(R, D)
+            scales_2d = scales.reshape(R, G)
+            biases_2d = biases.reshape(R, G)
+
+            logger.info(f"DEBUG: Reshaped for compression - R={R}, D={D}, G={G}, quantized: {quantized_2d.shape}, scales: {scales_2d.shape}")
+
             # Prepare quantization parameters
             quant_params = {
-                "scales": scales,
-                "biases": biases,
+                "scales": scales_2d,
+                "biases": biases_2d,
                 "group_size": 64,
                 "bits": 8,
                 "mode": "affine"
@@ -63,7 +77,7 @@ def to_bytes(
 
             # Compress with qsparse8_v1 (90% sparsity)
             compressed_bytes, shape, metadata = compress_tensor_to_protobuf_data(
-                quantized,
+                quantized_2d,
                 compression_percentage=90.0,
                 quant=quant_params
             )
