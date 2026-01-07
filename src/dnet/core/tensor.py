@@ -42,8 +42,8 @@ def to_bytes(
 
     # Check if we should compress
     tensor_size_bytes = tensor.size * tensor.dtype.size
-    should_compress = compress and tensor_size_bytes >= compress_min_bytes
-    logger.info(f"DEBUG: to_bytes - size: {tensor_size_bytes} bytes, compress: {compress}, threshold: {compress_min_bytes}, should_compress: {should_compress}")
+    should_compress = compress  # E1: Remove threshold so compression always triggers when enabled
+    logger.info(f"DEBUG: to_bytes - size: {tensor_size_bytes} bytes, compress: {compress}, should_compress: {should_compress}")
 
     if should_compress:
         logger.info(f"DEBUG: Compressing tensor with qsparse8_v1 - size: {tensor_size_bytes} bytes, shape: {tensor.shape}")
