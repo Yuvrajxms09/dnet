@@ -11,6 +11,7 @@ import queue
 from typing import Optional
 import asyncio
 import time
+import numpy as np
 from ..models import ShardLoadModelRequest
 from dnet_p2p import (
     AsyncDnetP2P,
@@ -273,6 +274,22 @@ class RingAdapter(TopologyAdapter):
             return
         msg.dtype = dtype_str  # Use the dtype returned by serialize (may be compressed metadata)
         print(f"DEBUG: Sending activation - nonce: {msg.nonce}, compressed: {'|' in dtype_str}, dtype: {dtype_str[:50]}...")
+
+        # Log communication budget for E1 bytes/token analysis
+        try:
+            # Calculate tensor size using actual wire dtype (not assuming fp16)
+            wire_dtype_bytes = self.runtime._wire_mx_dtype.size
+            tensor_bytes = int(np.prod(msg.shape)) * wire_dtype_bytes
+            compressed_bytes = len(data)
+            compression_ratio = tensor_bytes / compressed_bytes if compressed_bytes > 0 else 1.0
+
+            logger.info(f"[COMM_BUDGET] nonce={msg.nonce}, shard={self.runtime.shard_id}, "
+                       f"layer={msg.layer_id}, shape={msg.shape}, "
+                       f"tensor_bytes={tensor_bytes}, compressed_bytes={compressed_bytes}, "
+                       f"bytes_per_token={compressed_bytes}, compression_ratio={compression_ratio:.2f}, "
+                       f"compressed={'|' in dtype_str}, wire_dtype={self.runtime._wire_dtype_str}, dtype={dtype_str}")
+        except Exception as e:
+            logger.debug(f"COMM_BUDGET logging failed: {e}")
         request = msg.to_proto(data)
         request.timestamp = int(time.time() * 1000)
 

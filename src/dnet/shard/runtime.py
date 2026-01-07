@@ -369,6 +369,8 @@ class ShardRuntime:
     def _log_memory_snapshot(self, nonce: str) -> None:
         """Log detailed memory breakdown for issue-73 stage-wise analysis."""
         try:
+            logger.info(f"DEBUG: Starting memory snapshot for nonce={nonce}")
+
             # Model weights memory
             weights_mb = 0
             if self.model and hasattr(self.model, 'weight_info'):
@@ -376,26 +378,36 @@ class ShardRuntime:
                     for tensor in layer_tensors.values():
                         weights_mb += tensor.size_bytes
                 weights_mb /= (1024 * 1024)  # Convert to MB
+                logger.info(f"DEBUG: Calculated weights_mb={weights_mb:.1f}")
 
             # KV cache memory (estimate)
             kv_mb = 0
-            if self.kv_cache_config.enabled and self._kv_by_nonce:
+            if self.kv_cache_config and self.kv_cache_config.enabled and self._kv_by_nonce:
                 # Rough estimate: assume 2 bytes per token per layer per head
                 num_layers = len(self.model.layer_ids) if self.model else 0
                 kv_mb = len(self._kv_by_nonce) * num_layers * 128 * 2 / (1024 * 1024)
+                logger.info(f"DEBUG: Calculated kv_mb={kv_mb:.1f}")
 
             # Pool memory
             pool_mb = self.input_pool_mb + self.output_pool_mb
+            logger.info(f"DEBUG: Pool memory: input={self.input_pool_mb}MB, output={self.output_pool_mb}MB, total={pool_mb}MB")
 
             # Total estimate
             total_mb = weights_mb + kv_mb + pool_mb
 
-            logger.info(f"[MEMORY_SNAPSHOT] shard={self.shard_id}, nonce={nonce}, "
+            # Ensure shard_id is not None
+            shard_id = self.shard_id or "unknown"
+
+            logger.info(f"[MEMORY_SNAPSHOT] shard={shard_id}, nonce={nonce}, "
                        f"weights={weights_mb:.1f}MB, kv={kv_mb:.1f}MB, pools={pool_mb:.1f}MB, "
                        f"total={total_mb:.1f}MB")
 
+            logger.info(f"DEBUG: Memory snapshot completed successfully")
+
         except Exception as e:
-            logger.debug(f"Memory snapshot logging failed: {e}")
+            logger.error(f"Memory snapshot logging failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _compute_worker(self) -> None:
         while self.running:

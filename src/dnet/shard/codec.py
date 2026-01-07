@@ -119,12 +119,16 @@ class ActivationCodec:
             data_size = int(np.prod(msg.shape))
             shaped = output_buffer[:data_size].reshape(msg.shape)
 
+        # Use transport config settings for E1 compression control
+        compress_enabled = getattr(transport_config, 'compress', True)
+        compress_min = getattr(transport_config, 'compress_min_bytes', 65536)
+
         result = to_bytes(
             shaped,
             wire_dtype_str=self.runtime._wire_dtype_str,
             wire_mx_dtype=self.runtime._wire_mx_dtype,
-            compress=True,  # Force compression for testing on single shard
-            compress_min_bytes=1024,  # Lower threshold for testing
+            compress=compress_enabled,
+            compress_min_bytes=compress_min,
         )
 
         # Handle both compressed (tuple) and uncompressed (bytes) returns
