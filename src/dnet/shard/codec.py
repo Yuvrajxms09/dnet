@@ -110,7 +110,7 @@ class ActivationCodec:
         """
         Reads from output pool/tensor, compresses, and returns bytes + dtype metadata.
         """
-        print(f"DEBUG: Codec serialize called for msg nonce={msg.nonce}, layer={msg.layer_id}")
+        logger.info(f"DEBUG: Codec serialize called for msg nonce={msg.nonce}, layer={msg.layer_id}")
         shaped = msg.tensor
         if shaped is None:
             if self.runtime.output_pool is None:
@@ -123,7 +123,7 @@ class ActivationCodec:
         compress_enabled = getattr(transport_config, 'compress', True)
         compress_min = getattr(transport_config, 'compress_min_bytes', 65536)
 
-        print(f"DEBUG: Codec compression settings - enabled: {compress_enabled}, min_bytes: {compress_min}, tensor_shape: {shaped.shape}")
+        logger.info(f"DEBUG: Codec compression settings - enabled: {compress_enabled}, min_bytes: {compress_min}, tensor_shape: {shaped.shape}")
 
         result = to_bytes(
             shaped,
@@ -144,5 +144,5 @@ class ActivationCodec:
 
         # Clean up reference immediately to assist GC
         msg.tensor = None
-        print(f"DEBUG: Serialized tensor - compressed: {compressed}, dtype: {dtype_str[:50]}...")
+        logger.info(f"DEBUG: Serialized tensor - compressed: {compressed}, dtype: {dtype_str[:50]}...")
         return data, dtype_str

@@ -273,7 +273,7 @@ class RingAdapter(TopologyAdapter):
             logger.error("Serialization failed for nonce %s: %s", msg.nonce, e)
             return
         msg.dtype = dtype_str  # Use the dtype returned by serialize (may be compressed metadata)
-        print(f"DEBUG: Sending activation - nonce: {msg.nonce}, compressed: {'|' in dtype_str}, dtype: {dtype_str[:50]}...")
+        logger.info(f"DEBUG: Sending activation - nonce: {msg.nonce}, compressed: {'|' in dtype_str}, dtype: {dtype_str[:50]}...")
 
         # Log communication budget for E1 bytes/token analysis
         try:

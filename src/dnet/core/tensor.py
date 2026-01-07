@@ -1,5 +1,6 @@
 import numpy as np
 import mlx.core as mx
+from dnet.utils.logger import logger
 from dnet.utils.serialization import dtype_map, tensor_to_bytes
 
 
@@ -42,10 +43,10 @@ def to_bytes(
     # Check if we should compress
     tensor_size_bytes = tensor.size * tensor.dtype.size
     should_compress = compress and tensor_size_bytes >= compress_min_bytes
-    print(f"DEBUG: to_bytes - size: {tensor_size_bytes} bytes, compress: {compress}, threshold: {compress_min_bytes}, should_compress: {should_compress}")
+    logger.info(f"DEBUG: to_bytes - size: {tensor_size_bytes} bytes, compress: {compress}, threshold: {compress_min_bytes}, should_compress: {should_compress}")
 
     if should_compress:
-        print(f"DEBUG: Compressing tensor with qsparse8_v1 - size: {tensor_size_bytes} bytes, shape: {tensor.shape}")
+        logger.info(f"DEBUG: Compressing tensor with qsparse8_v1 - size: {tensor_size_bytes} bytes, shape: {tensor.shape}")
 
         try:
             # Quantize to 8-bit
@@ -68,12 +69,12 @@ def to_bytes(
             )
 
             compression_ratio = tensor_size_bytes / len(compressed_bytes)
-            print(f"DEBUG: Compression successful - ratio: {compression_ratio:.2f}x, metadata: {metadata}")
+            logger.info(f"DEBUG: Compression successful - ratio: {compression_ratio:.2f}x, metadata: {metadata}")
 
             return compressed_bytes, metadata
 
         except Exception as e:
-            print(f"DEBUG: Compression failed: {e}, falling back to uncompressed")
+            logger.warning(f"DEBUG: Compression failed: {e}, falling back to uncompressed")
             should_compress = False
 
     # Normal uncompressed path - return just bytes for backward compatibility
@@ -82,5 +83,5 @@ def to_bytes(
     else:
         data = tensor_to_bytes(tensor)
 
-    print(f"DEBUG: Using uncompressed tensor - size: {len(data)} bytes, compress={compress}, size_bytes={tensor_size_bytes}")
+    logger.info(f"DEBUG: Using uncompressed tensor - size: {len(data)} bytes, compress={compress}, size_bytes={tensor_size_bytes}")
     return data
