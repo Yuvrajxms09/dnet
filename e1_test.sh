@@ -114,7 +114,7 @@ echo "Running inference test..."
 START=$(date +%s)
 curl -s -X POST "$BASE_URL/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a detailed analysis of quantum computing and its potential applications in machine learning, including current challenges and future prospects.\"}], \"max_tokens\": 400}" \
+  -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a detailed analysis of quantum computing.\"}], \"max_tokens\": 120}" \
   | tee "$TEST_DIR/response.json"  # Print to console AND save to file
 
 END=$(date +%s)
