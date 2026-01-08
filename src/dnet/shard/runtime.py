@@ -377,8 +377,8 @@ class ShardRuntime:
                 for abs_layer_idx in self.assigned_layers:  # Only assigned layers
                     if abs_layer_idx in self.model_metadata.weight_info:
                         layer_tensors = self.model_metadata.weight_info[abs_layer_idx]
-                        for tensor_info in layer_tensors.values():
-                            weights_mb += tensor_info.size_bytes
+                    for tensor_info in layer_tensors.values():
+                        weights_mb += tensor_info.size_bytes
                 weights_mb /= (1024 * 1024)  # Convert to MB
                 logger.info(f"DEBUG: Calculated weights_mb={weights_mb:.1f} for {len(self.assigned_layers)} assigned layers")
 

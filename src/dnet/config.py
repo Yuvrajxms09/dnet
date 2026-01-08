@@ -267,7 +267,14 @@ class DnetSettings(BaseSettings):
 @lru_cache
 def get_settings() -> DnetSettings:
     """Get cached settings instance."""
-    return DnetSettings()
+    settings = DnetSettings()
+
+    # Log pool sizes for E2 testing (issue-73)
+    from dnet.utils.logger import logger
+    logger.info(f"Config loaded: input_pool_mb={settings.compute.input_pool_mb}, "
+               f"output_pool_mb={settings.compute.output_pool_mb}")
+
+    return settings
 
 
 # Export all settings classes for introspection (used by generate_env_example.py)
