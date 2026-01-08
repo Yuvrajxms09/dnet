@@ -91,11 +91,11 @@ class ComputeSettings(BaseSettings):
         description="Use mlx fast load path",
     )
     input_pool_mb: int = Field(
-        default=512,
+        default=128,
         description="Input memory pool MB",
     )
     output_pool_mb: int = Field(
-        default=512,
+        default=128,
         description="Output memory pool MB",
     )
 
