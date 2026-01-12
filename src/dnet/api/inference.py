@@ -107,19 +107,15 @@ class InferenceManager:
                 # Convert messages to dict format
                 message_dicts = []
 
-                # Check if we should use structured output for tools
+                # Use bound tools (LangChain approach) or request tools (backward compatibility)
                 available_tools = self._bound_tools or req.tools or []
-                use_structured_tools = bool(available_tools) and not req.structured_outputs
-
-                if use_structured_tools:
-                    # Structured output will handle tools - no need for text prompt
-                    logger.debug(f"🛠️ Using structured output for {len(available_tools)} tools")
-                elif available_tools:
-                    # Fallback to text-based tool prompting
-                    logger.debug(f"🛠️ Using text-based tool prompting for {len(available_tools)} tools")
-                    tool_system_msg = self._create_langchain_tool_prompt(available_tools)
+                logger.debug(f"🛠️ Tool check: bound_tools={len(self._bound_tools)}, req_tools={len(req.tools) if req.tools else 0}, available={len(available_tools)}")
+                if available_tools:
+                    tool_system_msg = self._create_langchain_tool_prompt(
+                        available_tools
+                    )
                     message_dicts.append({"role": "system", "content": tool_system_msg})
-
+                    
                 for m in req.messages:
                     msg_dict = {"role": m.role, "content": m.content or ""}
                     message_dicts.append(msg_dict)
@@ -135,27 +131,18 @@ class InferenceManager:
                 )
         except Exception as e:
             logger.warning(f"⚠️ Failed to apply chat template: {e}, using fallback")
+            prompt_parts = []
 
-            # Check if we should use structured output for tools
-            available_tools = self._bound_tools or req.tools or []
-            use_structured_tools = bool(available_tools) and not req.structured_outputs
+            # Add tool system message if tools are provided (LangChain-style)
+            if req.tools:
+                logger.debug("📝 Adding tools to fallback prompt")
+                tool_system_msg = self._create_langchain_tool_prompt(req.tools)
+                prompt_parts.append(f"System: {tool_system_msg}")
 
-            if use_structured_tools:
-                # Structured output will handle tools - simple fallback
-                prompt_text = "\n".join(m.content or "" for m in req.messages) + "\nAssistant:"
-                logger.debug(f"📝 Structured fallback prompt created, length: {len(prompt_text)}")
-            else:
-                # Fallback with tool prompting if needed
-                prompt_parts = []
-                if available_tools:
-                    logger.debug("📝 Adding tools to fallback prompt")
-                    tool_system_msg = self._create_langchain_tool_prompt(available_tools)
-                    prompt_parts.append(f"System: {tool_system_msg}")
-
-                prompt_parts.extend(m.content or "" for m in req.messages)
-                prompt_parts.append("Assistant:")
-                prompt_text = "\n".join(prompt_parts)
-                logger.debug(f"📝 Fallback prompt created, length: {len(prompt_text)}")
+            prompt_parts.extend(m.content or "" for m in req.messages)
+            prompt_parts.append("Assistant:")
+            prompt_text = "\n".join(prompt_parts)
+            logger.debug(f"📝 Fallback prompt created, length: {len(prompt_text)}")
 
         logger.debug("🔢 Encoding prompt to tokens...")
         prompt_tokens = tokenizer.encode(prompt_text)
@@ -173,21 +160,6 @@ class InferenceManager:
         if req.response_format and req.response_format.get("type") == "json_schema":
             json_schema = req.response_format["json_schema"]["schema"]
             req.structured_outputs = StructuredOutputsParams(json=json_schema)
-
-        # Check if we should use structured output for tool calls
-        available_tools = self._bound_tools or req.tools or []
-        use_structured_tools = bool(available_tools) and not req.structured_outputs
-
-        if use_structured_tools:
-            # Create structured output schema for tool calls
-            tool_names = []
-            for tool in available_tools:
-                if tool.get("type") == "function" and "function" in tool:
-                    tool_names.append(tool["function"]["name"])
-
-            tool_call_schema = self._create_tool_call_schema(tool_names)
-            req.structured_outputs = StructuredOutputsParams(json=tool_call_schema)
-            logger.debug(f"🔧 Using structured output for tool calls with schema: {tool_names}")
 
         # Get grammar JSON schema for structured output
         grammar_json_schema = None
@@ -366,60 +338,34 @@ class InferenceManager:
                 ),
             }
 
-        # Process tool calls from structured output (no parsing needed!)
-        logger.debug(f"🔍 Processing tool calls from structured output")
+        # Parse tool calls if tools were available
+        logger.debug(f"🔍 Starting tool call processing for final text")
         tool_calls = None
         final_content = final_text
         available_tools = self._bound_tools or req.tools or []
+        logger.debug(f"🛠️ Tool availability: bound={len(self._bound_tools)}, req={len(req.tools) if req.tools else 0}, available={len(available_tools)}")
 
-        if available_tools and req.structured_outputs:
-            logger.info(f"🛠️ Tools available with structured output, checking for tool calls")
-            try:
-                # Parse the structured output directly (no text parsing!)
-                structured_output = json.loads(final_text.strip())
-                logger.debug(f"📋 Structured output: {structured_output}")
-
-                if structured_output.get("response_type") == "tool_calls":
-                    tool_calls_data = structured_output.get("tool_calls", [])
-                    if tool_calls_data:
-                        logger.info(f"✅ Found {len(tool_calls_data)} tool calls in structured output")
-                        # Convert structured data directly to ToolCall objects
-                        tool_calls = []
-                        for call_data in tool_calls_data:
-                            tool_call = ToolCall(
-                                name=call_data["name"],
-                                args=call_data["arguments"],
-                                id=call_data.get("id", f"call_{uuid.uuid4().hex[:8]}")
-                            )
-                            tool_calls.append(tool_call)
-
-                        final_content = structured_output.get("reasoning", "Using tools...")
-                        logger.debug(f"📝 Tool calls: {[tc.name for tc in tool_calls]}")
-
-                elif structured_output.get("response_type") == "text_response":
-                    logger.debug("📝 Structured output indicates direct text response")
-                    final_content = structured_output["text_response"]
-
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ Failed to parse structured output as JSON: {e}")
-                logger.debug(f"   Raw output: {final_text[:500]}")
-                final_content = final_text
-            except Exception as e:
-                logger.error(f"❌ Failed to process structured tool output: {e}")
-                final_content = final_text
-        elif available_tools:
-            # Fallback to text parsing for backward compatibility
-            logger.warning("⚠️ Tools available but no structured output - falling back to text parsing")
+        if available_tools:
+            logger.info(f"🛠️ Tools available ({len(available_tools)}), attempting to parse tool calls")
             try:
                 parsed_calls = self._parse_tool_calls_langchain_style(final_text)
+                logger.debug(f"🔍 Parse result: {len(parsed_calls) if parsed_calls else 0} tool calls")
                 if parsed_calls:
+                    logger.info(f"✅ Found {len(parsed_calls)} tool calls in response")
+                    # Convert parsed dicts to ToolCall objects
                     tool_calls = self._convert_to_tool_call_objects(parsed_calls)
                     final_content = self._format_tool_call_response(final_text, tool_calls)
+                    logger.debug(f"📝 Formatted response content (tool calls present)")
+                    logger.debug(f"📋 Tool calls: {[tc.name for tc in tool_calls] if tool_calls else []}")
+                else:
+                    logger.debug("📝 No tool calls found, using original content")
+                    final_content = final_text
             except Exception as e:
-                logger.error(f"❌ Fallback tool parsing failed: {e}")
+                logger.error(f"❌ Tool parsing failed: {e}")
+                logger.debug("Tool parsing error details:", exc_info=True)
                 final_content = final_text
         else:
-            logger.debug("📝 No tools available, using direct response")
+            logger.debug("📝 No tools available, skipping tool parsing")
 
         logger.debug("📝 Creating final message and chunk")
         final_message = ChatMessage(
@@ -497,48 +443,27 @@ class InferenceManager:
             if chunk.usage:
                 usage = chunk.usage
 
-        # Process structured output for tool calls or regular responses
-        tool_calls = None
-        final_content = full_content
-        available_tools = self._bound_tools or req.tools or []
-
+        # Clean up structured output responses - remove end tokens
         if req.structured_outputs and req.structured_outputs.json:
-            # Clean up structured output responses - remove end tokens
             full_content = full_content.strip()
             for token in ["<|im_end|>", "<|endoftext|>", "</s>"]:
                 if token in full_content:
                     full_content = full_content.split(token)[0].strip()
 
-            try:
-                structured_output = json.loads(full_content)
-                logger.debug(f"📋 Structured output in chat_completions: {structured_output}")
-
-                if available_tools and structured_output.get("response_type") == "tool_calls":
-                    tool_calls_data = structured_output.get("tool_calls", [])
-                    if tool_calls_data:
-                        tool_calls = []
-                        for call_data in tool_calls_data:
-                            tool_call = ToolCall(
-                                name=call_data["name"],
-                                args=call_data["arguments"],
-                                id=call_data.get("id", f"call_{uuid.uuid4().hex[:8]}")
-                            )
-                            tool_calls.append(tool_call)
-                        final_content = structured_output.get("reasoning", "Using tools...")
-
-                elif structured_output.get("response_type") == "text_response":
-                    final_content = structured_output["text_response"]
-
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ Failed to parse structured output in chat_completions: {e}")
-                final_content = full_content
-        elif available_tools:
-            # Fallback to text parsing for backward compatibility
-            logger.warning("⚠️ Tools available but no structured output - falling back to text parsing")
+        # Parse tool calls if tools were available (LangChain-style, no grammar)
+        tool_calls = None
+        final_content = full_content
+        available_tools = self._bound_tools or req.tools or []
+        if available_tools:
             parsed_calls = self._parse_tool_calls_langchain_style(full_content)
             if parsed_calls:
+                # Convert parsed dicts to ToolCall objects
                 tool_calls = self._convert_to_tool_call_objects(parsed_calls)
-                final_content = self._format_tool_call_response(full_content, tool_calls)
+                final_content = self._format_tool_call_response(
+                    full_content, tool_calls
+                )
+            else:
+                final_content = full_content
 
         return ChatResponseModel(
             id=nonce,
@@ -637,61 +562,6 @@ class InferenceManager:
         return registry
 
 
-
-    def _create_tool_call_schema(self, tool_names: List[str]) -> Dict[str, Any]:
-        """Create JSON schema for structured tool call output (eliminates text parsing)."""
-        return {
-            "type": "object",
-            "properties": {
-                "response_type": {
-                    "type": "string",
-                    "enum": ["tool_calls", "text_response"],
-                    "description": "Whether this response contains tool calls or direct text"
-                },
-                "tool_calls": {
-                    "type": "array",
-                    "description": "Tool calls to execute",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {
-                                "type": "string",
-                                "enum": tool_names,
-                                "description": "Name of the tool to call"
-                            },
-                            "arguments": {
-                                "type": "object",
-                                "description": "Arguments for the tool call"
-                            },
-                            "id": {
-                                "type": "string",
-                                "description": "Unique identifier for this tool call"
-                            }
-                        },
-                        "required": ["name", "arguments"]
-                    }
-                },
-                "text_response": {
-                    "type": "string",
-                    "description": "Direct text response when no tools are needed"
-                },
-                "reasoning": {
-                    "type": "string",
-                    "description": "Optional reasoning about the decision"
-                }
-            },
-            "required": ["response_type"],
-            "allOf": [
-                {
-                    "if": {"properties": {"response_type": {"const": "tool_calls"}}},
-                    "then": {"required": ["tool_calls"]}
-                },
-                {
-                    "if": {"properties": {"response_type": {"const": "text_response"}}},
-                    "then": {"required": ["text_response"]}
-                }
-            ]
-        }
 
     def _create_langchain_tool_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """Create LangChain-style tool prompt (no grammar constraints, just instructions)."""
@@ -1212,35 +1082,6 @@ Important: Only output JSON when you actually want to call tools. For normal res
         Called by gRPC servicer when a token is received from a shard.
         """
         self.adapter.resolve_token(nonce, result)
-
-    async def generate_with_structured_tools(self, req: ChatRequestModel) -> ChatResponseModel:
-        """
-        Generate response using structured output for tool calls (experimental).
-
-        This method forces structured output for tool calls, eliminating text parsing.
-        Use this to test the grammar-based tool call approach.
-        """
-        if not req.tools and not self._bound_tools:
-            # No tools, just do normal generation
-            return await self.chat_completions(req)
-
-        # Force structured output for tools
-        original_structured = req.structured_outputs
-        try:
-            available_tools = self._bound_tools or req.tools or []
-            tool_names = []
-            for tool in available_tools:
-                if tool.get("type") == "function" and "function" in tool:
-                    tool_names.append(tool["function"]["name"])
-
-            tool_call_schema = self._create_tool_call_schema(tool_names)
-            req.structured_outputs = StructuredOutputsParams(json=tool_call_schema)
-
-            logger.info(f"🔧 Using structured tool output for tools: {tool_names}")
-            return await self.chat_completions(req)
-
-        finally:
-            req.structured_outputs = original_structured
 
 
 class StructuredOutputInferenceManager:
